@@ -3,7 +3,7 @@
 //! Apps launched from Finder or the Dock inherit launchd's minimal `PATH` and
 //! none of the variables exported in shell profiles, such as provider API
 //! keys. [`init`] captures the login shell's environment once at startup and
-//! resolves `pi` and `oxfmt` against it. pi and oxfmt are spawned through
+//! resolves `pi` against it. Commands are spawned through
 //! [`ShellEnv::command`] so they see that environment.
 
 mod capture;
@@ -30,7 +30,6 @@ pub struct ShellEnv {
     /// (with common install directories added to `PATH`) is used instead.
     capture_error: Option<String>,
     pi: Option<PathBuf>,
-    oxfmt: Option<PathBuf>,
 }
 
 /// pi wasn't found. Its `Display` is a message for the user.
@@ -74,7 +73,6 @@ impl ShellEnv {
         let path = capture::get(&vars, "PATH").map(OsString::as_os_str);
         Self {
             pi: find_executable("pi", path),
-            oxfmt: find_executable("oxfmt", path),
             vars,
             capture_error,
         }
@@ -85,11 +83,6 @@ impl ShellEnv {
         self.pi.as_deref().ok_or_else(|| PiMissing {
             capture_error: self.capture_error.clone(),
         })
-    }
-
-    /// The oxfmt executable. Format is hidden when this is `None`.
-    pub fn oxfmt(&self) -> Option<&Path> {
-        self.oxfmt.as_deref()
     }
 
     /// A command for `program` with exactly the captured environment. Callers
@@ -123,7 +116,6 @@ impl fmt::Debug for ShellEnv {
             )
             .field("capture_error", &self.capture_error)
             .field("pi", &self.pi)
-            .field("oxfmt", &self.oxfmt)
             .finish()
     }
 }
@@ -162,10 +154,9 @@ fn log_summary(env: &ShellEnv, started: Instant) {
             .map_or("missing".to_string(), |p| p.display().to_string())
     };
     eprintln!(
-        "shell-env: {source} in {} ms; pi: {}; oxfmt: {}",
+        "shell-env: {source} in {} ms; pi: {}",
         started.elapsed().as_millis(),
         tool(&env.pi),
-        tool(&env.oxfmt),
     );
 }
 

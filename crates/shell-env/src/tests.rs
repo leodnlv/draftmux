@@ -196,7 +196,6 @@ fn zsh_login_env_reaches_spawned_tools() {
     let env = capture("/bin/zsh", base, TIMEOUT);
     assert_eq!(env.capture_error, None);
     assert_eq!(env.pi().unwrap(), bin.join("pi"));
-    assert_eq!(env.oxfmt(), None);
 
     let output = env.command(env.pi().unwrap()).output().unwrap();
     assert_eq!(

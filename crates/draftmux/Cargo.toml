@@ -34,6 +34,7 @@ tempfile = "3.27.0"
 ignored = ["comrak"]
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 comrak = { version = "0.59", default-features = false }
 
 [features]

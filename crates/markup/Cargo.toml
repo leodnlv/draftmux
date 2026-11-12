@@ -9,6 +9,8 @@ license.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 serde_yaml_ng = "0.10"
 comrak = { version = "0.59", default-features = false }
+unicode-width = "0.2.3"
 
 [dev-dependencies]
 insta = "1.49"
+pulldown-cmark = { version = "0.13.6", default-features = false }

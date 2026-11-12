@@ -65,8 +65,8 @@ The agent features run [pi](https://github.com/earendil-works/pi):
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-Without pi, editing, previews and copying still work. If [oxfmt](https://oxc.rs)
-is installed, Draftmux uses it to format GitHub and rich-text drafts.
+Without pi, editing, formatting, previews and copying still work. Markdown
+formatting is built in for GitHub and rich-text drafts.
 
 ## Quick start
 

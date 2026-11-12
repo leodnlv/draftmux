@@ -645,6 +645,27 @@ mod tests {
     }
 
     #[test]
+    fn markdown_format_is_one_atomic_undo_step_between_typing_runs() {
+        let mut b = Buffer::new("");
+        type_str(&mut b, "* one\n* two\n");
+        let input = b.text().to_owned();
+        let formatted = markup::format::format(&input, markup::format::Wrap::Keep);
+        b.select_range(2..5, false);
+        b.replace_all(&formatted);
+        assert_eq!(b.selection().range(), 0..0);
+        b.set_selection(Selection::caret(b.len()));
+        type_str(&mut b, "tail");
+        assert!(b.undo());
+        assert_eq!(b.text(), formatted);
+        assert!(b.undo());
+        assert_eq!(b.text(), input);
+        assert!(b.redo());
+        assert_eq!(b.text(), formatted);
+        assert!(b.redo());
+        assert_eq!(b.text(), format!("{formatted}tail"));
+    }
+
+    #[test]
     fn replace_all_keeps_selection_outside_the_change() {
         let mut b = Buffer::new("first\nsecond\nthird");
         b.select_range(0..5, false);

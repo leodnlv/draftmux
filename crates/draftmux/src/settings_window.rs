@@ -1622,13 +1622,6 @@ impl SettingsWindow {
                         .and_then(|env| env.pi().ok().map(Path::to_owned)),
                     "found through your login shell",
                 ),
-                tool(
-                    "oxfmt",
-                    shell
-                        .as_ref()
-                        .and_then(|env| env.oxfmt().map(Path::to_owned)),
-                    editor::by_platform!("used by Format (⌘⇧F)", "used by Format (Ctrl+Shift+F)"),
-                ),
             ])
             .into_any_element(),
             group_title(c, "pi profiles")

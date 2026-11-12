@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Format no longer needs oxfmt. Markdown formatting is built in for GitHub
+  and rich-text drafts; code inside fenced blocks is left unchanged.
 - Undo and redo (`⌘Z`/`⌘⇧Z`, `Ctrl+Z`/`Ctrl+Shift+Z` on Linux) now reach the
   draft from anywhere in the window, so an agent's change can be undone right
   after sending a chat message without clicking into the editor. macOS also

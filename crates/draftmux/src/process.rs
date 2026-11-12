@@ -1,4 +1,4 @@
-//! Runs a one-off tool process (oxfmt, a pi selection call) under a deadline
+//! Runs a one-off tool process (such as a pi selection call) under a deadline
 //! and returns its stdout or a one-line message for the user.
 
 use std::io::{Read, Write};
