@@ -221,10 +221,12 @@ impl Render for ChatModel {
                     })
                     .child(div().min_w_0().truncate().child(model))
                     .when_some(thinking, |label, thinking| {
+                        // Shrinks with the model, so a chip beside the
+                        // label never covers it.
                         label.child(
                             div()
-                                .flex_none()
-                                .whitespace_nowrap()
+                                .min_w_0()
+                                .truncate()
                                 .child(SharedString::from(format!(" · {thinking}"))),
                         )
                     })
