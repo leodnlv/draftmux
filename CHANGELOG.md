@@ -15,6 +15,9 @@
 - Format has a menu with Wrap at 80 Columns and Unwrap Paragraphs, for
   wrapping a draft that goes into a Markdown file or unwrapping one that was
   written wrapped.
+- The Markdown editor collapses when the window is too narrow to show it
+  beside the preview, and comes back when the window widens again. Showing or
+  hiding a pane yourself holds until the window crosses that width again.
 
 ## v0.1.0 (2026-11-12)
 

@@ -52,6 +52,9 @@ const SEGMENT_FADE: Duration = Duration::from_millis(150);
 const CHAT_MIN_WIDTH: Pixels = px(260.);
 /// Room the chat never takes from the editor and preview.
 const CONTENT_MIN_WIDTH: Pixels = px(320.);
+/// Below this, the editor and preview are too narrow to share the room
+/// beside the sidebar and chat, so the editor collapses.
+const SPLIT_MIN_WIDTH: Pixels = px(640.);
 /// How long the chat width settles before it is saved.
 const CHAT_WIDTH_SAVE_DELAY: Duration = Duration::from_millis(300);
 /// Origin of the close button; vertically centres the buttons in the toolbar.
@@ -101,6 +104,12 @@ pub struct Chrome {
     /// At least one of the markdown editor and the preview is shown.
     show_editor: bool,
     show_preview: bool,
+    /// The editor and preview had too little room to be shown side by side
+    /// when last rendered.
+    narrow: bool,
+    /// The editor was collapsed for a narrow window rather than by the user,
+    /// so widening the window shows it again.
+    collapsed_for_width: bool,
     /// Why the selected draft's last save failed; cleared by the next save.
     save_error: Option<SharedString>,
     toast: Option<sidebar::Toast>,
@@ -129,6 +138,7 @@ impl Render for Chrome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = editor::timing::span("chrome-render");
         let palette = *theme::palette(cx);
+        self.fit_to_width(window, cx);
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let content = if self.drafts.current().is_some() {
             div()
@@ -390,6 +400,8 @@ impl Chrome {
             mirrored: None,
             show_editor: true,
             show_preview: true,
+            narrow: false,
+            collapsed_for_width: false,
             save_error: None,
             toast: None,
             copied: None,
@@ -578,8 +590,36 @@ impl Chrome {
         cx.notify();
     }
 
+    /// Collapses the editor of a side-by-side layout when the window gets
+    /// too narrow for both panes, and shows it again once the window is wide
+    /// enough. Only crossing the threshold acts, so the user's own toggles
+    /// hold until the next crossing.
+    fn fit_to_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let narrow = split_width(
+            window.viewport_size().width,
+            self.chat_width,
+            self.show_sidebar,
+        ) < SPLIT_MIN_WIDTH;
+        if narrow == self.narrow {
+            return;
+        }
+        self.narrow = narrow;
+        if narrow {
+            if self.show_editor && self.show_preview {
+                self.show_editor = false;
+                self.collapsed_for_width = true;
+                if self.editor.focus_handle(cx).contains_focused(window, cx) {
+                    self.focus_sidebar(window, cx);
+                }
+            }
+        } else if std::mem::take(&mut self.collapsed_for_width) {
+            self.show_editor = true;
+        }
+    }
+
     /// Hiding the only visible pane shows the other one instead.
     fn toggle_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.collapsed_for_width = false;
         self.show_editor = !self.show_editor;
         if self.show_editor {
             window.focus(&self.editor.focus_handle(cx), cx);
@@ -594,6 +634,7 @@ impl Chrome {
     }
 
     fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.collapsed_for_width = false;
         if self.show_preview && !self.show_editor {
             self.toggle_editor(window, cx);
         }
@@ -1312,6 +1353,12 @@ fn clamp_chat_width(width: Pixels, viewport_width: Pixels, show_sidebar: bool) -
     width.min(max).max(CHAT_MIN_WIDTH)
 }
 
+/// The room the editor and preview share beside the sidebar and chat.
+fn split_width(viewport_width: Pixels, chat_width: Pixels, show_sidebar: bool) -> Pixels {
+    let sidebar_width = if show_sidebar { SIDEBAR_WIDTH } else { px(0.) };
+    viewport_width - sidebar_width - clamp_chat_width(chat_width, viewport_width, show_sidebar)
+}
+
 /// A strip over the chat's left edge that drags to resize it; a double click
 /// restores the default width.
 fn chat_resize_handle(cx: &mut Context<Chrome>) -> impl IntoElement {
@@ -1358,5 +1405,14 @@ mod tests {
                 CHAT_MIN_WIDTH
             );
         }
+    }
+
+    #[test]
+    fn split_width_leaves_out_the_sidebar_and_chat() {
+        assert_eq!(split_width(px(1200.), CHAT_WIDTH, true), px(632.));
+        assert_eq!(split_width(px(1200.), CHAT_WIDTH, false), px(860.));
+        // The chat gives up its width before the content goes under its
+        // minimum.
+        assert_eq!(split_width(px(1000.), px(600.), true), CONTENT_MIN_WIDTH);
     }
 }
