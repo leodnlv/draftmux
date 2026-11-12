@@ -26,7 +26,8 @@ use crate::assets::{
     LINK_ICON, SLACK_COPY_ICON,
 };
 use crate::block_cache::BlockCache;
-use crate::inline_text::{Chip, Icon, InlineText, Segment, is_emoji};
+use crate::compare::{self, Mark};
+use crate::inline_text::{Chip, Icon, InlineText, MarkHandlers, Segment, SegmentMark, is_emoji};
 use crate::selectable::{Select, TextRegistry, TextSelection};
 use crate::theme::Palette;
 
@@ -118,6 +119,54 @@ pub struct MarkupStyle {
     /// Colors of the footnotes [`render_preview`] puts on blocks Slack posts
     /// differently; `None` hides them.
     pub notes: Option<NoteColors>,
+    /// Draws the changes marked in a redline ([`compare::redline`]); `None`
+    /// for text without marks.
+    pub redline: Option<Rc<Redline>>,
+}
+
+/// How a redline's changes are drawn and what the pointer does to them:
+/// insertions on a green tint, deletions struck through on a red one. Kept
+/// changes lose the tint, insertions underlined and deletions faded; the
+/// selected change is outlined.
+pub struct Redline {
+    pub selected: Option<usize>,
+    /// Whether each hunk is kept.
+    pub kept: Vec<bool>,
+    pub colors: RedlineColors,
+    pub handlers: Rc<MarkHandlers>,
+}
+
+#[derive(Clone, Copy)]
+pub struct RedlineColors {
+    pub added: Hsla,
+    pub added_background: Hsla,
+    pub removed: Hsla,
+    pub removed_background: Hsla,
+    pub selected: Hsla,
+}
+
+impl Redline {
+    fn style(&self, segment: &mut Segment, mark: Mark) {
+        let colors = self.colors;
+        let kept = self.kept.get(mark.hunk).copied().unwrap_or(false);
+        let (color, background) = if mark.deleted {
+            (colors.removed, colors.removed_background)
+        } else {
+            (colors.added, colors.added_background)
+        };
+        segment.color = Some(if mark.deleted && kept {
+            color.opacity(0.6)
+        } else {
+            color
+        });
+        segment.strike |= mark.deleted;
+        segment.mark = Some(SegmentMark {
+            hunk: mark.hunk,
+            background: (!kept).then_some(background),
+            ring: (self.selected == Some(mark.hunk)).then_some(colors.selected),
+            underline: (kept && !mark.deleted).then(|| color.opacity(0.45)),
+        });
+    }
 }
 
 /// Block margins as a browser gives unstyled HTML: siblings are as far
@@ -381,6 +430,7 @@ impl MarkupStyle {
             },
             slack_fallbacks: false,
             notes: None,
+            redline: None,
         }
     }
 
@@ -612,6 +662,7 @@ impl MarkupStyle {
                 label: app.faint,
                 rule: app.hairline,
             }),
+            redline: None,
         }
     }
 }
@@ -995,6 +1046,8 @@ struct Renderer<'a> {
     select: Option<SelectBody>,
     /// Selectable paragraphs rendered so far, which numbers the next.
     paragraphs: usize,
+    /// The redline mark open at the end of the text rendered so far.
+    open_mark: Option<Mark>,
 }
 
 impl<'a> Renderer<'a> {
@@ -1008,6 +1061,7 @@ impl<'a> Renderer<'a> {
             heading_size: None,
             select,
             paragraphs: 0,
+            open_mark: None,
         }
     }
 
@@ -1025,11 +1079,32 @@ impl<'a> Renderer<'a> {
 
     /// `text` in the surrounding style, selectable like other paragraphs.
     fn plain(&mut self, text: &str) -> InlineText {
-        InlineText::new(vec![Segment {
+        self.inline(vec![Segment {
             text: SharedString::from(text.to_owned()),
             ..Segment::default()
         }])
         .selectable(self.select())
+    }
+
+    /// `segments` as inline text, with any redline marks in them drawn.
+    fn inline(&mut self, segments: Vec<Segment>) -> InlineText {
+        let Some(redline) = self.style.redline.clone() else {
+            return InlineText::new(segments);
+        };
+        let mut marked = Vec::with_capacity(segments.len());
+        for segment in segments {
+            for (mark, text) in compare::split_marks(&segment.text, &mut self.open_mark) {
+                let mut piece = Segment {
+                    text: text.to_owned().into(),
+                    ..segment.clone()
+                };
+                if let Some(mark) = mark {
+                    redline.style(&mut piece, mark);
+                }
+                marked.push(piece);
+            }
+        }
+        InlineText::new(marked).marks(Some(redline.handlers.clone()))
     }
 
     fn id(&mut self) -> ElementId {
@@ -1277,15 +1352,20 @@ impl<'a> Renderer<'a> {
                 colors.text
             })
             .children(lines.iter().map(|text| {
+                // Slack's code boxes don't show a redline's marks.
+                let text = match style.redline {
+                    Some(_) => compare::strip_marks(text),
+                    None => text.to_string(),
+                };
                 let highlights = if lang == "diff" {
-                    markup::slack::diff_line(text)
+                    markup::slack::diff_line(&text)
                         .into_iter()
                         .map(|(range, role)| (range, colors.highlight(role)))
                         .collect()
                 } else {
                     Vec::new()
                 };
-                line().child(StyledText::new(text.to_string()).with_highlights(highlights))
+                line().child(StyledText::new(text).with_highlights(highlights))
             }));
         let header = div()
             .h(px(40.))
@@ -1574,7 +1654,7 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
-        InlineText::new(segments)
+        self.inline(segments)
             .blank_line(style.blank_line)
             .selectable(self.select())
             .into_any_element()

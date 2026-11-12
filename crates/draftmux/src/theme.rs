@@ -135,6 +135,8 @@ fn context_menu(items: Vec<ContextMenuItem>, _: &mut Window, cx: &mut App) -> An
                 checked: false,
                 enabled: item.enabled,
                 action: item.action.is_some().then_some(ix),
+                detail: None,
+                heading: false,
             };
             (menu_item, item.action)
         })
@@ -233,6 +235,8 @@ pub struct Palette {
     pub inactive_selection: Hsla,
     /// Tints text the app changed for the user, fading away.
     pub change_flash: Hsla,
+    /// The editor's tint on the change selected in review.
+    pub change_mark: Hsla,
 }
 
 impl Palette {
@@ -309,6 +313,7 @@ impl Palette {
             selection: hex(0xb3d4ffff),
             inactive_selection: hex(0xdcdce0ff),
             change_flash: hex(0xffcc0066),
+            change_mark: hex(0x0a6cf524),
         }
     }
 
@@ -375,6 +380,7 @@ impl Palette {
             selection: hex(0x0a84ff66),
             inactive_selection: hex(0x3a3a3eff),
             change_flash: hex(0xffd60a40),
+            change_mark: hex(0x0a84ff3d),
         }
     }
 
@@ -393,6 +399,7 @@ impl Palette {
             selection: self.selection,
             inactive_selection: self.inactive_selection,
             flash: self.change_flash,
+            marked: self.change_mark,
             ..EditorStyle::default()
         }
     }

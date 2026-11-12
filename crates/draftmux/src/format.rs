@@ -290,6 +290,8 @@ impl Formatter {
             checked: false,
             enabled: true,
             action: Some(wrap),
+            detail: None,
+            heading: false,
         };
         let items = [
             item(format!("Wrap at {WRAP_WIDTH} Columns"), Wrap::Always),

@@ -16,9 +16,9 @@ use std::rc::Rc;
 use gpui::{
     App, AvailableSpace, BorderStyle, Bounds, Corners, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseUpEvent, Pixels, Point,
-    ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign, TextRun, TransformationMatrix,
-    UnderlineStyle, WhiteSpace, Window, fill, point, px, quad, size,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign,
+    TextRun, TransformationMatrix, UnderlineStyle, WhiteSpace, Window, fill, point, px, quad, size,
 };
 
 use crate::selectable::Select;
@@ -29,6 +29,7 @@ pub struct InlineText {
     segments: Vec<Segment>,
     blank_line: Option<Pixels>,
     select: Option<Select>,
+    marks: Option<Rc<MarkHandlers>>,
     laid: Rc<RefCell<Option<Laid>>>,
 }
 
@@ -48,6 +49,26 @@ pub struct Segment {
     pub chip: Option<Chip>,
     /// Opened on click.
     pub link: Option<SharedString>,
+    /// A change in a redline, which reacts to the pointer.
+    pub mark: Option<SegmentMark>,
+}
+
+/// How a change in a redline is drawn behind and around its text.
+#[derive(Clone)]
+pub struct SegmentMark {
+    pub hunk: usize,
+    pub background: Option<Hsla>,
+    /// An outline just outside the background's edge.
+    pub ring: Option<Hsla>,
+    /// An underline in this color.
+    pub underline: Option<Hsla>,
+}
+
+/// What clicking and hovering a [`SegmentMark`] do, given its hunk.
+pub struct MarkHandlers {
+    pub click: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+    /// Called on each pointer move over a mark, with the pointer's position.
+    pub hover: Rc<dyn Fn(usize, Point<Pixels>)>,
 }
 
 /// A box around a segment, like a CSS inline element's background, border
@@ -88,6 +109,7 @@ impl InlineText {
             segments,
             blank_line: None,
             select: None,
+            marks: None,
             laid: Rc::default(),
         }
     }
@@ -101,6 +123,12 @@ impl InlineText {
             self.collect_text(registry, select.key);
         }
         self.select = select;
+        self
+    }
+
+    /// Makes the segments' marks react to clicks and hovering.
+    pub fn marks(mut self, marks: Option<Rc<MarkHandlers>>) -> Self {
+        self.marks = marks;
         self
     }
 
@@ -169,6 +197,8 @@ pub struct Hitboxes {
     text: Option<Hitbox>,
     /// Links and their URLs.
     links: Vec<(Hitbox, SharedString)>,
+    /// Marked changes and their hunks.
+    marks: Vec<(Hitbox, usize)>,
 }
 
 impl Element for InlineText {
@@ -228,6 +258,7 @@ impl Element for InlineText {
         let mut hitboxes = Hitboxes {
             text: None,
             links: Vec::new(),
+            marks: Vec::new(),
         };
         if let Some(select) = &self.select {
             let laid = self.laid.clone();
@@ -253,7 +284,21 @@ impl Element for InlineText {
         for (line, top, left) in positioned(laid, bounds) {
             for frag in &line.frags {
                 let piece = &laid.shaped.pieces[frag.piece];
-                if let Some(url) = &self.segments[piece.segment].link {
+                let segment = &self.segments[piece.segment];
+                if self.marks.is_some()
+                    && let Some(mark) = &segment.mark
+                {
+                    let (lead, trail) = frag.edges(piece);
+                    let width = piece.line.x_for_index(frag.range.end)
+                        - piece.line.x_for_index(frag.range.start);
+                    let bounds = Bounds::new(
+                        point(left + frag.x - lead, top),
+                        size(lead + width + trail, laid.shaped.line_height),
+                    );
+                    let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                    hitboxes.marks.push((hitbox, mark.hunk));
+                }
+                if let Some(url) = &segment.link {
                     // A chip's box, icon included, is part of the link.
                     let (lead, trail) = frag.edges(piece);
                     let width = piece.line.x_for_index(frag.range.end)
@@ -319,6 +364,9 @@ impl Element for InlineText {
                 let segment = &self.segments[piece.segment];
                 let part = cursors[frag.piece].take_until(frag.range.end);
                 let x = left + frag.x;
+                if let Some(mark) = &segment.mark {
+                    paint_mark(mark, piece, frag, &part, x, baseline, window);
+                }
                 if let Some(chip) = &segment.chip {
                     paint_chip(chip, segment, piece, frag, &part, x, baseline, window, cx);
                 }
@@ -373,6 +421,43 @@ impl Element for InlineText {
                     && !selecting
                 {
                     cx.open_url(&url);
+                }
+            });
+        }
+        let Some(handlers) = self.marks.clone() else {
+            return;
+        };
+        for (hitbox, hunk) in hitboxes.marks.drain(..) {
+            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+            // The press doesn't reach the window around the change, which
+            // treats a press elsewhere as clearing the selected change.
+            window.on_mouse_event({
+                let hitbox = hitbox.clone();
+                move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.button == MouseButton::Left
+                        && hitbox.is_hovered(window)
+                    {
+                        cx.stop_propagation();
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let hitbox = hitbox.clone();
+                let click = handlers.click.clone();
+                move |event: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.button == MouseButton::Left
+                        && hitbox.is_hovered(window)
+                    {
+                        click(hunk, window, cx);
+                    }
+                }
+            });
+            let hover = handlers.hover.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
+                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
+                    hover(hunk, event.position);
                 }
             });
         }
@@ -460,6 +545,65 @@ fn size_of(lines: &[Line], shaped: &Shaped) -> Size<Pixels> {
         .fold(px(0.), Pixels::max);
     let height = lines.iter().map(|line| line_height(line, shaped)).sum();
     size(width.ceil(), height)
+}
+
+/// A mark's background and ring around one fragment of its text, as tall
+/// as the text's ascent and descent, rounded where the mark starts and ends.
+fn paint_mark(
+    mark: &SegmentMark,
+    piece: &Piece,
+    frag: &Frag,
+    part: &ShapedLine,
+    x: Pixels,
+    baseline: Pixels,
+    window: &mut Window,
+) {
+    let opens = frag.range.start == 0;
+    let closes = frag.range.end == piece.line.len();
+    let (lead, trail) = frag.edges(piece);
+    let bounds = Bounds::from_corners(
+        point(x - lead, baseline - piece.line.ascent - px(1.)),
+        point(
+            x + part.width + trail,
+            baseline + piece.line.descent + px(1.),
+        ),
+    );
+    let corners = |radius: Pixels| Corners {
+        top_left: if opens { radius } else { px(0.) },
+        bottom_left: if opens { radius } else { px(0.) },
+        top_right: if closes { radius } else { px(0.) },
+        bottom_right: if closes { radius } else { px(0.) },
+    };
+    if let Some(background) = mark.background {
+        window.paint_quad(quad(
+            bounds,
+            corners(px(2.)),
+            background,
+            Edges::default(),
+            Hsla::transparent_black(),
+            BorderStyle::Solid,
+        ));
+    }
+    if let Some(ring) = mark.ring {
+        let width = px(1.5);
+        let edge = |on: bool| if on { width } else { px(0.) };
+        window.paint_quad(quad(
+            Bounds::from_corners(
+                point(bounds.left() - edge(opens), bounds.top() - width),
+                point(bounds.right() + edge(closes), bounds.bottom() + width),
+            ),
+            corners(px(3.5)),
+            Hsla::transparent_black(),
+            Edges {
+                top: width,
+                bottom: width,
+                left: edge(opens),
+                right: edge(closes),
+            },
+            ring,
+            BorderStyle::Solid,
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -574,11 +718,18 @@ fn shape(
                 font: font.clone(),
                 color: segment.color.unwrap_or(style.color),
                 background_color: None,
-                underline: segment.underline.then_some(UnderlineStyle {
-                    thickness: px(1.),
-                    color: None,
-                    wavy: false,
-                }),
+                underline: match segment.mark.as_ref().and_then(|mark| mark.underline) {
+                    Some(color) => Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(color),
+                        wavy: false,
+                    }),
+                    None => segment.underline.then_some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: None,
+                        wavy: false,
+                    }),
+                },
                 strikethrough: segment.strike.then_some(StrikethroughStyle {
                     thickness: px(1.),
                     color: None,

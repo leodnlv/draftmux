@@ -8,6 +8,7 @@ mod changes;
 mod chat;
 mod chat_model;
 mod chrome;
+mod compare;
 mod copy;
 mod drafts;
 mod file_watch;

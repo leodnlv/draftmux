@@ -103,6 +103,12 @@ pub enum ChatEvent {
 
 impl EventEmitter<ChatEvent> for Chat {}
 
+/// The user's own message in a prompt sent with [`ChatEvent::Send`],
+/// without the selection attached to it.
+pub fn message(prompt: &str) -> &str {
+    quote::parse(prompt).1
+}
+
 pub struct Chat {
     sessions: HashMap<String, Session>,
     current: Option<String>,

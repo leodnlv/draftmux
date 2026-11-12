@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, FocusHandle, IntoElement, RenderOnce, ScrollHandle, SharedString, Window, anchored, div,
-    ease_out_quint, point, prelude::*, px,
+    App, FocusHandle, FontWeight, IntoElement, RenderOnce, ScrollHandle, SharedString, Window,
+    anchored, div, ease_out_quint, point, prelude::*, px,
 };
 
 use crate::chrome::shadow;
@@ -17,8 +17,12 @@ pub struct MenuItem<A> {
     pub checked: bool,
     /// Disabled items are drawn dimmed and can't be picked.
     pub enabled: bool,
-    /// `None` draws a separator.
+    /// `None` draws a separator, or a heading with `heading`.
     pub action: Option<A>,
+    /// Faint text at the row's end, such as a time.
+    pub detail: Option<SharedString>,
+    /// Draws the label as a section heading; it has no action.
+    pub heading: bool,
 }
 
 gpui::actions!(menu, [Previous, Next, Confirm, Cancel]);
@@ -72,7 +76,11 @@ fn next_enabled(enabled: &[bool], current: Option<usize>, backwards: bool) -> Op
 }
 
 fn row_height<A>(item: &MenuItem<A>) -> f32 {
-    if item.action.is_some() { 22. } else { 8.5 }
+    if item.action.is_some() || item.heading {
+        22.
+    } else {
+        8.5
+    }
 }
 
 fn popup_geometry(checked_top: f32, window_height: f32) -> (f32, f32, f32) {
@@ -235,6 +243,19 @@ impl<A: Clone + 'static> RenderOnce for MenuPanel<A> {
             .on_key_down(|_, _, cx| cx.stop_propagation());
         for (ix, item) in self.items.iter().enumerate() {
             panel = panel.child(match &item.action {
+                None if item.heading => div()
+                    .id(("menu-heading", ix))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .h(px(22.))
+                    .pl(px(20.))
+                    .pr(px(10.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c.faint)
+                    .child(item.label.clone())
+                    .into_any_element(),
                 None => div()
                     .id(("menu-separator", ix))
                     .flex_none()
@@ -278,7 +299,19 @@ impl<A: Clone + 'static> RenderOnce for MenuPanel<A> {
                                 .text_center()
                                 .child(if item.checked { "✓" } else { "" }),
                         )
-                        .child(div().truncate().child(item.label.clone()))
+                        .child(div().min_w_0().truncate().child(item.label.clone()))
+                        .children(item.detail.clone().map(|detail| {
+                            div()
+                                .flex_none()
+                                .ml_auto()
+                                .pl(px(18.))
+                                .text_color(if selected == Some(ix) {
+                                    c.on_accent_muted
+                                } else {
+                                    c.faint
+                                })
+                                .child(detail)
+                        }))
                         .on_mouse_move(move |_, _, cx| {
                             state.update(cx, |state, cx| {
                                 let selected = enabled.then_some(ix);

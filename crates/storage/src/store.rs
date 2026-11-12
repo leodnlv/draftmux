@@ -6,10 +6,12 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::atomic;
+use crate::history::History;
 use crate::meta::{DraftSettings, Meta, Source, Status, Syntax, Target};
 
 const DRAFT_FILE: &str = "draft.md";
 const META_FILE: &str = "meta.json";
+const HISTORY_FILE: &str = "history.json";
 const SESSION_DIR: &str = "session";
 /// Records that the sample draft was created. A dot name and a file, so
 /// [`Store::scan`] never takes it for a draft.
@@ -186,6 +188,24 @@ impl Store {
         let path = self.draft_dir(id)?.join(DRAFT_FILE);
         atomic::write(&path, text.as_bytes())?;
         self.update_meta(id, |meta| meta.updated_at = Utc::now())
+    }
+
+    /// The draft's edit history; empty before the agent's first edit.
+    pub fn history(&self, id: &str) -> Result<History> {
+        let path = self.draft_dir(id)?.join(HISTORY_FILE);
+        match std::fs::read(&path) {
+            Ok(json) => {
+                serde_json::from_slice(&json).with_context(|| format!("parsing {}", path.display()))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(History::default()),
+            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub fn save_history(&self, id: &str, history: &History) -> Result<()> {
+        let mut json = serde_json::to_vec_pretty(history)?;
+        json.push(b'\n');
+        atomic::write(&self.draft_dir(id)?.join(HISTORY_FILE), &json)
     }
 
     /// Rewrites the text in `syntax` with `convert`, and records the syntax.
@@ -465,6 +485,25 @@ mod tests {
         let loaded = store.load(&draft.id).unwrap();
         assert_eq!(loaded.meta, draft.meta);
         assert_eq!(loaded.dir, draft.dir);
+    }
+
+    #[test]
+    fn history_is_empty_until_saved_and_reads_back() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let draft = store.create(new_draft("a")).unwrap();
+        assert_eq!(store.history(&draft.id).unwrap(), History::default());
+
+        let history = History {
+            edits: vec![crate::Edit {
+                before: "Hello\n".into(),
+                at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                prompt: "make it shorter".into(),
+            }],
+            kept: vec!["a\0b".into()],
+        };
+        store.save_history(&draft.id, &history).unwrap();
+        assert_eq!(store.history(&draft.id).unwrap(), history);
     }
 
     #[test]

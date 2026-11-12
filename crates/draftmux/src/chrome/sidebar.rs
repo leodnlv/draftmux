@@ -65,8 +65,8 @@ pub(super) struct Toast {
     entrance: usize,
     error: bool,
     text: SharedString,
-    /// Draft to unarchive when Undo is clicked.
-    undo: Option<String>,
+    /// What Undo undoes, when the toast offers it.
+    undo: Option<ToastUndo>,
     /// Fades the toast out and hides it when it ends; `None` while the
     /// pointer is over the toast, so it stays until the pointer leaves.
     dismiss: Option<Task<()>>,
@@ -85,6 +85,14 @@ impl LeavingRow {
     pub(super) fn folding(&self) -> bool {
         self.since.elapsed() < crate::fold::DURATION
     }
+}
+
+#[derive(Clone)]
+pub(super) enum ToastUndo {
+    /// Unarchives the draft.
+    Archive(String),
+    /// Undoes the last edit to the selected draft.
+    Edit,
 }
 
 /// A right-clicked draft row's menu, at the click.
@@ -412,6 +420,8 @@ impl Chrome {
             checked: false,
             enabled: true,
             action: Some(action),
+            detail: None,
+            heading: false,
         };
         let items = [
             item("Copy Draft ID", RowAction::CopyId),
@@ -421,6 +431,8 @@ impl Chrome {
                 checked: false,
                 enabled: false,
                 action: None,
+                detail: None,
+                heading: false,
             },
             item("Archive", RowAction::Archive),
         ];
@@ -510,7 +522,12 @@ impl Chrome {
             }
         }
         self.leaving_rows.extend(leaving);
-        self.present_toast("Draft archived".into(), false, Some(id.to_owned()), cx);
+        self.present_toast(
+            "Draft archived".into(),
+            false,
+            Some(ToastUndo::Archive(id.to_owned())),
+            cx,
+        );
     }
 
     fn undo_archive(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
@@ -525,6 +542,12 @@ impl Chrome {
         cx.notify();
     }
 
+    fn undo_edit(&mut self, cx: &mut Context<Self>) {
+        self.toast = None;
+        self.editor.update(cx, |editor, cx| editor.undo(cx));
+        cx.notify();
+    }
+
     /// Confirms that something worked, replacing any earlier toast.
     pub(super) fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.present_toast(text.into(), false, None, cx);
@@ -535,11 +558,20 @@ impl Chrome {
         self.present_toast(text.into(), true, None, cx);
     }
 
+    /// Confirms an edit to the selected draft, offering to undo it.
+    pub(super) fn show_undoable_edit(
+        &mut self,
+        text: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.present_toast(text.into(), false, Some(ToastUndo::Edit), cx);
+    }
+
     fn present_toast(
         &mut self,
         text: SharedString,
         error: bool,
-        undo: Option<String>,
+        undo: Option<ToastUndo>,
         cx: &mut Context<Self>,
     ) {
         let serial = self.toast.as_ref().map_or(0, |toast| toast.serial + 1);
@@ -651,7 +683,7 @@ impl Chrome {
                     .into_any_element()
                 }
             })
-            .children(toast.undo.clone().map(|id| {
+            .children(toast.undo.clone().map(|undo| {
                 div()
                     .id("toast-undo")
                     .flex_none()
@@ -663,9 +695,10 @@ impl Chrome {
                     .font_weight(FontWeight::MEDIUM)
                     .hover(|style| style.bg(palette.hover))
                     .active(|style| style.opacity(0.7))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.undo_archive(&id, window, cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| match &undo {
+                        ToastUndo::Archive(id) => this.undo_archive(id, window, cx),
+                        ToastUndo::Edit => this.undo_edit(cx),
+                    }))
                     .child("Undo")
             }));
         let rise = if crate::platform::reduce_motion() {

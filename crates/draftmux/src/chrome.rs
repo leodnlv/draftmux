@@ -8,6 +8,7 @@
 
 mod preview;
 mod preview_work;
+mod review;
 mod sidebar;
 mod skeleton;
 
@@ -78,6 +79,7 @@ const CLOCK_TICK: Duration = Duration::from_secs(30);
 
 pub fn init(cx: &mut App) {
     sidebar::init(cx);
+    review::init(cx);
     cx.bind_keys([
         KeyBinding::new(editor::secondary!("\\"), ToggleSidebar, None),
         KeyBinding::new(editor::secondary!("alt-e"), ToggleEditor, None),
@@ -133,6 +135,16 @@ pub struct Chrome {
     /// Why the selected draft's last save failed; cleared by the next save.
     save_error: Option<SharedString>,
     toast: Option<sidebar::Toast>,
+    /// The selected draft's agent edits and the changes being compared.
+    changes: review::Changes,
+    /// Review of those changes, while it is open.
+    review: Option<review::Review>,
+    /// Holds the focus during review, so its single-key shortcuts don't
+    /// reach a text field.
+    review_focus: FocusHandle,
+    /// Each draft's latest agent turn, until its first write is recorded
+    /// as an edit.
+    turns: review::Turns,
     /// The Copy button shows a checkmark while this is set, with a serial
     /// so each copy replays it; the task clears it.
     copied: Option<(usize, Task<()>)>,
@@ -222,28 +234,50 @@ impl Render for Chrome {
                     )
                 })
                 .when(preview_open > 0., |row| {
-                    row.child(
-                        slot(preview_open, preview_width, true).child(
-                            pane(palette.pane, &palette)
-                                .when_some(preview_width, |pane, width| pane.w(width).flex_none())
-                                .when(preview_width.is_none(), |pane| pane.flex_1())
-                                .relative()
-                                .when(editor_open > 0., |pane| pane.border_l_1())
-                                .child({
-                                    let body = self.preview.clone().cached(
-                                        StyleRefinement::default()
-                                            .absolute()
-                                            .top_0()
-                                            .left_0()
-                                            .size_full(),
-                                    );
-                                    SelectionPopover::wrap_preview(&self.selection, body, cx)
-                                })
-                                .child(scrollbar(
-                                    Source::Handle(self.preview_scroll.clone()),
-                                    preview_bar,
-                                )),
-                        ),
+                    let preview = div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .top(if self.review.is_some() {
+                            review::BAR_HEIGHT
+                        } else {
+                            px(0.)
+                        })
+                        .child({
+                            let body = self.preview.clone().cached(
+                                StyleRefinement::default()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            );
+                            SelectionPopover::wrap_preview(&self.selection, body, cx)
+                        })
+                        .child(scrollbar(
+                            Source::Handle(self.preview_scroll.clone()),
+                            preview_bar,
+                        ));
+                    let pane = pane(palette.pane, &palette)
+                        .when_some(preview_width, |pane, width| pane.w(width).flex_none())
+                        .when(preview_width.is_none(), |pane| pane.flex_1())
+                        .relative()
+                        .when(editor_open > 0., |pane| pane.border_l_1())
+                        .child(preview);
+                    row.child(slot(preview_open, preview_width, true).child(
+                        if self.review.is_some() {
+                            self.review_pane(pane, &palette, cx)
+                        } else {
+                            pane
+                        },
+                    ))
+                })
+                // A press anywhere but on a change or the review bar
+                // clears the selected change.
+                .when(self.review.is_some(), |row| {
+                    row.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.pressed_outside_changes(cx)),
                     )
                 })
         } else {
@@ -284,6 +318,9 @@ impl Render for Chrome {
                 }
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &review::ToggleReview, window, cx| {
+                this.toggle_review(window, cx)
+            }))
             // Reached when the focus is outside the draft editor, or in a
             // text field with nothing to undo, such as the composer after
             // a send: the draft is what the user, or its agent, last changed.
@@ -342,7 +379,8 @@ impl Render for Chrome {
                             .child(chat_resize_handle(cx)),
                     ),
             )
-            .children(self.toast(cx));
+            .children(self.toast(cx))
+            .children(self.change_origin_tooltip(cx));
         crate::platform::frame(
             content.into_any_element(),
             window,
@@ -501,6 +539,7 @@ impl Chrome {
                 cache: Default::default(),
                 appearance: None,
                 writing: false,
+                redline: None,
                 _selection: cx.observe(&preview_selection, |_, _, cx| cx.notify()),
             }),
             preview_work: preview_work::Work::default(),
@@ -516,6 +555,10 @@ impl Chrome {
             collapsed_for_width: false,
             save_error: None,
             toast: None,
+            changes: Default::default(),
+            review: None,
+            review_focus: cx.focus_handle(),
+            turns: Default::default(),
             copied: None,
             row_menu: None,
             seen_rows: RefCell::default(),
@@ -646,6 +689,7 @@ impl Chrome {
         self.editor
             .update(cx, |editor, cx| editor.set_text(&text, cx));
         self.drafts.loaded(self.editor.read(cx).text());
+        self.load_changes(cx);
         let draft = self.drafts.current().cloned();
         self.chat
             .update(cx, |chat, cx| chat.set_draft(draft.as_ref(), cx));
@@ -761,6 +805,10 @@ impl Chrome {
         if self.show_preview && !self.show_editor {
             self.toggle_editor(window, cx);
         }
+        // Review happens in the preview.
+        if self.show_preview {
+            self.close_review(window, cx);
+        }
         self.show_preview = !self.show_preview;
         cx.notify();
     }
@@ -771,6 +819,7 @@ impl Chrome {
         self.autosave = Task::ready(());
         self.set_preview(None, cx);
         self.editor.update(cx, |editor, cx| editor.set_text("", cx));
+        self.load_changes(cx);
         self.chat.update(cx, |chat, cx| chat.set_draft(None, cx));
         self.sync_selection_draft(cx);
     }
@@ -783,6 +832,10 @@ impl Chrome {
                     .flush()
                     .map(|()| self.editor.read(cx).text().to_owned())
                     .map_err(|err| format!("{err:#}"));
+                if let (Ok(before), Some(id)) = (&saved, self.drafts.current_id()) {
+                    self.turns
+                        .insert(id.to_owned(), review::Turn::new(before.clone(), text));
+                }
                 let text = text.clone();
                 self.chat
                     .update(cx, |chat, cx| chat.prompt(text, saved, cx));
@@ -810,6 +863,7 @@ impl Chrome {
                 }
             }
             ChatEvent::DraftWritten { id, text } => {
+                self.record_edit(id, text, cx);
                 if self.drafts.current_id() == Some(id.as_str()) {
                     // Shown now rather than on the next poll. Nothing is
                     // pending while the agent runs, so there's no conflict.
@@ -853,6 +907,7 @@ impl Chrome {
         };
         self.drafts.edited(&text, Instant::now());
         self.schedule_save(cx);
+        self.sync_review(cx);
         self.preview_selection
             .update(cx, |selection, cx| selection.clear(cx));
         if self.preview_work.request(target, text) {
@@ -1178,6 +1233,7 @@ impl Chrome {
         let preview = markup_view::preview(target, self.editor.read(cx).text());
         self.set_preview(Some(preview), cx);
         self.sync_selection_draft(cx);
+        self.sync_review(cx);
         cx.notify();
     }
 
@@ -1397,6 +1453,7 @@ impl Chrome {
             .items_center()
             .gap_2()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(self.review_button(palette, cx))
             .child(self.formatter.clone())
             .child(
                 div()

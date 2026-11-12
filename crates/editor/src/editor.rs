@@ -234,6 +234,9 @@ pub struct EditorStyle {
     pub inactive_selection: Hsla,
     /// The tint of text that [`Editor::flash`] points out.
     pub flash: Hsla,
+    /// The tint of the range [`Editor::set_marked`] points out; a mark
+    /// that is only a position is a bar in this color, opaque.
+    pub marked: Hsla,
     /// Size the editor to its text, up to the available width, instead of
     /// filling its parent and scrolling. Scroll events then pass through to
     /// what contains it.
@@ -261,6 +264,7 @@ impl Default for EditorStyle {
             selection: rgb(0xb3d4ff).into(),
             inactive_selection: rgb(0xdcdce0).into(),
             flash: rgba(0xffd60a59).into(),
+            marked: rgba(0x0a6cf524).into(),
             fit_content: false,
         }
     }
@@ -309,6 +313,10 @@ pub struct Editor {
     context_menu: Option<Point<Pixels>>,
     menu_renderer: Option<ContextMenuRenderer>,
     pub(crate) flash: Option<Flash>,
+    /// Text pointed out until it is cleared or the text changes.
+    pub(crate) marked: Option<Range<usize>>,
+    /// Set when the mark changed, so the next layout scrolls it into view.
+    pub(crate) reveal_marked: bool,
 }
 
 /// Text pointed out by a tint that fades away.
@@ -371,6 +379,8 @@ impl Editor {
             blinking: false,
             blink_epoch: 0,
             flash: None,
+            marked: None,
+            reveal_marked: false,
         }
     }
 
@@ -554,6 +564,23 @@ impl Editor {
             .map(|flash| (&flash.ranges[..], flash.started))
     }
 
+    /// Tints `range` of the current text, or marks its position when it is
+    /// empty, and scrolls it into view; `None` clears the mark. Any edit
+    /// clears it too.
+    pub fn set_marked(&mut self, range: Option<Range<usize>>, cx: &mut Context<Self>) {
+        let range = range.filter(|range| {
+            range.end <= self.text().len()
+                && self.text().is_char_boundary(range.start)
+                && self.text().is_char_boundary(range.end)
+        });
+        if self.marked == range {
+            return;
+        }
+        self.reveal_marked = range.is_some();
+        self.marked = range;
+        cx.notify();
+    }
+
     /// The viewport height, content height and scroll offset as last laid
     /// out, for drawing a scrollbar. `None` before the first frame.
     pub fn scroll_metrics(&self) -> Option<(Pixels, Pixels, Pixels)> {
@@ -630,6 +657,7 @@ impl Editor {
         if edited {
             self.rehighlight();
             self.extra_selections.clear();
+            self.marked = None;
         }
         let selection = self.selected_range();
         let selection_changed = selection != self.reported_selection;

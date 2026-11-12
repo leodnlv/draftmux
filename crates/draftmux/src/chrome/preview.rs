@@ -1,14 +1,18 @@
 //! A cached rendering boundary for the preview's fixed-size viewport.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use draftmux_storage::Target;
 use gpui::{
-    AnyElement, Bounds, Context, Entity, IntoElement, Pixels, Render, ScrollHandle, Window, canvas,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, Context, DispatchPhase, Entity, IntoElement, MouseMoveEvent, Pixels,
+    Point, Render, ScrollHandle, Window, canvas, div, prelude::*, px,
 };
 use markup::Document;
 
 use crate::block_cache::BlockCache;
-use crate::markup_view::{self, SelectBody};
+use crate::inline_text::MarkHandlers;
+use crate::markup_view::{self, Redline, RedlineColors, SelectBody};
 use crate::selectable::{self, TextSelection};
 use crate::theme;
 
@@ -26,7 +30,25 @@ pub(super) struct Preview {
     /// draft; an empty preview shows a skeleton of the message instead of
     /// "Nothing to preview".
     pub writing: bool,
+    /// While reviewing, the redline shown instead of the document.
+    pub redline: Option<PreviewRedline>,
     pub _selection: gpui::Subscription,
+}
+
+/// A redline of the draft ([`crate::compare::redline`]) parsed for the
+/// target, and how its changes are drawn.
+pub(super) struct PreviewRedline {
+    pub document: Rc<Document>,
+    pub selected: Option<usize>,
+    /// Whether each change is kept.
+    pub kept: Vec<bool>,
+    pub handlers: Rc<MarkHandlers>,
+    /// The change under the pointer during the current mouse move, set by
+    /// the marks' hover handlers.
+    pub hit: Rc<Cell<Option<(usize, Point<Pixels>)>>>,
+    /// Told after every mouse move which change, if any, is under the
+    /// pointer, and where the pointer is.
+    pub on_hover: Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut Window, &mut App)>,
 }
 
 pub(super) struct FieldCopied(pub String);
@@ -187,30 +209,48 @@ impl Preview {
             self.cache.clear();
             self.appearance = appearance;
         }
-        if self
-            .document
-            .as_ref()
-            .is_none_or(|doc| doc.blocks.is_empty())
-        {
+        let document = match &self.redline {
+            Some(redline) => Some(&*redline.document),
+            None => self.document.as_ref(),
+        };
+        if document.is_none_or(|doc| doc.blocks.is_empty()) {
             self.cache.reset();
         }
         // px_6 is 1.5 rem on each side of the scrolling viewport.
         let width = (bounds.size.width - window.rem_size() * 3.).max(px(0.));
-        let (body, background) = match (&self.document, self.target) {
+        let (body, background) = match (document, self.target) {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
-                let style =
-                    std::rc::Rc::new(markup_view::style(target, theme.dark).zoomed(theme.zoom));
+                let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
+                style.redline = self.redline.as_ref().map(|redline| {
+                    let palette = &theme.palette;
+                    Rc::new(Redline {
+                        selected: redline.selected,
+                        kept: redline.kept.clone(),
+                        colors: RedlineColors {
+                            added: palette.diff_added,
+                            added_background: palette.added_bg,
+                            removed: palette.diff_removed,
+                            removed_background: palette.removed_bg,
+                            selected: palette.accent,
+                        },
+                        handlers: redline.handlers.clone(),
+                    })
+                });
+                let style = Rc::new(style);
+                // A redline's text isn't the draft's, so it isn't selected
+                // for the editor.
+                let select = self.redline.is_none().then(|| SelectBody {
+                    state: self.selection.clone(),
+                    body: 0,
+                    color: theme.palette.selection,
+                    registry: None,
+                });
                 (
                     markup_view::render_preview(
                         doc,
                         style.clone(),
                         &self.scroll,
-                        Some(SelectBody {
-                            state: self.selection.clone(),
-                            body: 0,
-                            color: theme.palette.selection,
-                            registry: None,
-                        }),
+                        select,
                         (&mut self.cache, width),
                         window,
                         cx,
@@ -242,6 +282,23 @@ impl Preview {
             ),
         };
 
+        let hover = self.redline.as_ref().map(|redline| {
+            let (hit, on_hover) = (redline.hit.clone(), redline.on_hover.clone());
+            // Painted before the body, so it hears each mouse move after the
+            // marks have reported the change under the pointer.
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Bubble {
+                            let hit = hit.take();
+                            on_hover(hit.map(|(hunk, _)| (hunk, event.position)), window, cx);
+                        }
+                    });
+                },
+            )
+            .absolute()
+        });
         selectable::area(&self.selection, cx)
             .id("preview")
             .size_full()
@@ -251,6 +308,7 @@ impl Preview {
             .px_6()
             .pt_5()
             .pb_10()
+            .children(hover)
             .children(self.fields_card(cx))
             .child(body)
             .child(canvas(|_, _, _| (), move |_, _, _, _| drop(frame)).absolute())

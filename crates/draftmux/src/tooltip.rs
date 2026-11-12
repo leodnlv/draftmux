@@ -29,7 +29,6 @@ pub fn text(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> 
 
 impl Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = theme::palette(cx);
         let fade = self.shown.elapsed().as_secs_f32() / FADE_IN.as_secs_f32();
         if fade < 1. {
             window.request_animation_frame();
@@ -39,21 +38,25 @@ impl Render for Tooltip {
             .pl(px(8.))
             .pt(px(16.))
             .when(fade < 1., |tooltip| tooltip.opacity(ease_out_quint()(fade)))
-            .child(
-                div()
-                    .px(px(7.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .bg(palette.menu)
-                    .text_color(palette.text)
-                    .text_size(px(12.))
-                    .line_height(px(15.))
-                    .whitespace_nowrap()
-                    .shadow(vec![
-                        shadow(hex(0x00000033), 0., 0., 0.5),
-                        shadow(hex(0x00000026), 2., 8., 0.),
-                    ])
-                    .child(self.text.clone()),
-            )
+            .child(card(self.text.clone(), cx))
     }
+}
+
+/// A tooltip's card showing `text`, for hover labels gpui doesn't place.
+pub fn card(text: SharedString, cx: &App) -> gpui::Div {
+    let palette = theme::palette(cx);
+    div()
+        .px(px(7.))
+        .py(px(3.))
+        .rounded(px(5.))
+        .bg(palette.menu)
+        .text_color(palette.text)
+        .text_size(px(12.))
+        .line_height(px(15.))
+        .whitespace_nowrap()
+        .shadow(vec![
+            shadow(hex(0x00000033), 0., 0., 0.5),
+            shadow(hex(0x00000026), 2., 8., 0.),
+        ])
+        .child(text)
 }

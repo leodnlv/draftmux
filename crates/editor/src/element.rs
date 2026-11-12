@@ -297,7 +297,19 @@ impl Element for EditorElement {
         let max_scroll = (layout.content_height - bounds.size.height).max(Pixels::ZERO);
         let selection = editor.buffer.selection();
         let mut scroll_y = editor.scroll_y;
-        if editor.autoscroll {
+        let marked = editor.marked.clone().filter(|_| editor.reveal_marked);
+        if let Some(marked) = marked {
+            let start = layout.caret_bounds(marked.start, Affinity::Downstream);
+            let end = layout.caret_bounds(marked.end, Affinity::Upstream);
+            let top = start.origin.y + style.padding_top;
+            let bottom = end.origin.y + style.padding_top + style.line_height;
+            let margin = style.line_height * 2.;
+            if top - margin < scroll_y || bottom - top + margin * 2. > bounds.size.height {
+                scroll_y = top - margin;
+            } else if bottom + margin > scroll_y + bounds.size.height {
+                scroll_y = bottom + margin - bounds.size.height;
+            }
+        } else if editor.autoscroll {
             let caret = layout.caret_bounds(selection.head, selection.affinity);
             let top = caret.origin.y + style.padding_top;
             let bottom = top + style.line_height;
@@ -315,6 +327,7 @@ impl Element for EditorElement {
         self.editor.update(cx, |editor, _| {
             editor.scroll_y = scroll_y;
             editor.autoscroll = false;
+            editor.reveal_marked = false;
             editor.layout = Some(layout.clone());
         });
         layout
@@ -339,6 +352,7 @@ impl Element for EditorElement {
         let focused = focus_handle.is_focused(window) && window.is_window_active();
         let caret_on = editor.caret_on;
         let read_only = editor.read_only;
+        let marked = editor.marked.clone();
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.editor.clone()),
@@ -363,6 +377,22 @@ impl Element for EditorElement {
                     }
                 }
                 window.request_animation_frame();
+            }
+            if let Some(marked) = marked {
+                if marked.is_empty() {
+                    let at = layout.caret_bounds(marked.start, Affinity::Downstream);
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            at.origin - point(px(1.), px(0.)),
+                            size(px(2.), at.size.height),
+                        ),
+                        style.marked.opacity(1.),
+                    ));
+                } else {
+                    for rect in layout.range_rects(marked, false) {
+                        window.paint_quad(fill(rect, style.marked));
+                    }
+                }
             }
             let color = if focused {
                 style.selection

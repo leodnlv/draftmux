@@ -395,12 +395,16 @@ impl SettingsWindow {
             checked,
             enabled: true,
             action: Some(choice),
+            detail: None,
+            heading: false,
         };
         let separator = || MenuItem {
             label: SharedString::default(),
             checked: false,
             enabled: false,
             action: None,
+            detail: None,
+            heading: false,
         };
         let own = scope(self.settings(cx), self.page)
             .cloned()
