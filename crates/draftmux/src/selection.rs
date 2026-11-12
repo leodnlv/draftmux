@@ -189,7 +189,9 @@ const END: &str = "<<<END SELECTION>>>";
 /// targets with the same text.
 fn syntax(target: Target) -> &'static str {
     match target {
-        Target::Github => "GitHub-flavored Markdown",
+        Target::Github => {
+            "GitHub-flavored Markdown, rendered as in a GitHub comment: every line break inside a paragraph shows, so keep each paragraph on one line rather than wrapping it"
+        }
         Target::Slack => {
             "Markdown for a Slack message: every line break shows as written; **bold**, *italic*, ~~strike~~, `code`, [text](url) links; :shortcode: emoji and <@U…> mentions work; headings paste as a bold line and tables as a code block; keep list items to one line"
         }

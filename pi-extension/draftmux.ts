@@ -24,7 +24,7 @@ type Config =
 
 /** The same text as `syntax` in crates/draftmux/src/selection.rs. */
 const TARGET_SYNTAX: Record<Target, string> = {
-	github: "GitHub-flavored Markdown",
+	github: "GitHub-flavored Markdown, rendered as in a GitHub comment: every line break inside a paragraph shows, so keep each paragraph on one line rather than wrapping it",
 	slack:
 		"Markdown for a Slack message: every line break shows as written; **bold**, *italic*, ~~strike~~, `code`, [text](url) links; :shortcode: emoji and <@U…> mentions work; headings paste as a bold line and tables as a code block; keep list items to one line",
 	rich: "Markdown, pasted as rich text into an email or document (headings, bold, italic, links, lists, quotes, code and tables carry over; no raw HTML, alerts or @mentions; no subject line)",
