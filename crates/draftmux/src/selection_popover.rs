@@ -3,10 +3,12 @@
 //! markdown in the editor, and the popover then sits above the preview's
 //! selection instead.
 //!
-//! With several selections (see [`Editor::extra_selections`]) the popover
-//! shows their count and only Ask pi…, which focuses the chat's composer,
-//! where they're attached. The selection actions are prompts written for
-//! one selection, so they don't apply to several.
+//! Comment swaps the items for a field: what's written there goes to the
+//! chat's agent with the selections quoted, as if sent from the chat, and
+//! the popover closes. With several selections (see
+//! [`Editor::extra_selections`]) the popover shows their count and only
+//! Comment: the selection actions are prompts written for one selection, so
+//! they don't apply to several.
 //!
 //! The popover is a separate panel window. On Wayland, where windows can't
 //! be placed in screen coordinates, it's a popup anchored to the main window
@@ -21,7 +23,9 @@
 //! The main window keeps keyboard focus, so the editor keeps its selection
 //! highlight; the popover's keys are bound in key contexts around the editor
 //! (see [`SelectionPopover::wrap`]). A click makes the panel key only until
-//! the mouse button is released.
+//! the mouse button is released. The comment field is the exception: the
+//! panel stays key while it's shown, and the main window keeps the editor
+//! focused behind it.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -31,12 +35,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use draftmux_storage::{Draft, Store};
-use editor::{Editor, EditorEvent};
+use editor::{Editor, EditorEvent, EditorStyle};
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds, Context, Div,
-    Entity, FocusHandle, Focusable, KeyBinding, Pixels, SharedString, Size, Stateful, Subscription,
-    Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions, canvas, div,
-    ease_out_quint, point,
+    Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, Pixels, SharedString, Size, Stateful,
+    Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions,
+    canvas, div, ease_out_quint, font, point,
     popup::{
         PopupAnchor, PopupConstraintAdjustment, PopupGravity, PopupNotSupportedError, PopupOptions,
     },
@@ -46,12 +50,13 @@ use gpui::{
 use shell_env::ShellEnv;
 
 use crate::app_settings::AppSettings;
+use crate::assets::{COMMENT_ICON, SEND_ICON};
 use crate::resources;
 use crate::selectable::TextSelection;
 use crate::selection::{self, Action as SelectionAction, Request, SelectionConfig};
 use crate::theme::{self, Palette};
 
-actions!(selection_popover, [Dismiss, Confirm, Next, Previous]);
+actions!(selection_popover, [Dismiss, Confirm, Next, Previous, Back]);
 
 /// Applies the option with this index.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -61,6 +66,8 @@ pub struct Pick(pub usize);
 /// Key contexts around the editor while the popover is shown.
 const POPOVER_CONTEXT: &str = "SelectionPopover";
 const RESULTS_CONTEXT: &str = "SelectionResults";
+/// Around the comment field, in the panel.
+const COMMENT_CONTEXT: &str = "SelectionComment";
 
 /// How long the selection must stay put before the popover appears, so
 /// shift-arrow selections don't flash it on every step.
@@ -74,6 +81,7 @@ const PADDING: Pixels = px(5.);
 /// them, inset by the padding.
 const ITEM_RADIUS: Pixels = px(crate::platform::POPUP_RADIUS - 5.);
 const RESULTS_WIDTH: Pixels = px(380.);
+const COMMENT_WIDTH: Pixels = px(340.);
 /// How long a newly highlighted item takes to fade in.
 const HIGHLIGHT_FADE: Duration = Duration::from_millis(120);
 /// How long the running, results and error states take to fade in.
@@ -101,9 +109,23 @@ pub fn init(cx: &mut App) {
             bindings.push(KeyBinding::new(key, Pick(index), results.as_deref()));
         }
     }
+    // Enter sends the comment; shift-enter still inserts a newline.
+    let comment = Some(format!("{COMMENT_CONTEXT} > Editor"));
+    bindings.extend([
+        KeyBinding::new("enter", Confirm, comment.as_deref()),
+        KeyBinding::new("escape", Back, comment.as_deref()),
+    ]);
     // Bound after the editor's keys, so these win at the same depth.
     cx.bind_keys(bindings);
 }
+
+pub enum SelectionPopoverEvent {
+    /// The text the user wrote in the comment field about the editor's
+    /// selections: send it to the chat's agent with them quoted.
+    Comment(String),
+}
+
+impl EventEmitter<SelectionPopoverEvent> for SelectionPopover {}
 
 /// The popover for one editor's selection.
 pub struct SelectionPopover {
@@ -121,13 +143,13 @@ pub struct SelectionPopover {
     /// The preview pane in window coordinates, measured by
     /// [`Self::wrap_preview`].
     preview_pane: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The chat's message field, which Ask pi… focuses.
-    composer: FocusHandle,
     /// Remembers whether the user has added a selection, after which the
     /// hint on how to is hidden.
     store: Store,
     show_add_hint: bool,
     pending_show: Option<Task<()>>,
+    /// Follows the comment field's text while it's shown.
+    comment_observer: Option<Subscription>,
     reconcile_scheduled: bool,
     /// The panel is being opened; it is set once it has.
     opening: bool,
@@ -146,8 +168,10 @@ struct Open {
 
 enum Mode {
     Actions(Vec<draftmux_settings::SelectionAction>),
-    /// This many ranges are selected; the only item is Ask pi….
+    /// This many ranges are selected; the only item is Comment.
     Several(usize),
+    /// A message to pi about the selections, being written.
+    Comment(Entity<Editor>),
     /// Dropping it cancels the call and kills pi.
     Running {
         /// What is being done, shown beside the spinner.
@@ -162,6 +186,15 @@ enum Mode {
 }
 
 impl Mode {
+    /// The index of the Comment item among the items.
+    fn comment_item(&self) -> Option<usize> {
+        match self {
+            Self::Actions(actions) => Some(actions.len() + 1),
+            Self::Several(_) => Some(0),
+            _ => None,
+        }
+    }
+
     fn is_request(&self, request: &Arc<AtomicBool>) -> bool {
         matches!(self, Self::Running { _cancel, .. } if Arc::ptr_eq(&_cancel.0, request))
     }
@@ -220,7 +253,6 @@ impl SelectionPopover {
     pub fn new(
         editor: Entity<Editor>,
         preview: Entity<TextSelection>,
-        composer: FocusHandle,
         store: Store,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -280,10 +312,10 @@ impl SelectionPopover {
             pane: Rc::new(Cell::new(None)),
             preview,
             preview_pane: Rc::new(Cell::new(None)),
-            composer,
             show_add_hint: !store.selection_added(),
             store,
             pending_show: None,
+            comment_observer: None,
             reconcile_scheduled: false,
             opening: false,
             main_bounds: Some(window.bounds()),
@@ -464,15 +496,7 @@ impl SelectionPopover {
                 if this.open.is_some() || editor.selected_range() != range || !this.available(cx) {
                     return;
                 }
-                let mode = match editor.selected_ranges().len() {
-                    1 => Mode::Actions(
-                        AppSettings::global(cx)
-                            .read(cx)
-                            .settings
-                            .selection_actions(),
-                    ),
-                    count => Mode::Several(count),
-                };
+                let mode = this.items_mode(cx);
                 this.open = Some(Open {
                     range,
                     text: editor.text().to_string(),
@@ -485,8 +509,23 @@ impl SelectionPopover {
         }));
     }
 
+    /// The items for the editor's selections: the actions for one, Comment
+    /// for several.
+    fn items_mode(&self, cx: &App) -> Mode {
+        match self.editor.read(cx).selected_ranges().len() {
+            1 => Mode::Actions(
+                AppSettings::global(cx)
+                    .read(cx)
+                    .settings
+                    .selection_actions(),
+            ),
+            count => Mode::Several(count),
+        }
+    }
+
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.pending_show = None;
+        self.comment_observer = None;
         if self.open.take().is_some() {
             // Closed now rather than after the main window's next draw: a
             // window covered by another app may not draw until it's shown
@@ -533,6 +572,7 @@ impl SelectionPopover {
     }
 
     fn set_mode(&mut self, mode: Mode, highlighted: Option<usize>, cx: &mut Context<Self>) {
+        self.comment_observer = None;
         if let Some(open) = &mut self.open {
             open.mode = mode;
             open.highlighted = highlighted;
@@ -542,7 +582,7 @@ impl SelectionPopover {
 
     fn item_count(&self) -> usize {
         match self.open.as_ref().map(|open| &open.mode) {
-            Some(Mode::Actions(actions)) => actions.len() + 1,
+            Some(Mode::Actions(actions)) => actions.len() + 2,
             Some(Mode::Several(_)) => 1,
             Some(Mode::Results(options)) => options.len(),
             _ => 0,
@@ -595,7 +635,8 @@ impl SelectionPopover {
                     self.pick_action(index, cx);
                 }
             }
-            Mode::Several(_) if open.highlighted.is_some() => self.ask_pi(cx),
+            Mode::Several(_) if open.highlighted.is_some() => self.start_comment(cx),
+            Mode::Comment(_) => self.send_comment(cx),
             _ => {}
         }
     }
@@ -608,7 +649,9 @@ impl SelectionPopover {
         else {
             return;
         };
-        if index == 0 {
+        if index == actions.len() + 1 {
+            self.start_comment(cx);
+        } else if index == 0 {
             self.run(
                 SelectionAction::Alternatives,
                 "Generating alternatives…".into(),
@@ -624,17 +667,83 @@ impl SelectionPopover {
         }
     }
 
-    /// Focuses the chat's composer, where the selections are attached.
-    fn ask_pi(&mut self, cx: &mut Context<Self>) {
-        self.dismiss(cx);
-        let (main, composer) = (self.main, self.composer.clone());
-        cx.defer(move |cx| {
-            main.update(cx, |_, window, cx| {
-                window.activate_window();
-                window.focus(&composer, cx);
-            })
-            .ok();
+    /// Swaps the items for the comment field and gives it the keyboard.
+    fn start_comment(&mut self, cx: &mut Context<Self>) {
+        let field = theme::editor(comment_style, cx);
+        // Typing grows the field, and the panel with it.
+        let observer = cx.subscribe(&field, |this, _, event, cx| {
+            if matches!(event, EditorEvent::Edited) {
+                this.changed(cx);
+            }
         });
+        self.set_mode(Mode::Comment(field), None, cx);
+        self.comment_observer = Some(observer);
+        self.focus_comment(cx);
+    }
+
+    fn commenting(&self) -> bool {
+        matches!(
+            self.open,
+            Some(Open {
+                mode: Mode::Comment(_),
+                ..
+            })
+        )
+    }
+
+    /// Makes the panel key with the comment field focused, if it's shown.
+    /// The main window keeps the editor focused, so the selection stays
+    /// painted.
+    fn focus_comment(&self, cx: &mut Context<Self>) {
+        let (
+            Some(panel),
+            Some(Open {
+                mode: Mode::Comment(field),
+                ..
+            }),
+        ) = (&self.panel, &self.open)
+        else {
+            return;
+        };
+        let (handle, focus) = (panel.handle, field.focus_handle(cx));
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    window.activate_window();
+                    window.focus(&focus, cx);
+                })
+                .ok();
+        });
+    }
+
+    /// Leaves the comment field for the items it replaced, with Comment
+    /// highlighted.
+    fn back(&mut self, cx: &mut Context<Self>) {
+        if !self.commenting() {
+            return;
+        }
+        let mode = self.items_mode(cx);
+        let highlighted = mode.comment_item();
+        self.set_mode(mode, highlighted, cx);
+        self.focus_main(cx);
+    }
+
+    /// Hands the comment to the chat and closes the popover.
+    fn send_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(Open {
+            mode: Mode::Comment(field),
+            ..
+        }) = &self.open
+        else {
+            return;
+        };
+        let text = field.read(cx).text().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.dismiss(cx);
+        self.focus_main(cx);
+        cx.emit(SelectionPopoverEvent::Comment(text));
     }
 
     fn focus_main(&self, cx: &mut Context<Self>) {
@@ -919,6 +1028,8 @@ impl SelectionPopover {
                         if this.open.is_none() {
                             return this.close_panel(cx);
                         }
+                        // Reopened elsewhere while the comment field shows.
+                        this.focus_comment(cx);
                         // The state may have changed while it opened.
                         this.schedule_reconcile(cx);
                     }
@@ -969,6 +1080,41 @@ impl SelectionPopover {
                 )
                 .into_any_element()
         };
+        let comment_item = |index: usize| {
+            let color = if open.highlighted == Some(index) {
+                palette.on_accent
+            } else {
+                palette.text
+            };
+            let item = item(index)
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(9.))
+                .py(px(5.))
+                .whitespace_nowrap()
+                .child(
+                    gpui::svg()
+                        .path(COMMENT_ICON)
+                        .size(px(13.))
+                        .text_color(color),
+                )
+                .child("Comment")
+                .on_click({
+                    let this = this.clone();
+                    move |_, _, cx| this.update(cx, |this, cx| this.start_comment(cx))
+                });
+            highlight(index, item)
+        };
+        let divider = || {
+            div()
+                .flex_none()
+                .w(px(1.))
+                .h(px(16.))
+                .mx(px(3.))
+                .bg(palette.menu_line)
+        };
         let content = match &open.mode {
             Mode::Actions(actions) => div()
                 .flex()
@@ -1002,6 +1148,8 @@ impl SelectionPopover {
                             highlight(index, item)
                         }),
                 )
+                .child(divider())
+                .child(comment_item(actions.len() + 1))
                 // Until the user has added a selection, nothing else shows
                 // that they can.
                 .when(self.show_add_hint, |actions| {
@@ -1030,24 +1178,99 @@ impl SelectionPopover {
                         .text_color(palette.muted)
                         .child(format!("{count} selections")),
                 )
-                .child(div().w(px(1.)).h(px(16.)).bg(palette.menu_line))
-                .child(highlight(
-                    0,
-                    item(0)
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .px(px(9.))
-                        .py(px(5.))
-                        .child(div().text_size(px(11.)).child("✦"))
-                        .child("Ask pi…")
-                        .on_click({
-                            let this = this.clone();
-                            move |_, _, cx| this.update(cx, |this, cx| this.ask_pi(cx))
-                        }),
-                ))
+                .child(divider())
+                .child(comment_item(0))
                 .into_any_element(),
+            Mode::Comment(field) => {
+                let empty = field.read(cx).text().trim().is_empty();
+                let placeholder: SharedString = match self.editor.read(cx).selected_ranges().len() {
+                    1 => "Tell pi what to change here…".into(),
+                    n => format!("Tell pi what to do with these {n} selections…").into(),
+                };
+                let focus = field.focus_handle(cx);
+                div()
+                    .w(COMMENT_WIDTH - PADDING * 2.)
+                    .flex()
+                    .flex_col()
+                    .key_context(COMMENT_CONTEXT)
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &Confirm, _, cx| this.update(cx, |this, cx| this.send_comment(cx))
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &Back, _, cx| this.update(cx, |this, cx| this.back(cx))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap(px(6.))
+                            .p(px(4.))
+                            .pl(px(9.))
+                            .rounded(ITEM_RADIUS)
+                            .bg(palette.menu_field)
+                            .border_1()
+                            .border_color(palette.hairline)
+                            // The field is as wide as its text; a press beside
+                            // it still focuses it.
+                            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                                window.focus(&focus, cx)
+                            })
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(field.clone())
+                                    .when(empty, |input| {
+                                        input.child(
+                                            div()
+                                                .absolute()
+                                                .top(px(2.))
+                                                .left_0()
+                                                .text_color(palette.faint)
+                                                .whitespace_nowrap()
+                                                .child(placeholder),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("send-comment")
+                                    .size(px(22.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.))
+                                    .bg(if empty {
+                                        palette.send_disabled
+                                    } else {
+                                        palette.accent
+                                    })
+                                    .when(!empty, |button| {
+                                        button.active(|style| style.opacity(0.8)).on_click({
+                                            let this = this.clone();
+                                            move |_, _, cx| {
+                                                this.update(cx, |this, cx| this.send_comment(cx))
+                                            }
+                                        })
+                                    })
+                                    .child(
+                                        gpui::svg()
+                                            .path(SEND_ICON)
+                                            .size(px(12.))
+                                            .text_color(palette.on_accent),
+                                    ),
+                            ),
+                    )
+                    .child(footer(
+                        &["↵ send to pi", "⇧↵ newline", "esc back"],
+                        &palette,
+                    ))
+                    .into_any_element()
+            }
             Mode::Running {
                 label, previews, ..
             } => div()
@@ -1131,6 +1354,7 @@ impl SelectionPopover {
         // and fade in rather than snapping.
         let key = match &open.mode {
             Mode::Actions(_) | Mode::Several(_) => return content,
+            Mode::Comment(_) => "popover-comment",
             Mode::Running { .. } => "popover-running",
             Mode::Results(_) => "popover-results",
             Mode::Error(_) => "popover-error",
@@ -1162,6 +1386,23 @@ fn footer(hints: &[&str], palette: &Palette) -> impl IntoElement {
         .children(hints.iter().map(|hint| hint.to_string()))
 }
 
+/// The comment field: the UI font at the popover's size, as tall as its
+/// text.
+fn comment_style(palette: &Palette) -> EditorStyle {
+    EditorStyle {
+        font: font(editor::platform::ui_font()),
+        font_size: px(13.),
+        line_height: px(19.),
+        padding_x: px(0.),
+        padding_top: px(2.),
+        padding_bottom: px(1.),
+        text: palette.text,
+        heading: palette.text,
+        fit_content: true,
+        ..palette.editor_style()
+    }
+}
+
 /// The root view of the popup panel; renders [`SelectionPopover`]'s state.
 struct PopoverPanel {
     popover: Entity<SelectionPopover>,
@@ -1180,10 +1421,16 @@ impl Render for PopoverPanel {
             .text_size(px(13.))
             .font_family(editor::platform::ui_font())
             // A click makes the panel key; give the keyboard back to the
-            // editor.
+            // editor, unless the comment field has it.
             .on_mouse_up(gpui::MouseButton::Left, {
                 let popover = popover.clone();
-                move |_, _, cx| popover.update(cx, |this, cx| this.focus_main(cx))
+                move |_, _, cx| {
+                    popover.update(cx, |this, cx| {
+                        if !this.commenting() {
+                            this.focus_main(cx);
+                        }
+                    })
+                }
             })
             .child(measured_content(popover, content))
     }
@@ -1221,11 +1468,9 @@ mod tests {
             .update(cx, |_, window, cx| {
                 let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
                 let preview = cx.new(TextSelection::new);
-                let composer = cx.focus_handle();
                 let store = Store::new(config.path().join("drafts"));
-                let popover = cx.new(|cx| {
-                    SelectionPopover::new(editor.clone(), preview, composer, store, window, cx)
-                });
+                let popover =
+                    cx.new(|cx| SelectionPopover::new(editor.clone(), preview, store, window, cx));
                 (editor, popover)
             })
             .unwrap();
@@ -1258,6 +1503,63 @@ mod tests {
                 assert!(!editor.undo(cx));
             });
         });
+    }
+
+    #[gpui::test]
+    fn comment_sends_its_text_and_esc_goes_back_to_the_items(cx: &mut gpui::TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::app_settings::init(config.path().to_owned(), cx));
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        let (editor, popover) = window
+            .update(cx, |_, window, cx| {
+                let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
+                let preview = cx.new(TextSelection::new);
+                let store = Store::new(config.path().join("drafts"));
+                let popover =
+                    cx.new(|cx| SelectionPopover::new(editor.clone(), preview, store, window, cx));
+                (editor, popover)
+            })
+            .unwrap();
+        let sent = Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let sent = sent.clone();
+            cx.subscribe(
+                &popover,
+                move |_, SelectionPopoverEvent::Comment(text), _| {
+                    sent.borrow_mut().push(text.clone())
+                },
+            )
+            .detach();
+            editor.update(cx, |editor, cx| editor.select_range(3..8, cx));
+            let field = cx.new(|cx| Editor::new("", cx));
+            popover.update(cx, |popover, cx| {
+                let Mode::Actions(actions) = popover.items_mode(cx) else {
+                    panic!("one selection has the actions");
+                };
+                // After Alternatives and the actions.
+                let comment = Some(actions.len() + 1);
+                popover.open = Some(Open {
+                    text: "Hi there\n".into(),
+                    range: 3..8,
+                    highlighted: None,
+                    mode: Mode::Comment(field.clone()),
+                });
+                assert_eq!(popover.item_count(), 0);
+                // Nothing written, nothing sent.
+                popover.confirm(cx);
+                assert!(popover.commenting());
+                popover.back(cx);
+                assert!(matches!(
+                    popover.open,
+                    Some(Open { mode: Mode::Actions(_), highlighted, .. }) if highlighted == comment
+                ));
+                popover.set_mode(Mode::Comment(field.clone()), None, cx);
+            });
+            field.update(cx, |field, cx| field.set_text("  Make it formal\n", cx));
+            popover.update(cx, |popover, cx| popover.confirm(cx));
+            assert!(popover.read(cx).open.is_none());
+        });
+        assert_eq!(*sent.borrow(), ["Make it formal"]);
     }
 
     #[test]

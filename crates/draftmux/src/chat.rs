@@ -575,11 +575,6 @@ impl Chat {
         });
     }
 
-    /// The message field's focus, for writing about the selections.
-    pub fn composer_focus(&self, cx: &App) -> FocusHandle {
-        self.composer.focus_handle(cx)
-    }
-
     /// The draft editor's selections, unless the user detached the only one.
     fn attached(&self, cx: &App) -> Vec<Quote> {
         self.quotes(&self.draft_editor.read(cx).selected_ranges(), cx)
@@ -639,6 +634,28 @@ impl Chat {
         self.composer
             .update(cx, |editor, cx| editor.set_text("", cx));
         let quotes = self.attached(cx);
+        self.send_with(&text, quotes, cx);
+    }
+
+    /// Sends `text` about the draft editor's selections, all of them even
+    /// when the composer has the only one detached: the selection popover's
+    /// comment field. Returns whether it was sent.
+    pub fn comment(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let text = text.trim();
+        if text.is_empty() || self.busy() || self.session().is_none() {
+            return false;
+        }
+        let draft = self.draft_editor.read(cx);
+        let quotes = draft
+            .selected_ranges()
+            .into_iter()
+            .filter_map(|range| Quote::new(draft.text(), range))
+            .collect();
+        self.send_with(text, quotes, cx);
+        true
+    }
+
+    fn send_with(&mut self, text: &str, quotes: Vec<Quote>, cx: &mut Context<Self>) {
         if quotes.len() > 1 {
             // The message took the selections; pi is about to change them.
             let ranges: Vec<_> = quotes.iter().map(|quote| quote.range.clone()).collect();
@@ -647,7 +664,7 @@ impl Chat {
             // The message took the selection; the editor keeps it selected.
             self.detach(cx);
         }
-        cx.emit(ChatEvent::Send(quote::prompt(&text, &quotes)));
+        cx.emit(ChatEvent::Send(quote::prompt(text, &quotes)));
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {

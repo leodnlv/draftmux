@@ -37,7 +37,7 @@ use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::selectable::{Scroller, SelectionChanged, SelectionStarted, TextSelection};
-use crate::selection_popover::SelectionPopover;
+use crate::selection_popover::{SelectionPopover, SelectionPopoverEvent};
 use crate::source_map::SourceMap;
 use crate::theme::{self, Palette};
 use crate::update::{self, Updater};
@@ -312,12 +312,10 @@ impl Chrome {
             selection.set_sticky(true);
             selection
         });
-        let composer = chat.read(cx).composer_focus(cx);
         let selection = cx.new(|cx| {
             SelectionPopover::new(
                 editor.clone(),
                 preview_selection.clone(),
-                composer,
                 store.clone(),
                 window,
                 cx,
@@ -344,6 +342,12 @@ impl Chrome {
                 },
             ),
             cx.subscribe(&chat, |this, _, event, cx| this.chat_event(event, cx)),
+            cx.subscribe(
+                &selection,
+                |this, _, SelectionPopoverEvent::Comment(text), cx| {
+                    this.chat.update(cx, |chat, cx| chat.comment(text, cx));
+                },
+            ),
             cx.subscribe(&editor, |this, editor, event, cx| match event {
                 EditorEvent::Edited => this.edited(editor.read(cx).text().to_owned(), cx),
                 // Selecting something else in the editor replaces the
