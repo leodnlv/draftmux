@@ -26,7 +26,9 @@ Status: early release; expect rough edges.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
   text or plain text.
 - **Selection actions.** Select text for alternatives, Shorter or Tighten, or
-  your own actions. With text selected, a chat message changes only that part.
+  your own actions. Options appear as previews while pi generates the rest;
+  choose one when the request finishes. With text selected, a chat message
+  changes only that part.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
 

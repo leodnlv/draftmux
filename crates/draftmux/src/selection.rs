@@ -1,7 +1,7 @@
 //! Selection actions as one-off pi calls.
 //!
 //! Each call forks the draft's session into a temporary session directory:
-//! `pi -p <prompt> --fork <draft session> --session-dir <temp> -e <ext>`, with
+//! `pi --mode json -p <prompt> --fork <draft session> --session-dir <temp> -e <ext>`, with
 //! the draft's profile and cwd, stdin closed and `DRAFTMUX_MODE=selection`,
 //! so the extension blocks every tool call. The temporary directory is
 //! deleted once pi has exited, so nothing reaches the draft's own session or
@@ -19,6 +19,8 @@ use draftmux_storage::{DraftSettings, Meta, Target};
 use serde::Deserialize;
 
 use crate::process;
+
+mod stream;
 
 /// A selection call waits for a full model turn over the whole session.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -121,7 +123,8 @@ impl Request {
 /// to `config.alternatives` replacements for the selection, with the
 /// selection's own leading and trailing whitespace kept. The temporary
 /// session directory is created in `temp_parent` and is gone when this
-/// returns.
+/// returns. `preview` receives provisional complete options (or an empty list
+/// to retract them); only the returned options may be applied to the editor.
 pub fn run(
     pi: Command,
     extension: &Path,
@@ -129,6 +132,7 @@ pub fn run(
     config: &SelectionConfig,
     temp_parent: &Path,
     cancel: &AtomicBool,
+    mut preview: impl FnMut(Vec<String>),
 ) -> Result<Vec<String>, String> {
     let prompt = prompt(request, config.alternatives)?;
     let session_dir = tempfile::Builder::new()
@@ -136,14 +140,26 @@ pub fn run(
         .tempdir_in(temp_parent)
         .map_err(|err| format!("Couldn't create a temporary session directory: {err}"))?;
     let command = command(pi, &prompt, request, extension, session_dir.path(), config);
-    // `run` returns after pi has exited, so the directory is removed after.
-    let output = process::run("pi", command, None, TIMEOUT, Some(cancel));
-    drop(session_dir);
     let (leading, trailing) = surrounding_whitespace(request.selected());
-    Ok(parse(&output?, config.alternatives)?
-        .into_iter()
-        .map(|option| format!("{leading}{option}{trailing}"))
-        .collect())
+    let with_whitespace = |options: Vec<String>| {
+        options
+            .into_iter()
+            .map(|option| format!("{leading}{option}{trailing}"))
+            .collect()
+    };
+    let mut stream = stream::Stream::default();
+    // The directory lives until the child has exited, including cancellation.
+    let output = process::run_streaming("pi", command, None, TIMEOUT, Some(cancel), |chunk| {
+        stream.feed(chunk, config.alternatives, &mut |options| {
+            preview(with_whitespace(options))
+        })
+    });
+    drop(session_dir);
+    let result = output.and_then(|()| stream.finish()).map(with_whitespace);
+    if result.is_err() {
+        preview(Vec::new());
+    }
+    result
 }
 
 fn command(
@@ -155,7 +171,8 @@ fn command(
     config: &SelectionConfig,
 ) -> Command {
     // `-p` takes the next argument as the prompt.
-    pi.arg("-p")
+    pi.args(["--mode", "json"])
+        .arg("-p")
         .arg(prompt)
         .arg("--fork")
         .arg(&request.session_file)
@@ -438,6 +455,8 @@ mod tests {
         assert_eq!(
             args,
             [
+                "--mode",
+                "json",
                 "-p",
                 "PROMPT",
                 "--fork",
@@ -455,10 +474,10 @@ mod tests {
         assert!(envs.contains(&("DRAFTMUX_INSTRUCTIONS".as_ref(), None)));
 
         config.thinking = Some(ThinkingLevel::High);
-        assert_eq!(build(&config).1.len(), 8, "thinking only with a model");
+        assert_eq!(build(&config).1.len(), 10, "thinking only with a model");
         config.model = Some("anthropic/claude-haiku-5-5".into());
         assert_eq!(
-            build(&config).1[8..],
+            build(&config).1[10..],
             [
                 "--model",
                 "anthropic/claude-haiku-5-5",
@@ -468,7 +487,7 @@ mod tests {
         );
 
         config.context_files = false;
-        assert_eq!(build(&config).1[8], "--no-context-files");
+        assert_eq!(build(&config).1[10], "--no-context-files");
     }
 
     #[test]
@@ -509,7 +528,9 @@ mod tests {
         fs::write(
             &script,
             r#"while [ "$1" ]; do [ "$1" = --session-dir ] && test -d "$2" && touch "$2/s.jsonl"; shift; done
-echo '{"alternatives": ["over here", "here"]}'"#,
+echo '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"alternatives\":[\"over here\","}}'
+echo '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"{\"alternatives\":[\"over here\",\"here\"]}"}]}}'
+echo '{"type":"agent_settled","aborted":false}'"#,
         )
         .unwrap();
         let mut pi = Command::new("/bin/sh");
@@ -518,6 +539,7 @@ echo '{"alternatives": ["over here", "here"]}'"#,
         let mut request = request("Hi there\n", "there\n", Action::Alternatives);
         request.cwd = parent.path().to_path_buf();
 
+        let mut previews = Vec::new();
         let options = run(
             pi,
             Path::new("/ext"),
@@ -525,9 +547,36 @@ echo '{"alternatives": ["over here", "here"]}'"#,
             &SelectionConfig::default(),
             parent.path(),
             &AtomicBool::new(false),
+            |options| previews.push(options),
         )
         .unwrap();
         assert_eq!(options, ["over here\n", "here\n"]);
+        assert_eq!(previews[0], ["over here\n"]);
+        assert_eq!(previews.last().unwrap(), &options);
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_process_retracts_complete_previews() {
+        let mut pi = Command::new("/bin/sh");
+        pi.args(["-c", r#"echo '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"alternatives\":[\"preview\","}}'; exit 1"#]);
+        let parent = tempfile::tempdir().unwrap();
+        let mut request = request("word", "word", Action::Alternatives);
+        request.cwd = parent.path().to_owned();
+        let mut previews = Vec::new();
+        assert!(
+            run(
+                pi,
+                Path::new("/ext"),
+                &request,
+                &SelectionConfig::default(),
+                parent.path(),
+                &AtomicBool::new(false),
+                |options| previews.push(options)
+            )
+            .is_err()
+        );
+        assert_eq!(previews, [vec!["preview".to_string()], Vec::new()]);
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
@@ -549,6 +598,7 @@ echo '{"alternatives": ["over here", "here"]}'"#,
             &SelectionConfig::default(),
             parent.path(),
             &AtomicBool::new(false),
+            |_| {},
         )
         .unwrap_err();
         assert_eq!(err, "No API key found for anthropic");
@@ -601,6 +651,8 @@ echo '{"alternatives": ["over here", "here"]}'"#,
             env!("CARGO_MANIFEST_DIR"),
             "/../../pi-extension/draftmux.ts"
         ));
+        let started = std::time::Instant::now();
+        let mut first_preview = None;
         let options = run(
             Command::new("pi"),
             extension,
@@ -608,9 +660,19 @@ echo '{"alternatives": ["over here", "here"]}'"#,
             &SelectionConfig::default(),
             parent.path(),
             &AtomicBool::new(false),
+            |options| {
+                if !options.is_empty() {
+                    first_preview.get_or_insert(started.elapsed());
+                }
+                eprintln!("preview at {:?}: {options:?}", started.elapsed());
+            },
         )
         .unwrap();
-        eprintln!("options: {options:?}");
+        eprintln!(
+            "first preview: {first_preview:?}; finished at {:?}; options: {options:?}",
+            started.elapsed()
+        );
+        assert!(first_preview.is_some());
         assert!(!options.is_empty() && options.len() <= 3);
         assert!(options.iter().all(|o| o.ends_with('\n')));
 

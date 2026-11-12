@@ -52,7 +52,7 @@ pi --mode rpc --fork <source.jsonl> --session-dir <draft>/session -e <ext>
 pi --mode rpc --session <draft session file> -e <ext>
 
 # Selection call (DRAFTMUX_MODE=selection), stdin closed
-pi -p "<prompt>" --fork <draft session file> --session-dir <temp dir> -e <ext>
+pi --mode json -p "<prompt>" --fork <draft session file> --session-dir <temp dir> -e <ext>
 ```
 
 Never pass `--append-system-prompt`, `--no-tools` or `--tools`: the system
@@ -60,6 +60,14 @@ prompt and tool list must stay identical to the source session's for the
 prompt cache.
 
 ## Behaviour the app relies on
+
+### Selection previews
+
+Selection calls use JSON events to preview complete alternatives while the
+remaining options generate. Previews are read-only until the final assistant
+message is validated, the run settles successfully, and pi exits successfully.
+Retries retract previews; failure discards them. The temporary fork never writes
+to the draft's session.
 
 ### Draft writes
 

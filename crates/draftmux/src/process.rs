@@ -18,11 +18,29 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// returns only after the process has exited.
 pub fn run(
     name: &str,
-    mut command: Command,
+    command: Command,
     input: Option<&str>,
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Result<String, String> {
+    let mut stdout = Vec::new();
+    run_streaming(name, command, input, timeout, cancel, |chunk| {
+        stdout.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    String::from_utf8(stdout).map_err(|_| format!("{name} printed text that isn't UTF-8"))
+}
+
+/// Delivers stdout bytes as they arrive without retaining them. A reader error
+/// stops the process group just like cancellation; success still waits for exit.
+pub fn run_streaming(
+    name: &str,
+    mut command: Command,
+    input: Option<&str>,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+    mut on_stdout: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     command
         .stdin(if input.is_some() {
@@ -76,7 +94,8 @@ pub fn run(
     let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
     // Pipes close when every process holding them exits, so reading both to
     // the end before waiting also bounds stragglers that inherited them.
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let mut stderr = Vec::new();
+    let mut read_error = None;
     let mut pipes_open = true;
     let status = loop {
         if cancelled() {
@@ -98,7 +117,12 @@ pub fn run(
             break None;
         }
         match receiver.recv_timeout(remaining.min(CANCEL_POLL)) {
-            Ok((true, chunk)) => stdout.extend(chunk),
+            Ok((true, chunk)) => {
+                if let Err(error) = on_stdout(&chunk) {
+                    read_error = Some(error);
+                    break None;
+                }
+            }
             Ok((false, chunk)) => stderr.extend(chunk),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => pipes_open = false,
@@ -113,6 +137,9 @@ pub fn run(
         let _ = child.wait();
         if cancelled() {
             return Err(format!("{name} was cancelled"));
+        }
+        if let Some(error) = read_error {
+            return Err(error);
         }
         while let Ok((is_stdout, chunk)) = receiver.try_recv() {
             if !is_stdout {
@@ -130,7 +157,7 @@ pub fn run(
     if !status.success() {
         return Err(stderr_line.unwrap_or_else(|| format!("{name} failed ({status})")));
     }
-    String::from_utf8(stdout).map_err(|_| format!("{name} printed text that isn't UTF-8"))
+    Ok(())
 }
 
 /// The first non-blank line, trimmed.
@@ -169,6 +196,29 @@ mod tests {
     ) -> Result<String, String> {
         let (_dir, command) = script(script_text);
         run("tool", command, input, timeout, None)
+    }
+
+    #[test]
+    fn streaming_delivers_before_exit_and_reader_failure_kills_the_child() {
+        let (dir, command) =
+            script("printf ready; while [ ! -f \"$0.continue\" ]; do sleep 0.01; done");
+        let mut output = Vec::new();
+        run_streaming("tool", command, None, TIMEOUT, None, |chunk| {
+            output.extend_from_slice(chunk);
+            fs::write(dir.path().join("tool.continue"), "").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(output, b"ready");
+
+        let (_dir, command) = script("echo invalid; sleep 30 & wait");
+        let start = Instant::now();
+        let error = run_streaming("tool", command, None, TIMEOUT, None, |_| {
+            Err("bad event".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "bad event");
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

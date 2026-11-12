@@ -139,11 +139,33 @@ enum Mode {
     Running {
         /// What is being done, shown beside the spinner.
         label: SharedString,
+        /// Complete replacements that are not yet safe to apply.
+        previews: Vec<String>,
         _cancel: CancelOnDrop,
         _task: Task<()>,
     },
     Results(Vec<String>),
     Error(SharedString),
+}
+
+impl Mode {
+    fn is_request(&self, request: &Arc<AtomicBool>) -> bool {
+        matches!(self, Self::Running { _cancel, .. } if Arc::ptr_eq(&_cancel.0, request))
+    }
+
+    fn set_previews(&mut self, request: &Arc<AtomicBool>, options: Vec<String>) -> bool {
+        if !self.is_request(request) {
+            return false;
+        }
+        let Self::Running { previews, .. } = self else {
+            return false;
+        };
+        if *previews == options {
+            return false;
+        }
+        *previews = options;
+        true
+    }
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -602,6 +624,7 @@ impl SelectionPopover {
         // what the draft kept at creation.
         let alternatives = AppSettings::global(cx).read(cx).settings.alternatives();
         let config = SelectionConfig::for_draft(&kept, alternatives);
+        let (send, updates) = async_channel::unbounded();
         let call = cx.background_executor().spawn({
             let cancel = cancel.clone();
             async move {
@@ -612,20 +635,48 @@ impl SelectionPopover {
                     &config,
                     &std::env::temp_dir(),
                     &cancel,
+                    |options| {
+                        let _ = send.try_send(options);
+                    },
                 )
             }
         });
+        let request = cancel.clone();
         let task = cx.spawn(async move |this, cx| {
+            while let Ok(options) = updates.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if let Some(Open { mode, .. }) = &mut this.open
+                            && mode.set_previews(&request, options)
+                        {
+                            this.changed(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             let result = call.await;
-            this.update(cx, |this, cx| match result {
-                Ok(options) => this.set_mode(Mode::Results(options), Some(0), cx),
-                Err(err) => this.set_mode(Mode::Error(err.into()), None, cx),
+            this.update(cx, |this, cx| {
+                if !this
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| open.mode.is_request(&request))
+                {
+                    return;
+                }
+                match result {
+                    Ok(options) => this.set_mode(Mode::Results(options), Some(0), cx),
+                    Err(err) => this.set_mode(Mode::Error(err.into()), None, cx),
+                }
             })
             .ok();
         });
         self.set_mode(
             Mode::Running {
                 label,
+                previews: Vec::new(),
                 _cancel: CancelOnDrop(cancel),
                 _task: task,
             },
@@ -900,16 +951,39 @@ impl SelectionPopover {
                         }),
                 )
                 .into_any_element(),
-            Mode::Running { label, .. } => div()
-                .px(px(10.))
-                .py(px(8.))
+            Mode::Running {
+                label, previews, ..
+            } => div()
                 .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_color(palette.muted)
-                .whitespace_nowrap()
-                .child(crate::chat::spinner(&palette))
-                .child(label.clone())
+                .flex_col()
+                .when(!previews.is_empty(), |view| {
+                    view.w(RESULTS_WIDTH - PADDING * 2.)
+                })
+                .children(previews.iter().map(|option| {
+                    div()
+                        .px(px(8.))
+                        .py(px(7.))
+                        .line_height(px(19.))
+                        .child(option.trim().to_string())
+                }))
+                .child(
+                    div()
+                        .px(px(10.))
+                        .py(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_color(palette.muted)
+                        .whitespace_nowrap()
+                        .child(crate::chat::spinner(&palette))
+                        .child(label.clone()),
+                )
+                .when(!previews.is_empty(), |view| {
+                    view.child(footer(
+                        &["Preview · waiting to finish", "esc cancel"],
+                        &palette,
+                    ))
+                })
                 .into_any_element(),
             Mode::Results(options) => {
                 let keys = format!("1–{} or ↵ apply", options.len());
@@ -989,6 +1063,79 @@ fn footer(hints: &[&str], palette: &Palette) -> impl IntoElement {
         .text_color(palette.faint)
         .whitespace_nowrap()
         .children(hints.iter().map(|hint| hint.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn previews_are_read_only_and_final_replacement_is_one_undo(cx: &mut gpui::TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::app_settings::init(config.path().to_owned(), cx));
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        let (editor, popover) = window
+            .update(cx, |_, window, cx| {
+                let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
+                let preview = cx.new(TextSelection::new);
+                let popover =
+                    cx.new(|cx| SelectionPopover::new(editor.clone(), preview, window, cx));
+                (editor, popover)
+            })
+            .unwrap();
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| editor.select_range(3..9, cx));
+            popover.update(cx, |popover, cx| {
+                popover.open = Some(Open {
+                    text: "Hi there\n".into(),
+                    range: 3..9,
+                    highlighted: None,
+                    mode: Mode::Running {
+                        label: "Generating alternatives…".into(),
+                        previews: vec!["friend\n".into()],
+                        _cancel: CancelOnDrop(Arc::new(AtomicBool::new(false))),
+                        _task: Task::ready(()),
+                    },
+                });
+                assert_eq!(popover.item_count(), 0);
+                popover.move_highlight(1, cx);
+                popover.confirm(cx);
+                popover.apply(0, cx);
+                assert_eq!(popover.editor.read(cx).text(), "Hi there\n");
+                popover.set_mode(Mode::Results(vec!["friend\n".into()]), Some(0), cx);
+                popover.confirm(cx);
+                assert_eq!(popover.editor.read(cx).text(), "Hi friend\n");
+            });
+            editor.update(cx, |editor, cx| {
+                assert!(editor.undo(cx));
+                assert_eq!(editor.text(), "Hi there\n");
+                assert!(!editor.undo(cx));
+            });
+        });
+    }
+
+    #[test]
+    fn previews_keep_request_alive_and_ignore_stale_updates() {
+        let request = Arc::new(AtomicBool::new(false));
+        let stale = Arc::new(AtomicBool::new(false));
+        let mut mode = Mode::Running {
+            label: "Generating alternatives…".into(),
+            previews: Vec::new(),
+            _cancel: CancelOnDrop(request.clone()),
+            _task: Task::ready(()),
+        };
+        assert!(!mode.set_previews(&stale, vec!["stale".into()]));
+        assert!(mode.set_previews(&request, vec!["first".into()]));
+        assert!(!mode.set_previews(&request, vec!["first".into()]));
+        assert!(matches!(&mode, Mode::Running { previews, .. } if previews == &["first"]));
+        assert!(!request.load(Ordering::Relaxed));
+        assert!(mode.set_previews(&request, Vec::new()));
+        assert!(!request.load(Ordering::Relaxed));
+        drop(mode);
+        assert!(request.load(Ordering::Relaxed));
+        let mut completed = Mode::Results(vec!["final".into()]);
+        assert!(!completed.set_previews(&request, vec!["late".into()]));
+    }
 }
 
 /// The root view of the popup panel; renders [`SelectionPopover`]'s state.
