@@ -28,7 +28,8 @@ Status: early release; expect rough edges.
 - **Selection actions.** Select text for alternatives, Shorter or Tighten, or
   your own actions. Options appear as previews while pi generates the rest;
   choose one when the request finishes. With text selected, a chat message
-  changes only that part.
+  changes only that part. Hold `⌘` while dragging to select more passages; a
+  chat message then edits each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
 

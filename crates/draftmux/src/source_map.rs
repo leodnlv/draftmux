@@ -102,6 +102,36 @@ impl SourceMap {
         (from < to).then_some(from..to)
     }
 
+    /// The rendered text that came from `source`, start and end; `None`
+    /// when none of it shows.
+    pub fn rendered(&self, source: Range<usize>) -> Option<(Pos, Pos)> {
+        let from = |ix: usize| {
+            let came_from = &self.sources[ix];
+            !came_from.is_empty() && came_from.start < source.end && source.start < came_from.end
+        };
+        let first = (0..self.sources.len()).find(|&ix| from(ix))?;
+        let last = (first..self.sources.len()).rfind(|&ix| from(ix))?;
+        let end = self
+            .rendered_chars
+            .get(last + 1)
+            .copied()
+            .unwrap_or(self.rendered_len);
+        Some((self.pos_at(self.rendered_chars[first])?, self.pos_at(end)?))
+    }
+
+    /// The paragraph position of rendered byte `byte`.
+    fn pos_at(&self, byte: usize) -> Option<Pos> {
+        let (key, start) = self
+            .starts
+            .iter()
+            .rev()
+            .find(|(_, start)| **start <= byte)?;
+        Some(Pos {
+            key: *key,
+            offset: byte - start,
+        })
+    }
+
     /// The index of the rendered character at `pos`, or of the end.
     fn char_at(&self, pos: Pos) -> Option<usize> {
         let byte = (self.starts.get(&pos.key)? + pos.offset).min(self.rendered_len);
@@ -167,6 +197,34 @@ mod tests {
             mapped(source, &paragraphs, pos(1, emoji), pos(1, emoji + 4)),
             ":smile:"
         );
+    }
+
+    #[test]
+    fn source_ranges_map_back_to_the_text_rendered_from_them() {
+        let source = "## Title\n\nSome **bold** and [a link](https://example.com/a) here.";
+        let paragraphs = ["Title", "Some bold and a link here."];
+        let map = SourceMap::new(
+            source,
+            paragraphs
+                .iter()
+                .enumerate()
+                .map(|(ix, text)| ((0, ix + 1), *text)),
+        );
+        let range = |text: &str| {
+            let start = source.find(text).unwrap();
+            start..start + text.len()
+        };
+        assert_eq!(map.rendered(range("Title")), Some((pos(1, 0), pos(1, 5))));
+        assert_eq!(
+            map.rendered(range("**bold**")),
+            Some((pos(2, 5), pos(2, 9)))
+        );
+        assert_eq!(
+            map.rendered(range("tle\n\nSome")),
+            Some((pos(1, 2), pos(2, 4)))
+        );
+        // Markup alone renders nothing.
+        assert_eq!(map.rendered(range("## ")), None);
     }
 
     #[test]

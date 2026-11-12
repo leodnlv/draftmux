@@ -17,10 +17,10 @@ const CONTEXT_TYPE: &str = "draftmux-context";
 const MAX_OUTPUT_LINES: usize = 400;
 
 pub enum Item {
-    /// The user's message, and the selection sent with it.
+    /// The user's message, and the selections sent with it.
     User {
         text: String,
-        quote: Option<Quote>,
+        quotes: Vec<Quote>,
     },
     Assistant {
         doc: Document,
@@ -359,12 +359,12 @@ impl Item {
         }
     }
 
-    /// The user's `prompt`, split into the message and its quote.
+    /// The user's `prompt`, split into the message and its quotes.
     fn user(prompt: &str) -> Self {
-        let (quote, text) = quote::parse(prompt);
+        let (quotes, text) = quote::parse(prompt);
         Item::User {
             text: text.to_owned(),
-            quote,
+            quotes,
         }
     }
 }
@@ -707,7 +707,9 @@ mod tests {
 
         assert!(!transcript.busy);
         // The echoed prompt isn't shown twice.
-        assert!(matches!(&transcript.items[0], Item::User { text, quote: None } if text == prompt));
+        assert!(
+            matches!(&transcript.items[0], Item::User { text, quotes } if text == prompt && quotes.is_empty())
+        );
         let users = transcript
             .items
             .iter()
@@ -914,7 +916,9 @@ mod tests {
         .unwrap();
         let (items, earlier) = history(&messages);
         assert_eq!(earlier, 2);
-        assert!(matches!(&items[0], Item::User { text, quote: None } if text == "shorter"));
+        assert!(
+            matches!(&items[0], Item::User { text, quotes } if text == "shorter" && quotes.is_empty())
+        );
         let Item::Tool(edit) = &items[1] else {
             panic!()
         };
@@ -946,8 +950,8 @@ mod tests {
     fn quoted_prompts_show_the_message_and_retry_the_whole_prompt() {
         let draft = "one\ntwo\nthree";
         let quote = Quote::new(draft, 4..7).unwrap();
-        let prompt = quote::prompt("shorter", Some(&quote));
-        let is_quoted = |item: &Item| matches!(item, Item::User { text, quote: Some(q) } if text == "shorter" && *q == quote);
+        let prompt = quote::prompt("shorter", std::slice::from_ref(&quote));
+        let is_quoted = |item: &Item| matches!(item, Item::User { text, quotes } if text == "shorter" && *quotes == [quote.clone()]);
 
         let mut transcript = Transcript::default();
         transcript.sent(prompt.clone(), draft.into());

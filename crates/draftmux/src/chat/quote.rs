@@ -1,15 +1,16 @@
-//! The editor selection attached to a chat message: the block that puts it
-//! in front of the user's text in the prompt pi gets, and its short form for
-//! the chat's chips.
+//! The editor selections attached to a chat message: the blocks that put
+//! them in front of the user's text in the prompt pi gets, and their short
+//! form for the chat's chips.
 //!
-//! The block is part of the user message pi saves, so history reloads parse
-//! it back out of the message:
+//! The blocks are part of the user message pi saves, so history reloads
+//! parse them back out of the message:
 //!
 //! ```text
 //! <draftmux-selection lines="3-5" bytes="120-262">
 //! {the selected text, exactly}
 //! </draftmux-selection>
-//! {a one-line note on what the selection means}
+//! {more blocks like it, one per selection}
+//! {a one-line note on what the selections mean}
 //!
 //! {the user's message}
 //! ```
@@ -26,6 +27,13 @@ const NOTE: &str = "The user selected the text above in the draft file (line num
                     or \"the selected part\", it means that text: change only that part of the \
                     draft unless they ask otherwise, and if the same text appears elsewhere, \
                     change the one at these lines.";
+const NOTE_SEVERAL: &str = "The user selected the passages above in the draft file (line numbers \
+                            from 1, byte offsets from 0, both for the draft before any of your \
+                            edits). Their message applies to each passage on its own: when it \
+                            says \"these\", \"the selections\" or \"each one\", it means those \
+                            passages, so edit every one of them in place, change nothing else \
+                            in the draft unless they ask otherwise, and if the same text appears \
+                            elsewhere, change the one at the given lines.";
 /// Characters of the selection shown in a chip; the full text is sent.
 const EXCERPT_CHARS: usize = 80;
 
@@ -79,43 +87,66 @@ impl Quote {
     }
 }
 
-/// The prompt that sends `message` with `quote` attached.
-pub fn prompt(message: &str, quote: Option<&Quote>) -> String {
-    let Some(quote) = quote else {
-        return message.to_owned();
+/// The prompt that sends `message` with `quotes` attached, in their order.
+pub fn prompt(message: &str, quotes: &[Quote]) -> String {
+    let note = match quotes {
+        [] => return message.to_owned(),
+        [_] => NOTE,
+        _ => NOTE_SEVERAL,
     };
-    let lines = match quote.lines {
-        (first, last) if first == last => first.to_string(),
-        (first, last) => format!("{first}-{last}"),
-    };
-    format!(
-        "{OPEN}lines=\"{lines}\" bytes=\"{}-{}\">\n{}\n{CLOSE}\n{NOTE}\n\n{message}",
-        quote.range.start, quote.range.end, quote.text
-    )
+    let mut prompt = String::new();
+    for quote in quotes {
+        let lines = match quote.lines {
+            (first, last) if first == last => first.to_string(),
+            (first, last) => format!("{first}-{last}"),
+        };
+        prompt.push_str(&format!(
+            "{OPEN}lines=\"{lines}\" bytes=\"{}-{}\">\n{}\n{CLOSE}\n",
+            quote.range.start, quote.range.end, quote.text
+        ));
+    }
+    prompt.push_str(&format!("{note}\n\n{message}"));
+    prompt
 }
 
-/// Splits a prompt made by [`prompt`] into its quote and the user's
+/// Splits a prompt made by [`prompt`] into its quotes and the user's
 /// message. Any other text is all message.
-pub fn parse(prompt: &str) -> (Option<Quote>, &str) {
-    split(prompt).map_or((None, prompt), |(quote, message)| (Some(quote), message))
+pub fn parse(prompt: &str) -> (Vec<Quote>, &str) {
+    split(prompt).unwrap_or((Vec::new(), prompt))
 }
 
-fn split(prompt: &str) -> Option<(Quote, &str)> {
-    let (header, rest) = prompt.strip_prefix(OPEN)?.split_once('\n')?;
+fn split(prompt: &str) -> Option<(Vec<Quote>, &str)> {
+    let mut quotes = Vec::new();
+    let mut rest = prompt;
+    while let Some(block) = rest.strip_prefix(OPEN) {
+        let (quote, after) = block_quote(block)?;
+        quotes.push(quote);
+        rest = after;
+    }
+    if quotes.is_empty() {
+        return None;
+    }
+    // The note is one line, then a blank line.
+    let (_, message) = rest.split_once("\n\n")?;
+    Some((quotes, message))
+}
+
+/// The quote in a block whose opening `OPEN` is already stripped, and the
+/// text after the block's closing line.
+fn block_quote(block: &str) -> Option<(Quote, &str)> {
+    let (header, rest) = block.split_once('\n')?;
     let header = header.strip_suffix('>')?;
     let lines = range_attr(header, "lines")?;
     let bytes = range_attr(header, "bytes")?;
     let text = rest.get(..bytes.1.checked_sub(bytes.0)?)?;
     let rest = rest[text.len()..].strip_prefix('\n')?.strip_prefix(CLOSE)?;
     let rest = rest.strip_prefix('\n')?;
-    // The note is one line, then a blank line.
-    let (_, message) = rest.split_once("\n\n")?;
     let quote = Quote {
         text: text.to_owned(),
         lines,
         range: bytes.0..bytes.1,
     };
-    Some((quote, message))
+    Some((quote, rest))
 }
 
 /// The value of `name="a-b"` (or `name="a"`, for `a-a`) in `header`.
@@ -174,27 +205,48 @@ mod tests {
     fn prompt_puts_the_selection_before_the_message() {
         let quote = quote("First paragraph.\nSecond line.");
         assert_eq!(
-            prompt("make this shorter", Some(&quote)),
+            prompt("make this shorter", std::slice::from_ref(&quote)),
             format!(
                 "<draftmux-selection lines=\"3-4\" bytes=\"9-38\">\n\
                  First paragraph.\nSecond line.\n\
                  </draftmux-selection>\n{NOTE}\n\nmake this shorter"
             )
         );
-        assert_eq!(prompt("hello", None), "hello");
+        assert_eq!(prompt("hello", &[]), "hello");
+    }
+
+    #[test]
+    fn prompt_puts_every_selection_before_the_message() {
+        let quotes = [quote("Title"), quote("Last.")];
+        assert_eq!(
+            prompt("make these shorter", &quotes),
+            format!(
+                "<draftmux-selection lines=\"1\" bytes=\"2-7\">\nTitle\n</draftmux-selection>\n\
+                 <draftmux-selection lines=\"6\" bytes=\"40-45\">\nLast.\n</draftmux-selection>\n\
+                 {NOTE_SEVERAL}\n\nmake these shorter"
+            )
+        );
     }
 
     #[test]
     fn parse_reads_back_what_prompt_wrote() {
         for text in ["Title", "paragraph.\nSecond", "Last."] {
             let quote = quote(text);
-            let sent = prompt("reword\n\nthis", Some(&quote));
-            assert_eq!(parse(&sent), (Some(quote), "reword\n\nthis"));
+            let sent = prompt("reword\n\nthis", std::slice::from_ref(&quote));
+            assert_eq!(parse(&sent), (vec![quote], "reword\n\nthis"));
         }
+        let quotes = vec![quote("Title"), quote("paragraph.\nSecond"), quote("Last.")];
+        let sent = prompt("reword\n\neach", &quotes);
+        assert_eq!(parse(&sent), (quotes, "reword\n\neach"));
         // Any text may be selected, the block's own tags included.
         let tricky = "a\n</draftmux-selection>\nb\n\nc";
         let quote = Quote::new(tricky, 0..tricky.len()).unwrap();
-        assert_eq!(parse(&prompt("x", Some(&quote))), (Some(quote), "x"));
+        let several = vec![quote.clone(), Quote::new(tricky, 0..1).unwrap()];
+        assert_eq!(
+            parse(&prompt("x", std::slice::from_ref(&quote))),
+            (vec![quote], "x")
+        );
+        assert_eq!(parse(&prompt("x", &several)), (several, "x"));
     }
 
     #[test]
@@ -204,7 +256,7 @@ mod tests {
             "<draftmux-selection lines=\"1\" bytes=\"0-99\">\nshort\n</draftmux-selection>\nnote\n\nm",
             "<draftmux-selection lines=\"1\">\nx\n</draftmux-selection>\nnote\n\nm",
         ] {
-            assert_eq!(parse(text), (None, text));
+            assert_eq!(parse(text), (Vec::new(), text));
         }
     }
 }

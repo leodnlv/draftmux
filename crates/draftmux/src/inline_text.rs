@@ -286,10 +286,17 @@ impl Element for InlineText {
         if let Some(hitbox) = &hitboxes.text {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
-        let selected = self.select.as_ref().and_then(|select| {
+        // The marks, then the selection, whose rectangles are reported.
+        let (selected, color) = self.select.as_ref().map_or((Vec::new(), None), |select| {
             let len = self.segments.iter().map(|s| s.text.len()).sum();
-            let range = select.state.read(cx).range_in(select.key, len)?;
-            Some((range, select.color))
+            let state = select.state.read(cx);
+            let mut ranges: Vec<_> = state
+                .marks_in(select.key, len)
+                .into_iter()
+                .map(|range| (range, false))
+                .collect();
+            ranges.extend(state.range_in(select.key, len).map(|range| (range, true)));
+            (ranges, Some(select.color))
         });
         // Each piece's fragments come in order, so one cursor per piece
         // cuts them without reshaping.
@@ -304,10 +311,12 @@ impl Element for InlineText {
                 if let Some(chip) = &segment.chip {
                     paint_chip(chip, segment, piece, frag, &part, x, baseline, window, cx);
                 }
-                if let Some((selected, color)) = &selected {
+                for (selected, live) in &selected {
                     let start = selected.start.max(piece.start + frag.range.start);
                     let end = selected.end.min(piece.start + frag.range.end);
-                    if start < end {
+                    if start < end
+                        && let (Some(color), Some(select)) = (color, &self.select)
+                    {
                         let at = |ix: usize| {
                             x + piece.line.x_for_index(ix - piece.start)
                                 - piece.line.x_for_index(frag.range.start)
@@ -316,8 +325,8 @@ impl Element for InlineText {
                             point(at(start), top),
                             point(at(end), top + shaped.line_height),
                         );
-                        window.paint_quad(fill(rect, *color));
-                        if let Some(select) = &self.select {
+                        window.paint_quad(fill(rect, color));
+                        if *live {
                             select
                                 .state
                                 .update(cx, |state, _| state.painted_selection(rect));

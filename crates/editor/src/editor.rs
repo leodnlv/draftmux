@@ -209,6 +209,8 @@ pub enum EditorEvent {
     Edited,
     /// The selected byte range changed, including to or from empty.
     SelectionChanged(Range<usize>),
+    /// The extra selections changed; see [`Editor::extra_selections`].
+    ExtraSelectionsChanged,
 }
 
 /// Fonts, colours and metrics. The default is the light draft editor.
@@ -287,9 +289,13 @@ pub struct Editor {
     /// Set while a drag is held above or below the visible text, which
     /// keeps scrolling and selecting toward the pointer.
     drag_scrolling: bool,
+    /// Ranges selected besides the selection, in document order; see
+    /// [`Editor::extra_selections`].
+    extra_selections: Vec<Range<usize>>,
     /// What the last events reported, to emit only real changes.
     reported_revision: u64,
     reported_selection: Range<usize>,
+    reported_extra_selections: Vec<Range<usize>>,
     /// Whether the blinking caret is in its visible phase.
     pub(crate) caret_on: bool,
     /// Set by each paint of the focused editor; the blink stops when a
@@ -351,6 +357,8 @@ impl Editor {
             context_menu: None,
             menu_renderer: None,
             reported_selection: 0..0,
+            extra_selections: Vec::new(),
+            reported_extra_selections: Vec::new(),
             caret_on: true,
             painted_focused: false,
             blinking: false,
@@ -436,6 +444,45 @@ impl Editor {
     pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.buffer.select_range(range, false);
         self.after_change(None, true, cx);
+    }
+
+    /// Ranges selected besides the selection, in document order and not
+    /// overlapping each other. Dragging with the secondary modifier (⌘ on
+    /// macOS) adds the selection to them and starts a new one; a plain click
+    /// or Escape drops them, and so does any edit, which would leave them
+    /// pointing at other text.
+    pub fn extra_selections(&self) -> &[Range<usize>] {
+        &self.extra_selections
+    }
+
+    /// Every selected range in document order: the extra selections, less
+    /// those the selection overlaps, and the selection unless it's empty.
+    pub fn selected_ranges(&self) -> Vec<Range<usize>> {
+        all_ranges(&self.extra_selections, self.selected_range())
+    }
+
+    /// Replaces the extra selections; empty ranges are dropped.
+    pub fn set_extra_selections(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<Self>) {
+        let len = self.buffer.len();
+        let mut extra = Vec::new();
+        for range in ranges {
+            add_range(&mut extra, range.start.min(len)..range.end.min(len));
+        }
+        self.extra_selections = extra;
+        self.after_change(None, false, cx);
+    }
+
+    /// Adds the selection to the extra selections and collapses it to its
+    /// end, so the next selection adds to them. Nothing happens when it's
+    /// empty.
+    pub fn add_selection(&mut self, cx: &mut Context<Self>) {
+        let range = self.selected_range();
+        if range.is_empty() {
+            return;
+        }
+        add_range(&mut self.extra_selections, range.clone());
+        self.buffer.select_range(range.end..range.end, false);
+        self.after_change(None, false, cx);
     }
 
     /// Window-space rectangles of the selection, one per visual row, for
@@ -565,13 +612,21 @@ impl Editor {
         let edited = revision != self.reported_revision;
         if edited {
             self.rehighlight();
+            self.extra_selections.clear();
         }
         let selection = self.selected_range();
         let selection_changed = selection != self.reported_selection;
+        let extra_changed = self.extra_selections != self.reported_extra_selections;
         self.reported_revision = revision;
         self.reported_selection = selection.clone();
+        if extra_changed {
+            self.reported_extra_selections = self.extra_selections.clone();
+        }
         if edited {
             cx.emit(EditorEvent::Edited);
+        }
+        if extra_changed {
+            cx.emit(EditorEvent::ExtraSelectionsChanged);
         }
         if selection_changed {
             cx.emit(EditorEvent::SelectionChanged(selection));
@@ -708,6 +763,17 @@ impl Editor {
             return;
         };
         let granularity = Granularity::from_click_count(event.click_count);
+        // The secondary modifier keeps the selection and adds a new one;
+        // a plain press drops the extra ones. Shift extends the selection
+        // and leaves them.
+        if event.modifiers.secondary(cx) {
+            let range = self.selected_range();
+            if !range.is_empty() {
+                add_range(&mut self.extra_selections, range);
+            }
+        } else if !event.modifiers.shift {
+            self.extra_selections.clear();
+        }
         if granularity == Granularity::Char {
             let anchor = if event.modifiers.shift {
                 self.buffer.selection().anchor
@@ -797,9 +863,13 @@ impl Editor {
         }
     }
 
-    fn dismiss_menu(&mut self, _: &DismissMenu, _: &mut Window, cx: &mut Context<Self>) {
+    /// Closes the context menu, or else drops the extra selections.
+    fn dismiss_menu(&mut self, _: &DismissMenu, window: &mut Window, cx: &mut Context<Self>) {
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
+        } else if !self.extra_selections.is_empty() {
+            self.extra_selections.clear();
+            self.after_change(Some(window), false, cx);
         } else {
             cx.propagate();
         }
@@ -1201,6 +1271,59 @@ impl Render for Editor {
                 editor: cx.entity(),
             })
             .children(context_menu)
+    }
+}
+
+fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// Adds non-empty `range` to `ranges`, replacing the ones it overlaps and
+/// keeping them in document order.
+fn add_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
+    if range.is_empty() {
+        return;
+    }
+    ranges.retain(|other| !overlaps(other, &range));
+    let at = ranges.partition_point(|other| other.start < range.start);
+    ranges.insert(at, range);
+}
+
+/// `extra`, less the ranges `selection` overlaps, with `selection` unless
+/// it's empty, in document order.
+fn all_ranges(extra: &[Range<usize>], selection: Range<usize>) -> Vec<Range<usize>> {
+    let mut ranges = extra.to_vec();
+    add_range(&mut ranges, selection);
+    ranges
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn added_ranges_stay_ordered_and_replace_overlaps() {
+        let mut ranges = Vec::new();
+        add_range(&mut ranges, 10..20);
+        add_range(&mut ranges, 0..5);
+        add_range(&mut ranges, 30..40);
+        assert_eq!(ranges, [0..5, 10..20, 30..40]);
+        // Touching ranges don't overlap.
+        add_range(&mut ranges, 5..10);
+        assert_eq!(ranges, [0..5, 5..10, 10..20, 30..40]);
+        add_range(&mut ranges, 15..35);
+        assert_eq!(ranges, [0..5, 5..10, 15..35]);
+        add_range(&mut ranges, 3..3);
+        assert_eq!(ranges, [0..5, 5..10, 15..35]);
+    }
+
+    #[test]
+    fn the_selection_replaces_the_extra_ranges_it_overlaps() {
+        let extra = [0..5, 10..20];
+        assert_eq!(all_ranges(&extra, 7..7), [0..5, 10..20]);
+        assert_eq!(all_ranges(&extra, 6..8), [0..5, 6..8, 10..20]);
+        assert_eq!(all_ranges(&extra, 18..30), [0..5, 18..30]);
+        assert_eq!(all_ranges(&extra[..1], 6..8), [0..5, 6..8]);
     }
 }
 

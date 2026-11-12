@@ -36,7 +36,7 @@ use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
-use crate::selectable::{Scroller, SelectionChanged, TextSelection};
+use crate::selectable::{Scroller, SelectionChanged, SelectionStarted, TextSelection};
 use crate::selection_popover::SelectionPopover;
 use crate::source_map::SourceMap;
 use crate::theme::{self, Palette};
@@ -288,13 +288,37 @@ impl Chrome {
             selection.set_sticky(true);
             selection
         });
-        let selection = cx
-            .new(|cx| SelectionPopover::new(editor.clone(), preview_selection.clone(), window, cx));
+        let composer = chat.read(cx).composer_focus(cx);
+        let selection = cx.new(|cx| {
+            SelectionPopover::new(
+                editor.clone(),
+                preview_selection.clone(),
+                composer,
+                store.clone(),
+                window,
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.observe(&preview_selection, |_, _, cx| cx.notify()),
             cx.subscribe(&preview_selection, |this, _, _: &SelectionChanged, cx| {
                 this.preview_selected(cx)
             }),
+            // A press in the preview with the secondary modifier keeps the
+            // editor's selection besides the new one; a plain press drops
+            // the kept ones, as in the editor.
+            cx.subscribe(
+                &preview_selection,
+                |this, _, event: &SelectionStarted, cx| {
+                    this.editor.update(cx, |editor, cx| {
+                        if event.adding {
+                            editor.add_selection(cx);
+                        } else {
+                            editor.set_extra_selections(Vec::new(), cx);
+                        }
+                    })
+                },
+            ),
             cx.subscribe(&chat, |this, _, event, cx| this.chat_event(event, cx)),
             cx.subscribe(&editor, |this, editor, event, cx| match event {
                 EditorEvent::Edited => this.edited(editor.read(cx).text().to_owned(), cx),
@@ -308,7 +332,9 @@ impl Chrome {
                         this.preview_selection
                             .update(cx, |selection, cx| selection.clear(cx));
                     }
+                    this.mark_preview(cx);
                 }
+                EditorEvent::ExtraSelectionsChanged => this.mark_preview(cx),
             }),
             // Appearance is app-wide, and this window lives as long as the
             // app, so it reports appearance changes for every window.
@@ -834,6 +860,40 @@ impl Chrome {
             self.preview_selection
                 .update(cx, |selection, cx| selection.clear(cx));
         }
+    }
+
+    /// Marks the editor's extra selections in the preview, less those its
+    /// selection replaces.
+    fn mark_preview(&mut self, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx);
+        let selection = editor.selected_range();
+        let ranges: Vec<_> = editor
+            .selected_ranges()
+            .into_iter()
+            .filter(|range| *range != selection)
+            .collect();
+        let mut marks = Vec::new();
+        // Edits drop the extra selections, so a preview of other text has
+        // none to show.
+        if !ranges.is_empty() && editor.text() == self.preview_source {
+            let selection = self.preview_selection.read(cx);
+            let map = self.preview_map.get_or_insert_with(|| {
+                SourceMap::new(
+                    markup::frontmatter::parse(&self.preview_source).body,
+                    selection.paragraphs(),
+                )
+            });
+            let body_offset = markup::frontmatter::parse(&self.preview_source).body_offset;
+            marks = ranges
+                .into_iter()
+                .filter(|range| range.end > body_offset)
+                .filter_map(|range| {
+                    map.rendered(range.start.saturating_sub(body_offset)..range.end - body_offset)
+                })
+                .collect();
+        }
+        self.preview_selection
+            .update(cx, |selection, cx| selection.set_marks(marks, cx));
     }
 
     /// Counts a change made to the selected draft's file outside the editor

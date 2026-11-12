@@ -16,6 +16,7 @@ const SESSION_DIR: &str = "session";
 const SAMPLE_MARKER: &str = ".sample-created";
 const CHAT_WIDTH: &str = ".chat-width";
 const SIDEBAR_HIDDEN: &str = ".sidebar-hidden";
+const SELECTION_ADDED: &str = ".selection-added";
 
 /// The drafts directory. Stateless: every call reads or writes the files
 /// directly, so the app and the CLI can share it.
@@ -283,6 +284,18 @@ impl Store {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("creating {}", self.root.display()))?;
         atomic::write(&self.root.join(SAMPLE_MARKER), b"")
+    }
+
+    /// Whether the user ever added a selection to another, so the hint on
+    /// how to is no longer needed. Unreadable counts as not yet.
+    pub fn selection_added(&self) -> bool {
+        self.root.join(SELECTION_ADDED).exists()
+    }
+
+    pub fn mark_selection_added(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        atomic::write(&self.root.join(SELECTION_ADDED), b"")
     }
 
     /// The chat column's width in pixels as the user last left it, if it
@@ -605,6 +618,18 @@ mod tests {
         assert_eq!(ids(scan.drafts.iter()), [&good]);
         assert_eq!(scan.errors.len(), 1);
         assert_eq!(scan.errors[0].0, bad.dir);
+    }
+
+    #[test]
+    fn added_selection_marker_persists_and_is_not_a_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("drafts");
+        let store = Store::new(&path);
+        assert!(!store.selection_added());
+        store.mark_selection_added().unwrap();
+        assert!(Store::new(&path).selection_added());
+        let scan = store.scan().unwrap();
+        assert!(scan.drafts.is_empty() && scan.errors.is_empty());
     }
 
     #[test]

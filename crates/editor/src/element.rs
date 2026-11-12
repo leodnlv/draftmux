@@ -334,6 +334,7 @@ impl Element for EditorElement {
         let style = editor.style.clone();
         let focus_handle = editor.focus_handle.clone();
         let selection = editor.buffer.selection();
+        let selected_ranges = editor.selected_ranges();
         // As in AppKit, an inactive window shows no caret and a gray selection.
         let focused = focus_handle.is_focused(window) && window.is_window_active();
         let caret_on = editor.caret_on;
@@ -365,14 +366,18 @@ impl Element for EditorElement {
                 }
                 window.request_animation_frame();
             }
-            if !selection.is_empty() {
-                let color = if focused {
-                    style.selection
-                } else {
-                    style.inactive_selection
-                };
-                for rect in layout.range_rects(selection.range(), true) {
-                    window.paint_quad(fill(rect, color));
+            let color = if focused {
+                style.selection
+            } else {
+                style.inactive_selection
+            };
+            // The extra selections, less those the selection replaces, then
+            // the selection.
+            for range in selected_ranges {
+                for rect in layout.range_rects(range, true) {
+                    if rect.bottom() >= bounds.top() && rect.top() <= bounds.bottom() {
+                        window.paint_quad(fill(rect, color));
+                    }
                 }
             }
 

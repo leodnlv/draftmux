@@ -11,6 +11,11 @@
 //! farther the pointer is. ⌘C copies the selected text and ⌘A selects
 //! everything. Pressing outside the
 //! surface clears the selection.
+//!
+//! Besides the selection, a surface can mark other ranges in the selection's
+//! color ([`TextSelection::set_marks`]), such as selections kept from before
+//! a press with the secondary modifier (⌘ on macOS), which
+//! [`SelectionStarted`] reports.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -98,6 +103,12 @@ impl Scroller {
 /// The selection changed; the range is in each end's paragraph.
 pub struct SelectionChanged;
 
+/// A press started a new selection. `adding` is set when the secondary
+/// modifier was held, to keep the earlier selection besides the new one.
+pub struct SelectionStarted {
+    pub adding: bool,
+}
+
 pub struct TextSelection {
     focus: FocusHandle,
     /// The text of every paragraph registered since the content was last
@@ -110,6 +121,9 @@ pub struct TextSelection {
     rects: Vec<Bounds<Pixels>>,
     anchor: Option<Pos>,
     head: Option<Pos>,
+    /// Ranges painted like the selection besides it, start and end in
+    /// reading order.
+    marks: Vec<(Pos, Pos)>,
     /// While the button is down: what the drag extends by and the unit it
     /// started on, which stays selected whichever way it goes.
     dragging: Option<(Unit, Pos, Pos)>,
@@ -136,6 +150,7 @@ enum Unit {
 }
 
 impl EventEmitter<SelectionChanged> for TextSelection {}
+impl EventEmitter<SelectionStarted> for TextSelection {}
 
 impl gpui::Focusable for TextSelection {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -152,6 +167,7 @@ impl TextSelection {
             rects: Vec::new(),
             anchor: None,
             head: None,
+            marks: Vec::new(),
             dragging: None,
             scroller: None,
             pointer: Point::default(),
@@ -176,7 +192,24 @@ impl TextSelection {
     /// paragraphs reuse the old keys.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.texts.clear();
+        self.set_marks(Vec::new(), cx);
         self.clear(cx);
+    }
+
+    /// Paints `marks`, start and end in reading order, like the selection.
+    pub fn set_marks(&mut self, marks: Vec<(Pos, Pos)>, cx: &mut Context<Self>) {
+        if self.marks != marks {
+            self.marks = marks;
+            cx.notify();
+        }
+    }
+
+    /// The marked parts of paragraph `key`, whose text is `len` bytes long.
+    pub fn marks_in(&self, key: Key, len: usize) -> Vec<Range<usize>> {
+        self.marks
+            .iter()
+            .filter_map(|&(start, end)| part_in(start, end, key, len))
+            .collect()
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -229,13 +262,7 @@ impl TextSelection {
     /// The selected part of paragraph `key`, whose text is `len` bytes long.
     pub fn range_in(&self, key: Key, len: usize) -> Option<Range<usize>> {
         let (start, end) = self.range()?;
-        if key < start.key || key > end.key {
-            return None;
-        }
-        let from = if key == start.key { start.offset } else { 0 };
-        let to = if key == end.key { end.offset } else { len };
-        let range = from.min(len)..to.min(len);
-        (!range.is_empty()).then_some(range)
+        part_in(start, end, key, len)
     }
 
     /// The text of every registered paragraph, in reading order.
@@ -306,6 +333,9 @@ impl TextSelection {
             return;
         };
         window.focus(&self.focus, cx);
+        cx.emit(SelectionStarted {
+            adding: event.modifiers.secondary(cx),
+        });
         let unit = match event.click_count {
             1 => Unit::Char,
             2 => Unit::Word,
@@ -509,6 +539,17 @@ pub fn area(state: &Entity<TextSelection>, cx: &App) -> Div {
             .absolute()
             .size_0(),
         )
+}
+
+/// The part of paragraph `key`, `len` bytes long, from `start` to `end`.
+fn part_in(start: Pos, end: Pos, key: Key, len: usize) -> Option<Range<usize>> {
+    if key < start.key || key > end.key {
+        return None;
+    }
+    let from = if key == start.key { start.offset } else { 0 };
+    let to = if key == end.key { end.offset } else { len };
+    let range = from.min(len)..to.min(len);
+    (!range.is_empty()).then_some(range)
 }
 
 fn distance_x(bounds: Bounds<Pixels>, x: Pixels) -> f32 {

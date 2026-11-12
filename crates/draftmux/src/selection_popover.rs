@@ -3,6 +3,11 @@
 //! markdown in the editor, and the popover then sits above the preview's
 //! selection instead.
 //!
+//! With several selections (see [`Editor::extra_selections`]) the popover
+//! shows their count and only Ask pi…, which focuses the chat's composer,
+//! where they're attached. The selection actions are prompts written for
+//! one selection, so they don't apply to several.
+//!
 //! The popover is a separate panel window. On Wayland, where windows can't
 //! be placed in screen coordinates, it's a popup anchored to the main window
 //! at its edge facing the selection. gpui can't anchor popups on macOS or
@@ -25,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use draftmux_storage::Draft;
+use draftmux_storage::{Draft, Store};
 use editor::{Editor, EditorEvent};
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds, Context, Div,
@@ -116,6 +121,12 @@ pub struct SelectionPopover {
     /// The preview pane in window coordinates, measured by
     /// [`Self::wrap_preview`].
     preview_pane: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The chat's message field, which Ask pi… focuses.
+    composer: FocusHandle,
+    /// Remembers whether the user has added a selection, after which the
+    /// hint on how to is hidden.
+    store: Store,
+    show_add_hint: bool,
     pending_show: Option<Task<()>>,
     reconcile_scheduled: bool,
     /// The panel is being opened; it is set once it has.
@@ -135,6 +146,8 @@ struct Open {
 
 enum Mode {
     Actions(Vec<draftmux_settings::SelectionAction>),
+    /// This many ranges are selected; the only item is Ask pi….
+    Several(usize),
     /// Dropping it cancels the call and kills pi.
     Running {
         /// What is being done, shown beside the spinner.
@@ -207,6 +220,8 @@ impl SelectionPopover {
     pub fn new(
         editor: Entity<Editor>,
         preview: Entity<TextSelection>,
+        composer: FocusHandle,
+        store: Store,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -265,6 +280,9 @@ impl SelectionPopover {
             pane: Rc::new(Cell::new(None)),
             preview,
             preview_pane: Rc::new(Cell::new(None)),
+            composer,
+            show_add_hint: !store.selection_added(),
+            store,
             pending_show: None,
             reconcile_scheduled: false,
             opening: false,
@@ -405,6 +423,20 @@ impl SelectionPopover {
                     self.schedule_show(range.clone(), cx);
                 }
             }
+            // Adding or dropping a selection changes what the popover offers.
+            EditorEvent::ExtraSelectionsChanged => {
+                if self.show_add_hint && !self.editor.read(cx).extra_selections().is_empty() {
+                    self.show_add_hint = false;
+                    if let Err(err) = self.store.mark_selection_added() {
+                        eprintln!("draftmux: remembering the added selection: {err:#}");
+                    }
+                }
+                self.dismiss(cx);
+                let range = self.editor.read(cx).selected_range();
+                if !range.is_empty() {
+                    self.schedule_show(range, cx);
+                }
+            }
         }
     }
 
@@ -432,15 +464,19 @@ impl SelectionPopover {
                 if this.open.is_some() || editor.selected_range() != range || !this.available(cx) {
                     return;
                 }
-                this.open = Some(Open {
-                    range,
-                    text: editor.text().to_string(),
-                    mode: Mode::Actions(
+                let mode = match editor.selected_ranges().len() {
+                    1 => Mode::Actions(
                         AppSettings::global(cx)
                             .read(cx)
                             .settings
                             .selection_actions(),
                     ),
+                    count => Mode::Several(count),
+                };
+                this.open = Some(Open {
+                    range,
+                    text: editor.text().to_string(),
+                    mode,
                     highlighted: None,
                 });
                 this.changed(cx);
@@ -507,6 +543,7 @@ impl SelectionPopover {
     fn item_count(&self) -> usize {
         match self.open.as_ref().map(|open| &open.mode) {
             Some(Mode::Actions(actions)) => actions.len() + 1,
+            Some(Mode::Several(_)) => 1,
             Some(Mode::Results(options)) => options.len(),
             _ => 0,
         }
@@ -558,6 +595,7 @@ impl SelectionPopover {
                     self.pick_action(index, cx);
                 }
             }
+            Mode::Several(_) if open.highlighted.is_some() => self.ask_pi(cx),
             _ => {}
         }
     }
@@ -584,6 +622,19 @@ impl SelectionPopover {
                 cx,
             );
         }
+    }
+
+    /// Focuses the chat's composer, where the selections are attached.
+    fn ask_pi(&mut self, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+        let (main, composer) = (self.main, self.composer.clone());
+        cx.defer(move |cx| {
+            main.update(cx, |_, window, cx| {
+                window.activate_window();
+                window.focus(&composer, cx);
+            })
+            .ok();
+        });
     }
 
     fn focus_main(&self, cx: &mut Context<Self>) {
@@ -921,6 +972,7 @@ impl SelectionPopover {
         let content = match &open.mode {
             Mode::Actions(actions) => div()
                 .flex()
+                .items_center()
                 .gap(px(2.))
                 .flex_nowrap()
                 .children(
@@ -950,6 +1002,51 @@ impl SelectionPopover {
                             highlight(index, item)
                         }),
                 )
+                // Until the user has added a selection, nothing else shows
+                // that they can.
+                .when(self.show_add_hint, |actions| {
+                    actions.child(
+                        div()
+                            .flex_none()
+                            .pl(px(4.))
+                            .pr(px(7.))
+                            .text_size(px(11.))
+                            .text_color(palette.faint)
+                            .whitespace_nowrap()
+                            .child(editor::by_platform!("⌘-drag to add", "Ctrl-drag to add")),
+                    )
+                })
+                .into_any_element(),
+            Mode::Several(count) => div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .flex_nowrap()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .px(px(9.))
+                        .py(px(5.))
+                        .text_color(palette.muted)
+                        .child(format!("{count} selections")),
+                )
+                .child(div().w(px(1.)).h(px(16.)).bg(palette.menu_line))
+                .child(highlight(
+                    0,
+                    item(0)
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(9.))
+                        .py(px(5.))
+                        .child(div().text_size(px(11.)).child("✦"))
+                        .child("Ask pi…")
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| this.update(cx, |this, cx| this.ask_pi(cx))
+                        }),
+                ))
                 .into_any_element(),
             Mode::Running {
                 label, previews, ..
@@ -1033,7 +1130,7 @@ impl SelectionPopover {
         // The actions show with the panel; later states replace them in place
         // and fade in rather than snapping.
         let key = match &open.mode {
-            Mode::Actions(_) => return content,
+            Mode::Actions(_) | Mode::Several(_) => return content,
             Mode::Running { .. } => "popover-running",
             Mode::Results(_) => "popover-results",
             Mode::Error(_) => "popover-error",
@@ -1065,6 +1162,52 @@ fn footer(hints: &[&str], palette: &Palette) -> impl IntoElement {
         .children(hints.iter().map(|hint| hint.to_string()))
 }
 
+/// The root view of the popup panel; renders [`SelectionPopover`]'s state.
+struct PopoverPanel {
+    popover: Entity<SelectionPopover>,
+}
+
+impl Render for PopoverPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let popover = self.popover.clone();
+        let content = popover.read(cx).content(&popover, cx);
+        let palette = theme::palette(cx);
+        let (background, text) = (crate::platform::menu_color(palette), palette.text);
+        div()
+            .size_full()
+            .bg(background)
+            .text_color(text)
+            .text_size(px(13.))
+            .font_family(editor::platform::ui_font())
+            // A click makes the panel key; give the keyboard back to the
+            // editor.
+            .on_mouse_up(gpui::MouseButton::Left, {
+                let popover = popover.clone();
+                move |_, _, cx| popover.update(cx, |this, cx| this.focus_main(cx))
+            })
+            .child(measured_content(popover, content))
+    }
+}
+
+/// `content` laid out at its natural size, then measured to size the
+/// panel.
+fn measured_content(popover: Entity<SelectionPopover>, content: AnyElement) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .p(PADDING)
+        .child(content)
+        .child(
+            canvas(
+                move |bounds, _, cx| popover.update(cx, |this, cx| this.measured(bounds.size, cx)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,8 +1221,11 @@ mod tests {
             .update(cx, |_, window, cx| {
                 let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
                 let preview = cx.new(TextSelection::new);
-                let popover =
-                    cx.new(|cx| SelectionPopover::new(editor.clone(), preview, window, cx));
+                let composer = cx.focus_handle();
+                let store = Store::new(config.path().join("drafts"));
+                let popover = cx.new(|cx| {
+                    SelectionPopover::new(editor.clone(), preview, composer, store, window, cx)
+                });
                 (editor, popover)
             })
             .unwrap();
@@ -1136,50 +1282,4 @@ mod tests {
         let mut completed = Mode::Results(vec!["final".into()]);
         assert!(!completed.set_previews(&request, vec!["late".into()]));
     }
-}
-
-/// The root view of the popup panel; renders [`SelectionPopover`]'s state.
-struct PopoverPanel {
-    popover: Entity<SelectionPopover>,
-}
-
-impl Render for PopoverPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let popover = self.popover.clone();
-        let content = popover.read(cx).content(&popover, cx);
-        let palette = theme::palette(cx);
-        let (background, text) = (crate::platform::menu_color(palette), palette.text);
-        div()
-            .size_full()
-            .bg(background)
-            .text_color(text)
-            .text_size(px(13.))
-            .font_family(editor::platform::ui_font())
-            // A click makes the panel key; give the keyboard back to the
-            // editor.
-            .on_mouse_up(gpui::MouseButton::Left, {
-                let popover = popover.clone();
-                move |_, _, cx| popover.update(cx, |this, cx| this.focus_main(cx))
-            })
-            .child(measured_content(popover, content))
-    }
-}
-
-/// `content` laid out at its natural size, then measured to size the
-/// panel.
-fn measured_content(popover: Entity<SelectionPopover>, content: AnyElement) -> gpui::Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .p(PADDING)
-        .child(content)
-        .child(
-            canvas(
-                move |bounds, _, cx| popover.update(cx, |this, cx| this.measured(bounds.size, cx)),
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
 }
