@@ -431,6 +431,7 @@ mod tests {
                 pi_agent_dir: "/tmp/.pi/agent".into(),
                 note: None,
                 settings: Default::default(),
+                text: String::new(),
             })
             .unwrap();
         store.save_text(&draft.id, text).unwrap();

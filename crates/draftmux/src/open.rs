@@ -37,8 +37,12 @@ pub struct Args {
     #[arg(long, value_parser = target_parser())]
     target: Option<Target>,
     /// Note for the draft from the handing-off agent, such as what to write.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "draft_file")]
     note: Option<String>,
+    /// Markdown file whose text the draft starts with, unchanged, instead of
+    /// a first draft written by Draftmux's agent.
+    #[arg(long, value_name = "PATH")]
+    draft_file: Option<PathBuf>,
 }
 
 /// Parses `--target`, offering every target's name and accepting its
@@ -96,6 +100,13 @@ fn create(
     let path = std::path::absolute(&args.session_file)
         .with_context(|| format!("resolving {}", args.session_file.display()))?;
     let info = source::inspect(&path)?;
+    // Read before the draft exists, so a missing file creates nothing.
+    let text = match &args.draft_file {
+        Some(file) => {
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?
+        }
+        None => String::new(),
+    };
     let home = std::env::home_dir().context("no home directory")?;
     let resolved = settings.resolve(&info.cwd, &home);
     let pi_agent_dir = source::resolve_profile(
@@ -118,6 +129,7 @@ fn create(
         pi_agent_dir,
         note: args.note.clone(),
         settings: resolved.draft_settings(),
+        text: text.clone(),
     };
     match info.kind {
         SourceKind::Pi => {
@@ -504,6 +516,57 @@ cat > /dev/null
         assert_eq!(tail[0]["provider"], "openai");
         assert_eq!(tail[0]["modelId"], "gpt-6");
         assert_eq!(tail[1]["thinkingLevel"], "low");
+    }
+
+    #[test]
+    fn draft_file_starts_the_draft_with_its_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        let transcript = tmp.path().join("transcript.jsonl");
+        fs::write(&transcript, claude_transcript(&cwd)).unwrap();
+        let file = tmp.path().join("CONTRIBUTING.md");
+        let text = "# Contributing\n\nOpen an issue first.\n";
+        fs::write(&file, text).unwrap();
+        let store = Store::new(tmp.path().join("drafts"));
+
+        let args = parse(&[
+            transcript.to_str().unwrap(),
+            "--pi-agent-dir",
+            tmp.path().to_str().unwrap(),
+            "--draft-file",
+            file.to_str().unwrap(),
+        ]);
+        let draft = create(&args, &store, &no_pi, &Settings::default()).unwrap();
+
+        assert_eq!(store.read_text(&draft.id).unwrap(), text);
+        let meta = store.load(&draft.id).unwrap().meta;
+        assert!(!meta.first_draft_pending);
+        assert!(meta.source.is_some());
+        assert!(meta.pi_session_file.is_some());
+    }
+
+    #[test]
+    fn missing_draft_file_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = pi_session(&tmp.path().join("agent"), tmp.path());
+        let store = Store::new(tmp.path().join("drafts"));
+
+        let missing = tmp.path().join("missing.md");
+        let args = parse(&[
+            session.to_str().unwrap(),
+            "--draft-file",
+            missing.to_str().unwrap(),
+        ]);
+        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("missing.md"), "{err:#}");
+        assert!(store.scan().unwrap().drafts.is_empty());
+    }
+
+    #[test]
+    fn draft_file_conflicts_with_note() {
+        let argv = ["open", "s.jsonl", "--note", "x", "--draft-file", "d.md"];
+        assert!(Cli::try_parse_from(argv).is_err());
     }
 
     #[test]

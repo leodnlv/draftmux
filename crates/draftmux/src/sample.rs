@@ -58,9 +58,9 @@ pub fn create(store: &Store, settings: &Settings, home: &Path) -> Result<Draft> 
         pi_agent_dir,
         note: None,
         settings: resolved.draft_settings(),
+        text: TEXT.to_owned(),
     };
     let draft = store.create_with_session(new, |draft| {
-        draftmux_storage::write_atomic(&draft.draft_path(), TEXT.as_bytes())?;
         claude_convert::empty(home, &model).write_into(&draft.session_dir())
     })?;
     // The draft itself keeps the store from counting as unused.

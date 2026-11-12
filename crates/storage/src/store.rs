@@ -35,6 +35,9 @@ pub struct NewDraft {
     pub pi_agent_dir: PathBuf,
     pub note: Option<String>,
     pub settings: DraftSettings,
+    /// The draft's text to start with. A handed-off draft that starts empty
+    /// waits for its agent to write the first draft.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +98,7 @@ impl Store {
         Ok(Self::new(Self::default_root()?))
     }
 
-    /// Creates `<id>/` with an empty `draft.md` and `session/`, then writes
+    /// Creates `<id>/` with `draft.md` and `session/`, then writes
     /// `meta.json` last so a scan never lists a half-created draft.
     pub fn create(&self, new: NewDraft) -> Result<Draft> {
         self.create_draft(new, |_| Ok(None))
@@ -123,7 +126,7 @@ impl Store {
         std::fs::create_dir_all(&session_dir)
             .with_context(|| format!("creating {}", session_dir.display()))?;
         let now = Utc::now();
-        let handed_off = new.source.is_some();
+        let first_draft_pending = new.source.is_some() && new.text.is_empty();
         let mut draft = Draft {
             id,
             dir,
@@ -137,13 +140,13 @@ impl Store {
                 pi_session_file: None,
                 pi_agent_dir: new.pi_agent_dir,
                 note: new.note,
-                first_draft_pending: handed_off,
+                first_draft_pending,
                 settings: new.settings,
                 created_at: now,
                 updated_at: now,
             },
         };
-        let result = atomic::write(&draft.draft_path(), b"")
+        let result = atomic::write(&draft.draft_path(), new.text.as_bytes())
             .and_then(|()| session(&draft))
             .and_then(|file| {
                 draft.meta.pi_session_file = file;
@@ -394,6 +397,7 @@ mod tests {
             pi_agent_dir: "/tmp/.pi/agent".into(),
             note: None,
             settings: Default::default(),
+            text: String::new(),
         }
     }
 

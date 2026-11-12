@@ -59,8 +59,15 @@ draftmux open "$@" --target github --note 'PR description for the retry change'
   conversation and the note, so include anything the conversation leaves
   open. Single-quote it; write `'` as `'\''`.
 
+When the message is already written in a file, such as a draft the user asked
+you to write earlier, pass `--draft-file <path>` instead of `--note`. The
+draft starts with the file's text unchanged and Draftmux's agent doesn't write
+a first draft. Pass the path as is; don't read, copy or rewrite the file
+first.
+
 It prints the draft ID. Tell the user the ID and that Draftmux is writing the
-first draft, then stop and wait. Don't write the message yourself.
+first draft, or with `--draft-file` that the draft is open in Draftmux, then
+stop and wait. Don't write the message yourself.
 
 If `open` exits 1 after printing an ID, the draft exists but the app couldn't
 focus it: report the error and the ID, and don't run `open` again (that

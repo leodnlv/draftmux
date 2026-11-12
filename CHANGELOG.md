@@ -18,6 +18,9 @@
 - The Markdown editor collapses when the window is too narrow to show it
   beside the preview, and comes back when the window widens again. Showing or
   hiding a pane yourself holds until the window crosses that width again.
+- `draftmux open --draft-file <path>` hands off a message your agent has
+  already written. The draft starts with the file's text and keeps the
+  conversation, and Draftmux's agent skips writing a first draft.
 
 ## v0.1.0 (2026-11-12)
 
