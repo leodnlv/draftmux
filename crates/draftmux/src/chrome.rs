@@ -33,7 +33,7 @@ use crate::chat::{Chat, ChatEvent};
 use crate::copy::{self, Copy};
 use crate::drafts::{Drafts, tilde};
 use crate::file_watch;
-use crate::format::{Format, Formatter};
+use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::selectable::{Scroller, SelectionChanged, TextSelection};
@@ -203,7 +203,7 @@ impl Render for Chrome {
             .on_action(cx.listener(|this, _: &Format, _, cx| {
                 if this.drafts.current().is_some() {
                     this.formatter
-                        .update(cx, |formatter, cx| formatter.format(cx));
+                        .update(cx, |formatter, cx| formatter.format(Wrap::Keep, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))

@@ -10,6 +10,9 @@
   every line break in a comment, so hard-wrapped drafts came out ragged. When
   your agent writes a GitHub draft into a Markdown file in a repository, the
   skill has it wrap the paragraphs to the repository's line length.
+- Format has a menu with Wrap at 80 Columns and Unwrap Paragraphs, for
+  wrapping a draft that goes into a Markdown file or unwrapping one that was
+  written wrapped.
 
 ## v0.1.0 (2026-11-12)
 

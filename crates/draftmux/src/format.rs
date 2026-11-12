@@ -1,9 +1,10 @@
 //! The Format action: runs the editor text through oxfmt on demand.
 //!
-//! oxfmt runs from the draft's own directory with an explicit empty config,
-//! so no `.oxfmtrc` from the source repo or the home directory changes how
-//! the message wraps. An `.editorconfig` above the drafts directory still
-//! applies; it has no prose-wrap setting.
+//! oxfmt runs from the draft's own directory with an explicit config, so no
+//! `.oxfmtrc` from the source repo or the home directory changes how the
+//! message wraps. An `.editorconfig` above the drafts directory still
+//! applies; it has no prose-wrap setting. Format keeps line breaks as they
+//! are; its menu also wraps or unwraps paragraphs.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,11 +13,14 @@ use std::time::Duration;
 
 use editor::{Editor, EditorEvent};
 use gpui::{
-    Animation, AnimationExt, App, Context, ElementId, Entity, FontWeight, KeyBinding, SharedString,
-    Subscription, Task, Window, actions, div, ease_out_quint, prelude::*, px,
+    Anchor, Animation, AnimationExt, App, Context, ElementId, Entity, FontWeight, KeyBinding,
+    SharedString, Subscription, Task, Transformation, Window, actions, anchored, deferred, div,
+    ease_out_quint, percentage, prelude::*, px, svg,
 };
 use shell_env::ShellEnv;
 
+use crate::assets::CHEVRON_ICON;
+use crate::menu::{MenuItem, menu_panel};
 use crate::process;
 use crate::theme;
 
@@ -25,6 +29,32 @@ actions!(format, [Format]);
 /// oxfmt is a Node script; a cold start takes about a second.
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_FADE: Duration = Duration::from_millis(200);
+/// The line length Wrap fills paragraphs to.
+const WRAP_WIDTH: usize = 80;
+
+/// What a format does with line breaks inside paragraphs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wrap {
+    /// Keeps them as written.
+    Keep,
+    /// Refills paragraphs to [`WRAP_WIDTH`], for a Markdown file in a
+    /// repository.
+    Always,
+    /// Joins each paragraph onto one line, as a GitHub comment wants.
+    Never,
+}
+
+impl Wrap {
+    fn config(self) -> String {
+        match self {
+            Wrap::Keep => "{}".into(),
+            Wrap::Always => {
+                format!(r#"{{"proseWrap":"always","printWidth":{WRAP_WIDTH}}}"#)
+            }
+            Wrap::Never => r#"{"proseWrap":"never"}"#.into(),
+        }
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(editor::secondary!("shift-f"), Format, None)]);
@@ -41,6 +71,7 @@ pub struct Formatter {
     hidden: bool,
     running: Option<Task<()>>,
     message: Option<SharedString>,
+    menu_open: bool,
     _editor_events: Subscription,
 }
 
@@ -58,6 +89,7 @@ impl Formatter {
             hidden: false,
             running: None,
             message: None,
+            menu_open: false,
             _editor_events,
         }
     }
@@ -99,7 +131,7 @@ impl Formatter {
         self.draft_dir.is_some() && !self.agent_running && !self.hidden && self.running.is_none()
     }
 
-    pub fn format(&mut self, cx: &mut Context<Self>) {
+    pub fn format(&mut self, wrap: Wrap, cx: &mut Context<Self>) {
         if !self.available() {
             return;
         }
@@ -114,7 +146,7 @@ impl Formatter {
             let input = input.clone();
             let dir = dir.clone();
             async move {
-                let config = empty_config()?;
+                let config = config(wrap)?;
                 process::run(
                     "oxfmt",
                     oxfmt_command(env.command(&oxfmt), &dir, config.path()),
@@ -179,46 +211,131 @@ impl Render for Formatter {
                     )
             }))
             .when(visible, |this| {
-                this.child(
-                    div()
-                        .id("format")
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_md()
-                        .text_color(palette.text)
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Format")
-                        .child(
-                            div()
-                                .text_color(palette.muted)
-                                .child(editor::by_platform!("⌘⇧F", "Ctrl+Shift+F")),
-                        )
-                        .map(|button| {
-                            if available {
-                                button
-                                    .hover(|style| style.bg(palette.hover))
-                                    .active(|style| style.opacity(0.8))
-                                    .on_click(cx.listener(|this, _, _, cx| this.format(cx)))
-                            } else {
-                                button.opacity(0.4)
-                            }
-                        }),
-                )
+                this.child(self.button(available, &palette, cx))
             })
     }
 }
 
-/// An empty oxfmt config. Passing it explicitly stops oxfmt from searching
-/// the working directory's ancestors for one.
-fn empty_config() -> Result<tempfile::NamedTempFile, String> {
+impl Formatter {
+    /// Format, with a chevron that opens the wrap choices.
+    fn button(
+        &mut self,
+        available: bool,
+        palette: &theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        if !available {
+            self.menu_open = false;
+        }
+        let format = div()
+            .id("format")
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .pl_2()
+            .pr_1p5()
+            .py_0p5()
+            .rounded_l_md()
+            .child("Format")
+            .child(
+                div()
+                    .text_color(palette.muted)
+                    .child(editor::by_platform!("⌘⇧F", "Ctrl+Shift+F")),
+            )
+            .when(available, |button| {
+                button
+                    .hover(|style| style.bg(palette.hover))
+                    .active(|style| style.opacity(0.8))
+                    .on_click(cx.listener(|this, _, _, cx| this.format(Wrap::Keep, cx)))
+            });
+        let chevron = div()
+            .id("format-menu")
+            .h_full()
+            .flex()
+            .items_center()
+            .px_1()
+            .rounded_r_md()
+            .when(self.menu_open, |button| button.bg(palette.hover))
+            .child(
+                svg()
+                    .path(CHEVRON_ICON)
+                    .size(px(10.))
+                    .text_color(palette.muted)
+                    .with_transformation(Transformation::rotate(percentage(0.25))),
+            )
+            .when(available, |button| {
+                button
+                    .hover(|style| style.bg(palette.hover))
+                    .active(|style| style.opacity(0.8))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = !this.menu_open;
+                        cx.notify();
+                    }))
+            });
+        div()
+            .relative()
+            .flex()
+            .items_stretch()
+            .text_color(palette.text)
+            .font_weight(FontWeight::MEDIUM)
+            .when(!available, |group| group.opacity(0.4))
+            .child(format)
+            .child(chevron)
+            .when(self.menu_open, |group| {
+                group.child(
+                    div().absolute().top_full().right_0().mt_1().child(deferred(
+                        anchored()
+                            .anchor(Anchor::TopRight)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(self.menu(palette, cx)),
+                    )),
+                )
+            })
+    }
+
+    fn menu(&self, palette: &theme::Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let item = |label: String, wrap| MenuItem {
+            label: label.into(),
+            checked: false,
+            enabled: true,
+            action: Some(wrap),
+        };
+        let items = [
+            item(format!("Wrap at {WRAP_WIDTH} Columns"), Wrap::Always),
+            item("Unwrap Paragraphs".into(), Wrap::Never),
+        ];
+        let pick = cx.entity().downgrade();
+        let dismiss = cx.entity().downgrade();
+        menu_panel(
+            palette,
+            &items,
+            move |wrap, _, cx| {
+                pick.update(cx, |this, cx| {
+                    this.menu_open = false;
+                    this.format(wrap, cx);
+                })
+                .ok();
+            },
+            move |_, cx| {
+                dismiss
+                    .update(cx, |this, cx| {
+                        this.menu_open = false;
+                        cx.notify();
+                    })
+                    .ok();
+            },
+        )
+    }
+}
+
+/// The oxfmt config for `wrap`. Passing it explicitly stops oxfmt from
+/// searching the working directory's ancestors for one.
+fn config(wrap: Wrap) -> Result<tempfile::NamedTempFile, String> {
     tempfile::Builder::new()
         .prefix("draftmux-oxfmtrc")
         .suffix(".json")
         .tempfile()
-        .and_then(|mut file| file.write_all(b"{}").map(|()| file))
+        .and_then(|mut file| file.write_all(wrap.config().as_bytes()).map(|()| file))
         .map_err(|err| format!("Couldn't write the oxfmt config: {err}"))
 }
 
@@ -260,7 +377,7 @@ mod tests {
             r#"pwd -P > "$(dirname "$0")/cwd"; printf '%s\n' "$@" > "$(dirname "$0")/args"; tr a-z A-Z"#,
         );
         let draft = tempfile::tempdir().unwrap();
-        let config = empty_config().unwrap();
+        let config = config(Wrap::Keep).unwrap();
         let output = process::run(
             "oxfmt",
             oxfmt_command(command, draft.path(), config.path()),
@@ -296,7 +413,7 @@ mod tests {
         let draft = root.path().join("draft");
         fs::create_dir(&draft).unwrap();
 
-        let config = empty_config().unwrap();
+        let config = config(Wrap::Keep).unwrap();
         let input = "* a\n* b\n\nA long line that stays\nbroken where it is.\n\n```js\nconst  x =  1\n```\n";
         let output = process::run(
             "oxfmt",
@@ -310,5 +427,31 @@ mod tests {
             output,
             "- a\n- b\n\nA long line that stays\nbroken where it is.\n\n```js\nconst x = 1;\n```\n"
         );
+    }
+
+    /// Needs oxfmt on `PATH`: `cargo test -j 2 -p draftmux --bin draftmux real_oxfmt -- --ignored`.
+    #[test]
+    #[ignore]
+    fn real_oxfmt_wraps_and_unwraps_paragraphs() {
+        let draft = tempfile::tempdir().unwrap();
+        let run = |wrap, input: &str| {
+            let config = config(wrap).unwrap();
+            process::run(
+                "oxfmt",
+                oxfmt_command(Command::new("oxfmt"), draft.path(), config.path()),
+                Some(input),
+                TIMEOUT,
+                None,
+            )
+            .unwrap()
+        };
+        let long = "word ".repeat(20).trim_end().to_owned();
+        let wrapped = run(Wrap::Always, &format!("{long}\n\n- {long}\n"));
+        assert!(wrapped.lines().all(|line| line.len() <= WRAP_WIDTH));
+        assert!(
+            wrapped.contains("\n  word"),
+            "list items wrap under their text"
+        );
+        assert_eq!(run(Wrap::Never, &wrapped), format!("{long}\n\n- {long}\n"));
     }
 }
