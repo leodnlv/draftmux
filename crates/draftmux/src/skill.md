@@ -111,6 +111,13 @@ Markdown; for one that takes Slack mrkdwn, change only `**bold**` to
 `*bold*`, `*italic*` to `_italic_`, `~~strike~~` to `~strike~` and
 `[text](url)` to `<url|text>`. Do not send or post until the user asks.
 
+A GitHub draft keeps each paragraph on one line, since a GitHub comment shows
+every line break. When it goes into a Markdown file in a repository instead,
+wrap its paragraphs to the line length the repository uses for Markdown, if
+it has one; a rendered file reads the same either way. Change only line
+breaks inside paragraphs and list items, never code blocks, tables or the
+words.
+
 Plain `draftmux show` returns the complete file, including frontmatter.
 `--path` returns the raw file's path: use it for editing, not as a
 `--body-file` when fields are present. Malformed frontmatter is kept as body,
