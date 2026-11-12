@@ -128,8 +128,9 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-c", Copy, ctx),
         KeyBinding::new("cmd-x", Cut, ctx),
         KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-z", Undo, ctx),
-        KeyBinding::new("cmd-shift-z", Redo, ctx),
+        // Without a context, so the host can undo from outside an editor.
+        KeyBinding::new("cmd-z", Undo, None),
+        KeyBinding::new("cmd-shift-z", Redo, None),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
         KeyBinding::new("escape", DismissMenu, ctx),
     ]
@@ -181,9 +182,10 @@ fn linux_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-c", Copy, ctx),
         KeyBinding::new("ctrl-x", Cut, ctx),
         KeyBinding::new("ctrl-v", Paste, ctx),
-        KeyBinding::new("ctrl-z", Undo, ctx),
-        KeyBinding::new("ctrl-shift-z", Redo, ctx),
-        KeyBinding::new("ctrl-y", Redo, ctx),
+        // Without a context, so the host can undo from outside an editor.
+        KeyBinding::new("ctrl-z", Undo, None),
+        KeyBinding::new("ctrl-shift-z", Redo, None),
+        KeyBinding::new("ctrl-y", Redo, None),
         KeyBinding::new("escape", DismissMenu, ctx),
     ]
 }
@@ -465,6 +467,17 @@ impl Editor {
         self.after_change(None, false, cx);
     }
 
+    /// Undoes the last edit, as the Undo action does with the editor
+    /// focused. Returns false when read-only or there's nothing to undo.
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> bool {
+        self.history_step(None, cx, Buffer::undo)
+    }
+
+    /// Redoes the last undone edit; see [`Editor::undo`].
+    pub fn redo(&mut self, cx: &mut Context<Self>) -> bool {
+        self.history_step(None, cx, Buffer::redo)
+    }
+
     /// Tints `ranges` of the current text and fades the tint away, to point
     /// out text that changed without the user typing it. The next edit
     /// ends it early.
@@ -617,6 +630,20 @@ impl Editor {
         }
         f(&mut self.buffer);
         self.after_change(Some(window), true, cx);
+    }
+
+    /// Undoes or redoes one step unless read-only. Returns whether it did.
+    fn history_step(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Buffer) -> bool,
+    ) -> bool {
+        if self.read_only || !f(&mut self.buffer) {
+            return false;
+        }
+        self.after_change(window, true, cx);
+        true
     }
 
     fn page_rows(&self) -> isize {
@@ -1068,15 +1095,16 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &Outdent, window, cx| {
                 this.user_edit(window, cx, Buffer::outdent_lines);
             }))
+            // With nothing to undo here, the host may undo something else.
             .on_action(cx.listener(|this, _: &Undo, window, cx| {
-                this.user_edit(window, cx, |b| {
-                    b.undo();
-                });
+                if !this.history_step(Some(window), cx, Buffer::undo) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &Redo, window, cx| {
-                this.user_edit(window, cx, |b| {
-                    b.redo();
-                });
+                if !this.history_step(Some(window), cx, Buffer::redo) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &DeleteToLineStart, window, cx| {
                 if !this.read_only {

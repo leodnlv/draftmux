@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use draftmux_storage::{Conflict, Store, Target};
-use editor::{Editor, EditorEvent};
+use editor::{Editor, EditorEvent, Redo, Undo};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, BoxShadow, Context, CursorStyle, DragMoveEvent,
     Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, MouseButton, Pixels,
@@ -207,6 +207,15 @@ impl Render for Chrome {
                 }
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+            // Reached when the focus is outside the draft editor, or in a
+            // text field with nothing to undo, such as the composer after
+            // a send: the draft is what the user, or its agent, last changed.
+            .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                this.editor.update(cx, |editor, cx| editor.undo(cx));
+            }))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                this.editor.update(cx, |editor, cx| editor.redo(cx));
+            }))
             .on_action(cx.listener(|this, _: &crate::Quit, _, cx| {
                 if this.flush_before_exit(cx) {
                     cx.quit();

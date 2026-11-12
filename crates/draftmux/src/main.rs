@@ -141,12 +141,18 @@ fn run_app() -> Result<()> {
             settings_window::init(cx);
             update::init(cx);
             cx.bind_keys([KeyBinding::new(editor::secondary!("q"), Quit, None)]);
-            cx.set_menus([Menu::new("Draftmux").items([
-                MenuItem::action("Check for Updates…", update::CheckForUpdates),
-                MenuItem::action("Settings…", settings_window::OpenSettings),
-                MenuItem::separator(),
-                MenuItem::action("Quit Draftmux", Quit),
-            ])]);
+            cx.set_menus([
+                Menu::new("Draftmux").items([
+                    MenuItem::action("Check for Updates…", update::CheckForUpdates),
+                    MenuItem::action("Settings…", settings_window::OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Draftmux", Quit),
+                ]),
+                Menu::new("Edit").items([
+                    MenuItem::action("Undo", editor::Undo),
+                    MenuItem::action("Redo", editor::Redo),
+                ]),
+            ]);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
