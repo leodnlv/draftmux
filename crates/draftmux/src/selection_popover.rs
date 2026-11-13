@@ -1271,10 +1271,13 @@ impl SelectionPopover {
                                     ),
                             ),
                     )
-                    .child(footer(
-                        &["↵ send to pi", "⇧↵ newline", "esc back"],
-                        &palette,
-                    ))
+                    // The field's edge sets the hints apart, so they need no
+                    // rule.
+                    .child(
+                        hints(&["↵ send to pi", "⇧↵ newline", "esc back"], &palette)
+                            .mt(px(6.))
+                            .pb(px(3.)),
+                    )
                     .into_any_element()
             }
             Mode::Running {
@@ -1376,20 +1379,24 @@ impl SelectionPopover {
     }
 }
 
-fn footer(hints: &[&str], palette: &Palette) -> impl IntoElement {
-    div()
-        .flex()
-        .gap(px(10.))
+fn footer(keys: &[&str], palette: &Palette) -> impl IntoElement {
+    hints(keys, palette)
         .mt(px(4.))
-        .px(px(8.))
         .pt(px(6.))
         .pb(px(3.))
         .border_t_1()
         .border_color(palette.menu_line)
+}
+
+fn hints(keys: &[&str], palette: &Palette) -> gpui::Div {
+    div()
+        .flex()
+        .gap(px(10.))
+        .px(px(8.))
         .text_size(px(11.))
         .text_color(palette.faint)
         .whitespace_nowrap()
-        .children(hints.iter().map(|hint| hint.to_string()))
+        .children(keys.iter().map(|hint| hint.to_string()))
 }
 
 /// The comment field: the UI font at the popover's size, as tall as its
