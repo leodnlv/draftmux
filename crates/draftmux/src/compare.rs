@@ -480,24 +480,60 @@ fn alert_line(line: &str) -> bool {
 
 /// Whether `block` shows any of hunk `hunk`'s marks.
 pub fn block_has_hunk(block: &markup::Block, hunk: usize) -> bool {
+    let mut found = false;
+    opened_hunks(block, &mut |opened| found |= opened == hunk);
+    found
+}
+
+/// Which of the first `count` hunks `blocks` show any marks of, the same
+/// as [`block_has_hunk`] for each hunk but in one pass.
+pub fn shown_hunks(blocks: &[markup::Block], count: usize) -> Vec<bool> {
+    let mut shown = vec![false; count];
+    for block in blocks {
+        opened_hunks(block, &mut |hunk| {
+            if let Some(shown) = shown.get_mut(hunk) {
+                *shown = true;
+            }
+        });
+    }
+    shown
+}
+
+/// Calls `found` with the hunk of each insertion or deletion mark opened
+/// in `block`'s text.
+fn opened_hunks(block: &markup::Block, found: &mut dyn FnMut(usize)) {
     use markup::Block;
-    // Tags follow only openers and are all as long, so the opener and tag
-    // can't match anywhere else.
-    let tag = tag(hunk);
-    let [ins, del] = [INS_OPEN, DEL_OPEN].map(|open| format!("{open}{tag}"));
-    let has = |text: &str| text.contains(&ins) || text.contains(&del);
-    let spans = |spans: &[markup::Span]| spans.iter().any(|span| has(&span.text));
-    let blocks = |blocks: &[Block]| blocks.iter().any(|block| block_has_hunk(block, hunk));
     match block {
-        Block::Paragraph(text) | Block::Heading { spans: text, .. } => spans(text),
-        Block::List(list) => list.items.iter().any(|item| blocks(&item.blocks)),
-        Block::Quote(inner) | Block::Alert { blocks: inner, .. } => blocks(inner),
-        Block::Code { text, .. } | Block::Html(text) => has(text),
-        Block::Table(table) => {
-            table.header.iter().any(|cell| spans(cell))
-                || table.rows.iter().flatten().any(|cell| spans(cell))
+        Block::Paragraph(spans) | Block::Heading { spans, .. } => {
+            spans.iter().for_each(|span| opened_in(&span.text, found));
         }
-        Block::Rule => false,
+        Block::List(list) => list
+            .items
+            .iter()
+            .flat_map(|item| &item.blocks)
+            .for_each(|block| opened_hunks(block, found)),
+        Block::Quote(inner) | Block::Alert { blocks: inner, .. } => {
+            inner.iter().for_each(|block| opened_hunks(block, found));
+        }
+        Block::Code { text, .. } | Block::Html(text) => opened_in(text, found),
+        Block::Table(table) => table
+            .header
+            .iter()
+            .chain(table.rows.iter().flatten())
+            .flatten()
+            .for_each(|span| opened_in(&span.text, found)),
+        Block::Rule => {}
+    }
+}
+
+/// [`opened_hunks`] for one run of text.
+fn opened_in(text: &str, found: &mut dyn FnMut(usize)) {
+    // Tags follow only openers, so an opener and a whole tag can't match
+    // anywhere else.
+    for (at, open) in text.match_indices([INS_OPEN, DEL_OPEN]) {
+        if let Some(hunk) = read_tag(&text[at + open.len()..]) {
+            found(hunk);
+        }
     }
 }
 
@@ -1056,6 +1092,7 @@ mod tests {
             .map(|block| block_has_hunk(block, 0))
             .collect();
         assert_eq!(found, [false, true]);
+        assert_eq!(shown_hunks(&doc.blocks, 2), [true, false]);
     }
 
     /// Both sides, as `before / after`.

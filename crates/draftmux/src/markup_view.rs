@@ -1054,33 +1054,34 @@ pub fn preview(target: Target, text: &str) -> Document {
 }
 
 /// One side of a comparison parsed for `target` with its changes marked
-/// ([`redline_text`]).
+/// ([`redlined`]).
 pub fn redline(comparison: &compare::Comparison, side: compare::Side, target: Target) -> Document {
-    preview(target, &redline_text(comparison, side, target))
+    redlined(comparison, side, target).1
 }
 
-/// One side of a comparison with its changes marked ([`compare::marked`]).
-/// A change whose marks the document parsed for `target` wouldn't show,
-/// such as one only in a heading's marker or in frontmatter, is marked
-/// with a point instead.
-pub fn redline_text(
+/// One side of a comparison with its changes marked ([`compare::marked`]),
+/// and the document it parses to for `target`. A change whose marks that
+/// document wouldn't show, such as one only in a heading's marker or in
+/// frontmatter, is marked with a point instead, and only then is the text
+/// parsed again.
+pub fn redlined(
     comparison: &compare::Comparison,
     side: compare::Side,
     target: Target,
-) -> String {
+) -> (String, Document) {
     let text = compare::marked(comparison, side, &[]);
     let doc = preview(target, &text);
-    let unseen: Vec<usize> = (0..comparison.hunks.len())
-        .filter(|&hunk| {
-            !doc.blocks
-                .iter()
-                .any(|block| compare::block_has_hunk(block, hunk))
-        })
+    let unseen: Vec<usize> = compare::shown_hunks(&doc.blocks, comparison.hunks.len())
+        .into_iter()
+        .enumerate()
+        .filter_map(|(hunk, shown)| (!shown).then_some(hunk))
         .collect();
-    match unseen.is_empty() {
-        true => text,
-        false => compare::marked(comparison, side, &unseen),
+    if unseen.is_empty() {
+        return (text, doc);
     }
+    let text = compare::marked(comparison, side, &unseen);
+    let doc = preview(target, &text);
+    (text, doc)
 }
 
 /// The preview style for `target` in the light or dark appearance.

@@ -169,11 +169,10 @@ async fn capture_reviews(
             bail!("{name}.before.md has no {name}.after.md");
         };
         let comparison = compare::compare(before, after);
-        let sides = [Side::Before, Side::After]
-            .map(|side| markup_view::redline_text(&comparison, side, target));
-        let docs = sides
-            .each_ref()
-            .map(|text| markup_view::preview(target, text));
+        let [(old_side, old_doc), (new_side, new_doc)] = [Side::Before, Side::After]
+            .map(|side| markup_view::redlined(&comparison, side, target));
+        let sides = [old_side, new_side];
+        let docs = [old_doc, new_doc];
         let path = out.join(format!("{name}-review.txt"));
         std::fs::write(
             &path,
