@@ -1022,6 +1022,13 @@ impl Chat {
                 .into_any_element()
         };
         let stats = tool.stats.filter(|_| !running);
+        // How far open the row is; the chevron turns and the body unfolds.
+        let turned = match turn.filter(|_| !crate::platform::reduce_motion()) {
+            Some(delta) if tool.expanded => delta,
+            Some(delta) => 1. - delta,
+            None if tool.expanded => 1.,
+            None => 0.,
+        };
         let row = div()
             .id(("tool", index))
             .group("tool-row")
@@ -1103,12 +1110,6 @@ impl Chat {
                             .size(px(10.))
                             .text_color(palette.faint);
                         // Collapsing turns it back while the row is hovered.
-                        let turned = match turn.filter(|_| !crate::platform::reduce_motion()) {
-                            Some(delta) if tool.expanded => delta,
-                            Some(delta) => 1. - delta,
-                            None if tool.expanded => 1.,
-                            None => 0.,
-                        };
                         if tool.expanded || turned > 0. {
                             chevron.with_transformation(Transformation::rotate(percentage(
                                 0.25 * turned,
@@ -1124,11 +1125,21 @@ impl Chat {
             .flex()
             .flex_col()
             .child(row)
-            .when(tool.expanded, |column| {
+            .when(turned > 0., |column| {
+                let (body, height) = tool_body(tool, index, palette);
+                // Clips the body to a share of its height; the list
+                // remeasures visible rows each frame, so a tail it follows
+                // stays in view.
                 column.child(
                     div()
-                        .when_some(turn, |body, delta| body.opacity(delta))
-                        .child(tool_body(tool, index, palette)),
+                        .flex()
+                        .flex_col()
+                        .when(turned < 1., |clip| {
+                            clip.h(px(height * turned))
+                                .overflow_hidden()
+                                .opacity(turned)
+                        })
+                        .child(div().flex_none().child(body)),
                 )
             })
             .into_any_element()
@@ -1814,7 +1825,14 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// The expanded row: output keeps its whitespace and scrolls sideways.
-fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
+/// Returns its height with margins, which its lines fix since none wrap.
+fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> (impl IntoElement, f32) {
+    const LINE_HEIGHT: f32 = 17.;
+    const PADDING: f32 = 8.;
+    const MARGIN: f32 = 4.;
+    const MAX_HEIGHT: f32 = 200.;
+    const COMMAND_GAP: f32 = 4.;
+    let mut extra = 0.;
     let lines: Vec<AnyElement> = match tool.diff() {
         Some(diff) => diff
             .into_iter()
@@ -1852,29 +1870,37 @@ fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
             .enumerate()
             .map(|(i, line)| {
                 let command = tool.name == "bash" && i == 0;
+                if command {
+                    extra += COMMAND_GAP;
+                }
                 div()
                     .px(px(10.))
                     .whitespace_nowrap()
-                    .when(command, |line| line.text_color(palette.faint).mb(px(4.)))
+                    .when(command, |line| {
+                        line.text_color(palette.faint).mb(px(COMMAND_GAP))
+                    })
                     .child(blank_as_space(line))
                     .into_any_element()
             })
             .collect(),
     };
-    div()
+    let content = lines.len() as f32 * LINE_HEIGHT + extra + 2. * PADDING;
+    let height = content.min(MAX_HEIGHT) + 2. * MARGIN;
+    let body = div()
         .id(("tool-body", index))
         .ml(px(24.))
-        .my(px(4.))
-        .py(px(8.))
-        .max_h(px(200.))
+        .my(px(MARGIN))
+        .py(px(PADDING))
+        .max_h(px(MAX_HEIGHT))
         .overflow_scroll()
         .rounded(px(7.))
         .bg(palette.tool_body)
         .font_family(MONO)
         .text_size(px(11.5))
-        .line_height(px(17.))
+        .line_height(px(LINE_HEIGHT))
         .text_color(palette.tool_text)
-        .child(div().flex().flex_col().min_w_full().children(lines))
+        .child(div().flex().flex_col().min_w_full().children(lines));
+    (body, height)
 }
 
 /// Empty lines would collapse to no height.
