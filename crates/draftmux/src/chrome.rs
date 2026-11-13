@@ -67,6 +67,8 @@ const CONTENT_MIN_WIDTH: Pixels = px(320.);
 /// Below this, the editor and preview are too narrow to share the room
 /// beside the sidebar and chat, so the editor collapses.
 const SPLIT_MIN_WIDTH: Pixels = px(640.);
+/// How long the sidebar, editor and preview take to slide in or out.
+const PANE_SLIDE: Duration = Duration::from_millis(200);
 /// How long the chat width settles before it is saved.
 const CHAT_WIDTH_SAVE_DELAY: Duration = Duration::from_millis(300);
 /// Origin of the close button; vertically centres the buttons in the toolbar.
@@ -143,6 +145,8 @@ pub struct Chrome {
     sidebar_focus: FocusHandle,
     content_focus: FocusHandle,
     show_sidebar: bool,
+    /// The sidebar, editor and preview sliding in and out, once rendered.
+    panes: Option<[Slide; 3]>,
     preview_scroll: ScrollHandle,
     scrollbars: [ScrollbarState; 3],
     /// Wakes up when the pending edit is due to be saved.
@@ -162,51 +166,84 @@ impl Render for Chrome {
         self.fit_to_width(window, cx);
         self.leaving_rows.retain(sidebar::LeavingRow::folding);
         self.mirror_flash(window, cx);
+        let shown = [self.show_sidebar, self.show_editor, self.show_preview];
+        let panes = self.panes.get_or_insert_with(|| shown.map(Slide::new));
+        let now = Instant::now();
+        let [sidebar_open, editor_open, preview_open] =
+            std::array::from_fn(|ix| panes[ix].set(shown[ix], now));
+        let [_, editor_slide, preview_slide] = panes.clone();
+        if panes.iter().any(|pane| pane.running(now)) {
+            window.request_animation_frame();
+        }
+        // A pane sliding in or out keeps the width it has open, and is
+        // clipped rather than rewrapped; the pane beside it gives and takes
+        // the room.
+        let split = split_width(
+            window.viewport_size().width,
+            self.chat_width,
+            self.show_sidebar,
+        );
+        let open_width = |slide: &Slide, other: &Slide| {
+            let shared = if slide.shown {
+                other.shown
+            } else {
+                other.was_open()
+            };
+            if shared { split / 2. } else { split }
+        };
+        let editor_width = (editor_open < 1.).then(|| open_width(&editor_slide, &preview_slide));
+        let preview_width = (preview_open < 1.).then(|| open_width(&preview_slide, &editor_slide));
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let content = if self.drafts.current().is_some() {
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
-                .when(self.show_editor, |row| {
+                .when(editor_open > 0., |row| {
                     row.child(
-                        pane(palette.pane, &palette)
-                            .flex_1()
-                            .relative()
-                            .child(SelectionPopover::wrap(
-                                &self.selection,
-                                self.editor.clone().cached(
-                                    StyleRefinement::default()
-                                        .absolute()
-                                        .top_0()
-                                        .left_0()
-                                        .size_full(),
-                                ),
-                                cx,
-                            ))
-                            .child(scrollbar(Source::Editor(self.editor.clone()), editor_bar)),
+                        slot(editor_open, editor_width, false).child(
+                            pane(palette.pane, &palette)
+                                .when_some(editor_width, |pane, width| pane.w(width).flex_none())
+                                .when(editor_width.is_none(), |pane| pane.flex_1())
+                                .relative()
+                                .child(SelectionPopover::wrap(
+                                    &self.selection,
+                                    self.editor.clone().cached(
+                                        StyleRefinement::default()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full(),
+                                    ),
+                                    cx,
+                                ))
+                                .child(scrollbar(Source::Editor(self.editor.clone()), editor_bar)),
+                        ),
                     )
                 })
-                .when(self.show_preview, |row| {
+                .when(preview_open > 0., |row| {
                     row.child(
-                        pane(palette.pane, &palette)
-                            .flex_1()
-                            .relative()
-                            .when(self.show_editor, |pane| pane.border_l_1())
-                            .child({
-                                let body = self.preview.clone().cached(
-                                    StyleRefinement::default()
-                                        .absolute()
-                                        .top_0()
-                                        .left_0()
-                                        .size_full(),
-                                );
-                                SelectionPopover::wrap_preview(&self.selection, body, cx)
-                            })
-                            .child(scrollbar(
-                                Source::Handle(self.preview_scroll.clone()),
-                                preview_bar,
-                            )),
+                        slot(preview_open, preview_width, true).child(
+                            pane(palette.pane, &palette)
+                                .when_some(preview_width, |pane, width| pane.w(width).flex_none())
+                                .when(preview_width.is_none(), |pane| pane.flex_1())
+                                .relative()
+                                .when(editor_open > 0., |pane| pane.border_l_1())
+                                .child({
+                                    let body = self.preview.clone().cached(
+                                        StyleRefinement::default()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full(),
+                                    );
+                                    SelectionPopover::wrap_preview(&self.selection, body, cx)
+                                })
+                                .child(scrollbar(
+                                    Source::Handle(self.preview_scroll.clone()),
+                                    preview_bar,
+                                )),
+                        ),
                     )
                 })
         } else {
@@ -276,8 +313,19 @@ impl Render for Chrome {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(self.show_sidebar, |row| {
-                        row.child(self.sidebar(sidebar_bar, window, cx))
+                    .when(sidebar_open > 0., |row| {
+                        let sidebar = self.sidebar(sidebar_bar, window, cx);
+                        // Slides out to the left, uncovering the content.
+                        row.child(
+                            div()
+                                .flex_none()
+                                .h_full()
+                                .flex()
+                                .justify_end()
+                                .overflow_hidden()
+                                .w(SIDEBAR_WIDTH * sidebar_open)
+                                .child(sidebar),
+                        )
                     })
                     .child(content)
                     .child(
@@ -476,6 +524,7 @@ impl Chrome {
             sidebar_focus: cx.focus_handle(),
             content_focus: cx.focus_handle(),
             show_sidebar,
+            panes: None,
             preview_scroll,
             scrollbars: Default::default(),
             autosave: Task::ready(()),
@@ -1525,6 +1574,76 @@ fn chat_resize_handle(cx: &mut Context<Chrome>) -> impl IntoElement {
                 );
             }
         }))
+}
+
+/// A pane's place in the window, sliding open or shut.
+#[derive(Clone)]
+struct Slide {
+    shown: bool,
+    /// How open the pane was when the slide started, and when.
+    from: f32,
+    start: Option<Instant>,
+}
+
+impl Slide {
+    fn new(shown: bool) -> Self {
+        Self {
+            shown,
+            from: if shown { 1. } else { 0. },
+            start: None,
+        }
+    }
+
+    fn progress(&self, now: Instant) -> Option<f32> {
+        let elapsed = now.saturating_duration_since(self.start?);
+        let linear = elapsed.as_secs_f32() / PANE_SLIDE.as_secs_f32();
+        (linear < 1.).then(|| ease_out_quint()(linear))
+    }
+
+    /// How open the pane is, from 0 to 1.
+    fn open(&self, now: Instant) -> f32 {
+        let target = if self.shown { 1. } else { 0. };
+        match self.progress(now) {
+            Some(delta) => self.from + (target - self.from) * delta,
+            None => target,
+        }
+    }
+
+    /// Slides toward `shown` from wherever the pane is, and returns how
+    /// open it is now.
+    fn set(&mut self, shown: bool, now: Instant) -> f32 {
+        if shown != self.shown {
+            self.from = self.open(now);
+            self.shown = shown;
+            self.start = (!crate::platform::reduce_motion()).then_some(now);
+        }
+        self.open(now)
+    }
+
+    fn running(&self, now: Instant) -> bool {
+        self.progress(now).is_some()
+    }
+
+    /// Whether the pane was open when the slide started.
+    fn was_open(&self) -> bool {
+        self.from > 0.5
+    }
+}
+
+/// Holds the editor or the preview. While its pane slides, its share of
+/// the room follows how `open` it is, and it shows the pane, `width` wide,
+/// from its start or, with `end`, its end.
+fn slot(open: f32, width: Option<Pixels>, end: bool) -> gpui::Div {
+    let mut slot = div().h_full().min_w_0().flex().overflow_hidden();
+    if width.is_some() {
+        let style = slot.style();
+        style.flex_grow = Some(open);
+        style.flex_shrink = Some(1.);
+        style.flex_basis = Some(gpui::relative(0.).into());
+    } else {
+        slot = slot.flex_1();
+    }
+    slot.when(end, |slot| slot.justify_end())
 }
 
 fn pane(bg: Hsla, palette: &Palette) -> gpui::Div {
