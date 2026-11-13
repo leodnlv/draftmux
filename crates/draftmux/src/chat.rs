@@ -126,6 +126,10 @@ pub struct Chat {
     settle_shown: Task<()>,
     /// The quotes the stack last showed, which it keeps while folding shut.
     folding_quotes: RefCell<Vec<Quote>>,
+    /// The quote stack was open when the composer last rendered.
+    quotes_open: Cell<bool>,
+    /// The transcript followed its tail until the quote stack opened.
+    resume_tail: Cell<bool>,
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
@@ -259,6 +263,8 @@ impl Chat {
             shown: Vec::new(),
             settle_shown: Task::ready(()),
             folding_quotes: RefCell::default(),
+            quotes_open: Cell::new(false),
+            resume_tail: Cell::new(false),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
@@ -1320,6 +1326,30 @@ impl Chat {
         let open = !quotes.is_empty();
         if open {
             *self.folding_quotes.borrow_mut() = quotes.clone();
+        }
+        // The stack grows the composer over the transcript's end instead of
+        // pushing the transcript up as it follows its tail. Following resumes
+        // once the end is back in view: when the stack has folded shut, or
+        // when the user scrolls down to it.
+        if open != self.quotes_open.replace(open)
+            && let Some(session) = session
+        {
+            let list = &session.list;
+            if open && list.is_following_tail() {
+                // At its end a bottom-aligned list has no anchor and stays
+                // aligned to the bottom; an offset a hair short of the end
+                // anchors it at the top instead.
+                let end = list.max_offset_for_scrollbar().y;
+                list.set_follow_mode(FollowMode::Normal);
+                list.set_offset_from_scrollbar(gpui::point(px(0.), px(0.01) - end));
+                self.resume_tail.set(true);
+            } else if !open && self.resume_tail.replace(false) {
+                // In tail mode but paused here, so it follows again once the
+                // folding stack uncovers the end.
+                let offset = list.scroll_px_offset_for_scrollbar();
+                list.set_follow_mode(FollowMode::Tail);
+                list.set_offset_from_scrollbar(offset);
+            }
         }
         let shown = self.folding_quotes.borrow().clone();
         let stack = (!shown.is_empty()).then(|| self.quote_stack(&shown, &palette, cx));
