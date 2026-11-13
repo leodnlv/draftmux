@@ -33,10 +33,10 @@ use draftmux_storage::{Draft, SourceKind};
 use editor::{Editor, EditorEvent, EditorStyle};
 use futures::StreamExt;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
+    Anchor, Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FollowMode, FontWeight, HighlightStyle, Hsla, KeyBinding, ListAlignment, ListState,
-    SharedString, StyledText, Task, Transformation, Window, actions, div, ease_out_quint, font,
-    list, percentage, prelude::*, px, relative, svg,
+    SharedString, StyledText, Task, Transformation, Window, actions, anchored, deferred, div,
+    ease_out_quint, font, list, percentage, point, prelude::*, px, relative, svg,
 };
 use shell_env::ShellEnv;
 
@@ -124,8 +124,8 @@ pub struct Chat {
     /// the editor's once they settle.
     shown: Vec<Range<usize>>,
     settle_shown: Task<()>,
-    /// The quotes the stack last showed, which it keeps while folding shut.
-    folding_quotes: RefCell<Vec<Quote>>,
+    /// The attached selections' quotes are listed above their chip.
+    quotes_listed: Cell<bool>,
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
@@ -258,7 +258,7 @@ impl Chat {
             detached: None,
             shown: Vec::new(),
             settle_shown: Task::ready(()),
-            folding_quotes: RefCell::default(),
+            quotes_listed: Cell::new(false),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
@@ -1191,9 +1191,85 @@ impl Chat {
             })
     }
 
-    /// The attached selections' quotes, one row each above the message
-    /// field, so every one stays visible and removable while writing. A
-    /// second selection adds a row rather than moving the first.
+    /// The footer's count of attached selections, which lists their quotes
+    /// above it when clicked.
+    fn quotes_chip(
+        &self,
+        quotes: &[Quote],
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let listed = self.quotes_listed.get();
+        let list = listed.then(|| {
+            div().absolute().top_0().right_0().child(deferred(
+                anchored()
+                    .anchor(Anchor::BottomRight)
+                    .offset(point(px(6.), px(-8.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .id("quote-list")
+                            .occlude()
+                            .w(px(360.))
+                            .pb(px(4.))
+                            .rounded(COMPOSER_RADIUS)
+                            .border_1()
+                            .border_color(palette.line_strong)
+                            .bg(palette.control)
+                            .shadow(vec![
+                                crate::chrome::shadow(theme::hex(0x00000033), 0., 0., 0.5),
+                                crate::chrome::shadow(theme::hex(0x00000029), 6., 18., 0.),
+                            ])
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.quotes_listed.set(false);
+                                cx.notify();
+                            }))
+                            .child(self.quote_stack(quotes, palette, cx)),
+                    ),
+            ))
+        });
+        div()
+            .id("quotes-chip")
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .h(px(20.))
+            .px(px(6.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(palette.hairline)
+            .bg(if listed {
+                palette.control_hover
+            } else {
+                palette.hover
+            })
+            .text_color(palette.text)
+            .hover(|style| style.bg(palette.control_hover))
+            .active(|style| style.opacity(0.8))
+            .tooltip(crate::tooltip::text("Show the attached selections"))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.quotes_listed.set(!this.quotes_listed.get());
+                cx.notify();
+            }))
+            .child(
+                svg()
+                    .path(QUOTE_ICON)
+                    .size(px(11.))
+                    .flex_none()
+                    .text_color(palette.faint),
+            )
+            .child(match quotes.len() {
+                1 => "1 selection".to_string(),
+                n => format!("{n} selections"),
+            })
+            .children(list)
+    }
+
+    /// The attached selections' quotes, one row each, so every one stays
+    /// visible and removable while writing.
     fn quote_stack(
         &self,
         quotes: &[Quote],
@@ -1292,7 +1368,7 @@ impl Chat {
             .children(rows)
     }
 
-    fn composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let busy = self.busy();
         let session = self.session();
@@ -1317,141 +1393,110 @@ impl Chat {
             1 => "Ask pi to change the selection, or ask about it…".into(),
             n => format!("Tell pi what to do with these {n} selections…").into(),
         };
-        let open = !quotes.is_empty();
-        if open {
-            *self.folding_quotes.borrow_mut() = quotes.clone();
+        // The quotes sit in a chip in the footer, listed above it on
+        // demand, so attaching a selection neither resizes the transcript nor
+        // covers it.
+        if quotes.is_empty() {
+            self.quotes_listed.set(false);
         }
-        let shown = self.folding_quotes.borrow().clone();
-        let stack = (!shown.is_empty()).then(|| self.quote_stack(&shown, &palette, cx));
-        let stack = crate::fold::fold(
-            "quote-stack",
-            open,
-            true,
-            move || {
-                div()
-                    .pb(COMPOSER_RADIUS)
-                    .rounded_t(COMPOSER_RADIUS)
-                    .border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(palette.line_strong)
-                    .bg(palette.control)
-                    .children(stack)
-                    .into_any_element()
-            },
-            window,
-            cx,
-        );
-        // The stack rises from behind the composer's top edge over the
-        // transcript, so attaching a selection doesn't resize the transcript
-        // and move what it shows.
-        let stack = div()
-            .absolute()
-            .left(px(12.))
-            .right(px(12.))
-            .top(px(8.) + COMPOSER_RADIUS)
-            .child(div().absolute().left_0().right_0().bottom_0().child(stack));
-        div()
-            .flex_none()
-            .relative()
-            .px(px(12.))
-            .pt(px(8.))
-            .pb(px(12.))
-            .child(stack)
-            .child(
-                div()
-                    .key_context(KEY_CONTEXT)
-                    .on_action(cx.listener(|this, _: &Send, _, cx| this.send(cx)))
-                    .on_action(cx.listener(|this, _: &Stop, _, cx| this.stop(cx)))
-                    .rounded(COMPOSER_RADIUS)
-                    .border_1()
-                    .border_color(palette.line_strong)
-                    .bg(palette.control)
-                    .child(
-                        div()
-                            .h(px(58.))
-                            .relative()
-                            .child(self.composer.clone())
-                            .when(empty, |input| {
-                                input.child(
-                                    div()
-                                        .absolute()
-                                        .top(px(9.))
-                                        .left(px(11.))
-                                        .text_size(px(13.))
-                                        .text_color(palette.faint)
-                                        .child(placeholder),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pl(px(11.))
-                            .pr(px(6.))
-                            .pb(px(6.))
-                            .text_size(px(11.))
-                            .text_color(palette.faint)
-                            .child(div().flex_1().min_w_0().overflow_hidden().children(model))
-                            // While the agent runs, the transcript shows it.
-                            .when(!busy, |footer| footer.child("↵ send · ⇧↵ newline"))
-                            .child(
+        let chip = (!quotes.is_empty()).then(|| self.quotes_chip(&quotes, &palette, cx));
+        div().flex_none().px(px(12.)).pt(px(8.)).pb(px(12.)).child(
+            div()
+                .key_context(KEY_CONTEXT)
+                .on_action(cx.listener(|this, _: &Send, _, cx| this.send(cx)))
+                .on_action(cx.listener(|this, _: &Stop, _, cx| this.stop(cx)))
+                .rounded(COMPOSER_RADIUS)
+                .border_1()
+                .border_color(palette.line_strong)
+                .bg(palette.control)
+                .child(
+                    div()
+                        .h(px(58.))
+                        .relative()
+                        .child(self.composer.clone())
+                        .when(empty, |input| {
+                            input.child(
                                 div()
-                                    .id("send")
-                                    .size(px(26.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(7.))
-                                    .text_color(palette.on_accent)
-                                    .when(busy || can_send, |button| {
-                                        let hovered = state
-                                            .background(&palette)
-                                            .blend(palette.on_accent.opacity(0.15));
-                                        button
-                                            .hover(move |style| style.bg(hovered))
-                                            .active(|style| style.opacity(0.8))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if busy {
-                                                    this.stop(cx);
-                                                } else {
-                                                    this.send(cx);
-                                                }
-                                            }))
-                                    })
-                                    .with_animation(
-                                        ("send-state", state as usize),
-                                        Animation::new(SEND_FADE).with_easing(ease_out_quint()),
-                                        move |button, delta| {
-                                            let icon = if state == SendState::Busy {
-                                                svg().path(STOP_ICON).size(px(10.))
+                                    .absolute()
+                                    .top(px(9.))
+                                    .left(px(11.))
+                                    .text_size(px(13.))
+                                    .text_color(palette.faint)
+                                    .child(placeholder),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pl(px(11.))
+                        .pr(px(6.))
+                        .pb(px(6.))
+                        .text_size(px(11.))
+                        .text_color(palette.faint)
+                        .child(div().flex_1().min_w_0().overflow_hidden().children(model))
+                        // While the agent runs, the transcript shows it.
+                        .when(!busy && chip.is_none(), |footer| {
+                            footer.child("↵ send · ⇧↵ newline")
+                        })
+                        .children(chip)
+                        .child(
+                            div()
+                                .id("send")
+                                .size(px(26.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(7.))
+                                .text_color(palette.on_accent)
+                                .when(busy || can_send, |button| {
+                                    let hovered = state
+                                        .background(&palette)
+                                        .blend(palette.on_accent.opacity(0.15));
+                                    button
+                                        .hover(move |style| style.bg(hovered))
+                                        .active(|style| style.opacity(0.8))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if busy {
+                                                this.stop(cx);
                                             } else {
-                                                svg().path(SEND_ICON).size(px(14.))
-                                            };
-                                            // The icon fades in only when it changes.
-                                            let swapped = (state == SendState::Busy)
-                                                != (from == SendState::Busy);
-                                            button
-                                                .bg(from.background(&palette).blend(
-                                                    state.background(&palette).opacity(delta),
-                                                ))
-                                                .child(
-                                                    icon.text_color(palette.on_accent)
-                                                        .opacity(if swapped { delta } else { 1. }),
-                                                )
-                                        },
-                                    ),
-                            ),
-                    ),
-            )
+                                                this.send(cx);
+                                            }
+                                        }))
+                                })
+                                .with_animation(
+                                    ("send-state", state as usize),
+                                    Animation::new(SEND_FADE).with_easing(ease_out_quint()),
+                                    move |button, delta| {
+                                        let icon = if state == SendState::Busy {
+                                            svg().path(STOP_ICON).size(px(10.))
+                                        } else {
+                                            svg().path(SEND_ICON).size(px(14.))
+                                        };
+                                        // The icon fades in only when it changes.
+                                        let swapped =
+                                            (state == SendState::Busy) != (from == SendState::Busy);
+                                        button
+                                            .bg(from
+                                                .background(&palette)
+                                                .blend(state.background(&palette).opacity(delta)))
+                                            .child(
+                                                icon.text_color(palette.on_accent)
+                                                    .opacity(if swapped { delta } else { 1. }),
+                                            )
+                                    },
+                                ),
+                        ),
+                ),
+        )
     }
 }
 
 impl Render for Chat {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let log = match self.session() {
             Some(session) => {
@@ -1561,9 +1606,7 @@ impl Render for Chat {
             .flex_col()
             .child(self.header(&palette))
             .child(log)
-            .when(self.current.is_some(), |chat| {
-                chat.child(self.composer(window, cx))
-            })
+            .when(self.current.is_some(), |chat| chat.child(self.composer(cx)))
     }
 }
 
