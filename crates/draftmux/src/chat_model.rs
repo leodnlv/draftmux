@@ -1,16 +1,16 @@
-//! The chat's model control: shows the model and thinking level pi resolved
-//! for the draft's session and switches the model with a [`ModelPicker`].
+//! The chat's model control: shows the model and thinking level the agent
+//! resolved for the draft's session and switches the model with a
+//! [`ModelPicker`].
 //!
-//! What it shows always comes from `get_state`: the owner passes the state of
-//! each new pi process ([`AgentEvent::Ready`](draftmux_pi_rpc::AgentEvent)),
-//! and a switch shows the state pi reports after it. A switch is a
-//! `set_model`, which pi records in the session, so the draft keeps the
-//! model across restarts.
+//! What it shows always comes from the agent: the owner passes the state of
+//! each new agent process ([`Event::Ready`](draftmux_agent::Event)), and a
+//! switch shows the state the agent reports after it. pi records a switch in
+//! the session, so the draft keeps the model across restarts.
 
 use std::sync::Arc;
 
+use draftmux_agent::{Agent, ErrorKind, Model, State};
 use draftmux_pi_profiles::ModelRef;
-use draftmux_pi_rpc::{Agent, Error, State};
 use gpui::{
     Anchor, Context, Entity, FocusHandle, Focusable, MouseButton, SharedString, Subscription,
     Window, anchored, deferred, div, point, prelude::*, px,
@@ -21,7 +21,7 @@ use crate::profiles::ModelList;
 use crate::theme;
 
 pub struct ChatModel {
-    agent: Arc<Agent>,
+    agent: Arc<dyn Agent>,
     profile_name: SharedString,
     state: Option<State>,
     picker: Option<(Entity<ModelPicker>, Subscription)>,
@@ -34,7 +34,7 @@ pub struct ChatModel {
 impl ChatModel {
     /// `profile_name` is the draft's pi profile, for the picker's messages.
     pub fn new(
-        agent: Arc<Agent>,
+        agent: Arc<dyn Agent>,
         profile_name: impl Into<SharedString>,
         composer: FocusHandle,
     ) -> Self {
@@ -49,7 +49,7 @@ impl ChatModel {
         }
     }
 
-    /// Shows a state pi reported, such as the one in `AgentEvent::Ready`.
+    /// Shows a state the agent reported, such as the one in `Event::Ready`.
     pub fn set_state(&mut self, state: State, cx: &mut Context<Self>) {
         self.state = Some(state);
         cx.notify();
@@ -72,7 +72,7 @@ impl ChatModel {
     }
 
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker.is_some() || self.switching {
+        if self.picker.is_some() || self.switching || !self.agent.capabilities().model_switching {
             return;
         }
         let current = self.current();
@@ -97,8 +97,8 @@ impl ChatModel {
         cx.notify();
     }
 
-    /// The draft's own pi process lists the models: that is the list
-    /// `set_model` accepts, including providers from project config.
+    /// The draft's own agent lists the models: that is the list a switch
+    /// accepts, including providers from pi's project config.
     fn load_models(&mut self, cx: &mut Context<Self>) {
         let Some((picker, _)) = &self.picker else {
             return;
@@ -107,7 +107,7 @@ impl ChatModel {
         picker
             .update(cx, |picker, cx| picker.set_models(ModelList::Loading, cx))
             .ok();
-        let models = self.agent.get_available_models();
+        let models = self.agent.available_models();
         cx.spawn(async move |_, cx| {
             let list = match models.await {
                 Ok(models) => ModelList::Loaded(
@@ -142,15 +142,18 @@ impl ChatModel {
         }
         self.switching = true;
         self.error = None;
-        let switch = self.agent.switch_model(model.provider, model.id);
+        let switch = self.agent.switch_model(Model {
+            provider: model.provider,
+            id: model.id,
+        });
         cx.spawn(async move |this, cx| {
             let state = switch.await;
             this.update(cx, |this, cx| {
                 this.switching = false;
                 match state {
-                    // pi stopped after switching; the next process's
-                    // `Ready` state shows the model.
-                    Err(Error::Stopped) => cx.notify(),
+                    // The agent stopped after switching; the next
+                    // process's `Ready` state shows the model.
+                    Err(err) if err.kind == ErrorKind::Stopped => cx.notify(),
                     state => {
                         this.show(state.map_err(|e| format!("Couldn’t switch model: {e}")), cx)
                     }
@@ -170,11 +173,10 @@ impl ChatModel {
             Some(State { model: None, .. }) => ("π no model".into(), None),
             Some(State {
                 model: Some(model),
-                thinking_level,
-                ..
+                thinking,
             }) => (
                 format!("π {}/{}", model.provider, model.id).into(),
-                Some(format!("thinking {}", thinking_level.as_str()).into()),
+                Some(format!("thinking {thinking}").into()),
             ),
         }
     }
@@ -183,13 +185,10 @@ impl ChatModel {
         match &self.state {
             Some(State {
                 model: Some(model),
-                thinking_level,
-                ..
+                thinking,
             }) => format!(
-                "{}/{} with thinking level {}. Click to switch the model.",
-                model.provider,
-                model.id,
-                thinking_level.as_str()
+                "{}/{} with thinking level {thinking}. Click to switch the model.",
+                model.provider, model.id,
             )
             .into(),
             _ => "Click to switch the model".into(),

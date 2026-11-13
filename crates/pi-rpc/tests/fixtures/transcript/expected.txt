@@ -1,0 +1,519 @@
+# live text
+## sent
+busy=true
+0 user "Reply with exactly the word: pong. Do not use tools." []
+## change Some(0)
+busy=true
+0 user "Reply with exactly the word: pong. Do not use tools." []
+## change Some(1)
+busy=true
+0 user "Reply with exactly the word: pong. Do not use tools." []
+1 assistant Document { blocks: [Paragraph([Span { text: "pong", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(1)
+busy=true
+0 user "Reply with exactly the word: pong. Do not use tools." []
+1 assistant Document { blocks: [Paragraph([Span { text: "pong", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change None
+busy=false
+0 user "Reply with exactly the word: pong. Do not use tools." []
+1 assistant Document { blocks: [Paragraph([Span { text: "pong", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+
+# live tool
+## sent
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+## change Some(0)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+## change Some(1)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Reading "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(1)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+## change Some(2)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Editing "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(2)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Edited "draft.md" [done error=false] dur=Some(3ms) err=false running=false stats=Some((1, Some(1))) out="Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md." diff=Some([Removed("Hello world draft."), Added("Hello there draft.")]) body=["Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md."] expanded=false
+## change Some(3)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Edited "draft.md" [done error=false] dur=Some(3ms) err=false running=false stats=Some((1, Some(1))) out="Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md." diff=Some([Removed("Hello world draft."), Added("Hello there draft.")]) body=["Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md."] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "done", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Edited "draft.md" [done error=false] dur=Some(3ms) err=false running=false stats=Some((1, Some(1))) out="Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md." diff=Some([Removed("Hello world draft."), Added("Hello there draft.")]) body=["Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md."] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "done", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change None
+busy=false
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Edited "draft.md" [done error=false] dur=Some(3ms) err=false running=false stats=Some((1, Some(1))) out="Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md." diff=Some([Removed("Hello world draft."), Added("Hello there draft.")]) body=["Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md."] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "done", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+
+# live abort
+## sent
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+## change Some(0)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+## change Some(1)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Reading "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(1)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+## change Some(2)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Writing "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+## change Some(2)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with  line", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with  line.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with 1–200, one number per line.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(4)
+busy=false
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, Some(1))) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with 1–200, one number per line.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+4 failure None Some(Prompt("Count slowly from 1 to 200, one number per line."))
+retry_at 4 Prompt("Count slowly from 1 to 200, one number per line.")
+
+# live events
+## sent
+busy=true
+0 user "go" []
+## change Some(0)
+busy=true
+0 user "go" []
+## change Some(1)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+## change Some(2)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(2)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(2)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+## change Some(2)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+## change Some(3)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Running "git log" [running] dur=None err=false running=true stats=None out="" diff=None body=["$ git log\n--oneline"] expanded=false
+## change Some(3)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Running "git log" [running] dur=None err=false running=true stats=None out="abc first" diff=None body=["$ git log\n--oneline", "abc first"] expanded=false
+## change Some(3)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Running "git log" [running] dur=None err=false running=true stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+## change Some(3)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+## change Some(4)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searching "TODO" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(4)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+## change Some(5)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Finding "*.md" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(5)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+## change Some(6)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(7)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Using "web_fetch" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(7)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+## change Some(8)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Writing "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=["one", "two", "three"] expanded=false
+## change Some(8)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+## change Some(9)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Editing "draft.md" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(9)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+## change Some(10)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Editing "notes.txt" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(10)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+## change Some(11)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 assistant Document { blocks: [Paragraph([Span { text: "Draft", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(11)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listing "~/notes" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+## change Some(6)
+busy=false
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+retry_at 11 Prompt("go")
+## change None
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+## change Some(12)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+12 user "started by an extension" []
+## change Some(13)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+12 user "started by an extension" []
+13 assistant Document { blocks: [Paragraph([Span { text: "No stream", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+## change Some(14)
+busy=true
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+12 user "started by an extension" []
+13 assistant Document { blocks: [Paragraph([Span { text: "No stream", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+14 tool r1 "read" Reading "/etc/hosts" [running] dur=None err=false running=true stats=None out="" diff=None body=[] expanded=false
+## change Some(14)
+busy=false
+0 user "go" []
+1 notice "overloaded. Retrying (1 of 3)…"
+2 assistant Document { blocks: [Paragraph([Span { text: "First", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "second ", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }, Span { text: "block", style: SpanStyle { strong: false, emph: true, strike: false, code: false }, link: None }])] }
+3 tool b1 "bash" Ran "git log" [done error=false] dur=Some(12ms) err=false running=false stats=None out="abc first\ndef second" diff=None body=["$ git log\n--oneline", "abc first", "def second"] expanded=false
+4 tool g1 "grep" Searched "TODO" [done error=false] dur=Some(0ns) err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+5 tool f1 "find" Found "*.md" [done error=true] dur=Some(3ms) err=true running=false stats=None out="a.md" diff=None body=["a.md"] expanded=false
+6 tool l1 "ls" Listed "~/notes" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+7 tool x1 "web_fetch" Used "web_fetch" [done error=false] dur=Some(5ms) err=false running=false stats=None out="not blocks" diff=None body=["not blocks"] expanded=false
+8 tool w1 "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((3, Some(2))) out="Wrote" diff=None body=["one", "two", "three"] expanded=false
+9 tool e1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="Edited" diff=Some([Context("one"), Removed("two"), Added("2"), Context("three")]) body=["Edited"] expanded=false
+10 tool e2 "edit" Edited "notes.txt" [done error=true] dur=Some(1ms) err=true running=false stats=None out="Draftmux: edit is limited to the draft file" diff=None body=["Draftmux: edit is limited to the draft file"] expanded=false
+11 failure Some("The model returned an error") Some(Prompt("go"))
+12 user "started by an extension" []
+13 assistant Document { blocks: [Paragraph([Span { text: "No stream", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+14 tool r1 "read" Read "/etc/hosts" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["No output"] expanded=false
+15 failure None Some(Prompt("started by an extension"))
+retry_at 15 Prompt("started by an extension")
+
+# live quoted
+## sent
+busy=true
+0 user "shorter" [Quote { text: "two", lines: (2, 2), range: 4..7 }]
+## change Some(0)
+busy=true
+0 user "shorter" [Quote { text: "two", lines: (2, 2), range: 4..7 }]
+## change Some(1)
+busy=false
+0 user "shorter" [Quote { text: "two", lines: (2, 2), range: 4..7 }]
+1 failure None Some(Prompt("<draftmux-selection lines=\"2-2\" bytes=\"4-7\">\ntwo\n</draftmux-selection>\nThe user selected the text above in the draft file (line numbers from 1, byte offsets from 0). When their message says \"this\", \"the selection\" or \"the selected part\", it means that text: change only that part of the draft unless they ask otherwise, and if the same text appears elsewhere, change the one at these lines.\n\nshorter"))
+retry_at 1 Prompt("<draftmux-selection lines=\"2-2\" bytes=\"4-7\">\ntwo\n</draftmux-selection>\nThe user selected the text above in the draft file (line numbers from 1, byte offsets from 0). When their message says \"this\", \"the selection\" or \"the selected part\", it means that text: change only that part of the draft unless they ask otherwise, and if the same text appears elsewhere, change the one at these lines.\n\nshorter")
+
+# crash
+busy=false
+0 user "go" []
+1 tool 1 "bash" Ran "sleep 9" [stopped] dur=None err=false running=false stats=None out="" diff=None body=["$ sleep 9"] expanded=false
+2 failure Some("pi exited") Some(Prompt("go"))
+retry_at 2 Prompt("go")
+
+# history sample earlier=2
+busy=false
+0 user "shorter" [Quote { text: "two", lines: (2, 2), range: 4..7 }]
+1 assistant Document { blocks: [Paragraph([Span { text: "Let me look.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+2 tool t0 "read" Read "draft.md" [done error=false] dur=None err=false running=false stats=None out="one\ntwo" diff=None body=["one", "two"] expanded=false
+3 tool t1 "edit" Edited "draft.md" [done error=false] dur=Some(4ms) err=false running=false stats=Some((1, Some(1))) out="ok" diff=Some([Context("two"), Removed("three"), Added("3"), Context("four")]) body=["ok"] expanded=false
+4 tool t2 "write" Wrote "draft.md" [done error=true] dur=None err=true running=false stats=None out="denied" diff=None body=["denied"] expanded=false
+5 assistant Document { blocks: [Paragraph([Span { text: "Done.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }]), Paragraph([Span { text: "Really.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+6 notice "Earlier messages were compacted"
+7 user "again" []
+8 failure None Some(Prompt("again"))
+9 user "once more" []
+10 assistant Document { blocks: [Paragraph([Span { text: "Partial", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+11 failure Some("rate limited") Some(Prompt("once more"))
+12 failure Some("The model returned an error") Some(Prompt("once more"))
+retry_at 12 Prompt("once more")
+
+# history sample-before-marker earlier=3
+busy=false
+
+# history empty earlier=0
+busy=false
+
+# history text earlier=0
+busy=false
+0 user "Reply with exactly the word: pong. Do not use tools." []
+1 assistant Document { blocks: [Paragraph([Span { text: "pong", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+
+# history tool earlier=0
+busy=false
+0 user "Use the edit tool to change 'world' to 'there' in the draft file. Then reply 'done'." []
+1 tool call_fd6fc98f947a482ba3cc243e7d167820|fc_0cde4be6684f133f016af09412d30087d2af2462394f0ae3f7 "read" Read "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_640ed049be4b4f2f8d03c3e4f20f1a08|fc_0cde4be6684f133f016af094157dd087d2982a846e0bac24d1 "edit" Edited "draft.md" [done error=false] dur=Some(3ms) err=false running=false stats=Some((1, Some(1))) out="Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md." diff=Some([Removed("Hello world draft."), Added("Hello there draft.")]) body=["Successfully replaced 1 block(s) in /tmp/draft/draft/draft.md."] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "done", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+
+# history abort earlier=0
+busy=false
+0 user "Count slowly from 1 to 200, one number per line." []
+1 tool call_47cba3e46b3549ae9b8ea13b3e4adb19|fc_08970c17d590712f016af0941d143887d2a02582f7e2353d83 "read" Read "draft.md" [done error=false] dur=Some(1ms) err=false running=false stats=None out="Hello world draft." diff=None body=["Hello world draft."] expanded=false
+2 tool call_f7fe8d29560d4aaf8e38cee8a5e6f6b5|fc_08970c17d590712f016af0941fea1887d283a27e12d60b26bb "write" Wrote "draft.md" [done error=false] dur=Some(2ms) err=false running=false stats=Some((200, None)) out="Successfully wrote to /tmp/draft/draft/draft.md" diff=None body=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131", "132", "133", "134", "135", "136", "137", "138", "139", "140", "141", "142", "143", "144", "145", "146", "147", "148", "149", "150", "151", "152", "153", "154", "155", "156", "157", "158", "159", "160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179", "180", "181", "182", "183", "184", "185", "186", "187", "188", "189", "190", "191", "192", "193", "194", "195", "196", "197", "198", "199", "200"] expanded=false
+3 assistant Document { blocks: [Paragraph([Span { text: "Updated the draft with 1–200, one number per line.", style: SpanStyle { strong: false, emph: false, strike: false, code: false }, link: None }])] }
+4 failure None Some(Prompt("Count slowly from 1 to 200, one number per line."))
+retry_at 4 Prompt("Count slowly from 1 to 200, one number per line.")

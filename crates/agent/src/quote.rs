@@ -1,9 +1,9 @@
 //! The editor selections attached to a chat message: the blocks that put
-//! them in front of the user's text in the prompt pi gets, and their short
-//! form for the chat's chips.
+//! them in front of the user's text in the prompt the agent gets, and their
+//! short form for the chat's chips.
 //!
-//! The blocks are part of the user message pi saves, so history reloads
-//! parse them back out of the message:
+//! The blocks are part of the user message the agent saves, so history
+//! reloads parse them back out of the message:
 //!
 //! ```text
 //! <draftmux-selection lines="3-5" bytes="120-262">

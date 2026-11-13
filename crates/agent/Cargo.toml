@@ -1,0 +1,10 @@
+[package]
+name = "draftmux-agent"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+futures = "0.3"
+markup = { path = "../markup" }

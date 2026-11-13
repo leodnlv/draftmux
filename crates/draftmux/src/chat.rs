@@ -18,17 +18,18 @@
 //! same stack. Each quote's × drops that selection and Clear drops them
 //! all; sending sends them together and drops them.
 
-mod quote;
-mod transcript;
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use draftmux_pi_rpc::{Agent, AgentEvent, Disposition, LaunchSpec};
+use draftmux_agent::quote::{self, Quote};
+use draftmux_agent::transcript::{self, DiffLine, Item, Retry, Target, Tool, Transcript};
+use draftmux_agent::{Agent, Event, Events, History, Prompted, ToolKind};
+use draftmux_pi_rpc::{LaunchSpec, PiAgent};
 use draftmux_storage::{Draft, SourceKind};
 use editor::{Editor, EditorEvent, EditorStyle};
 use futures::StreamExt;
@@ -52,8 +53,6 @@ use crate::profiles::ProfileCatalog;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::selectable::{self, Scroller, TextSelection};
 use crate::theme::{self, MONO, Palette, Theme};
-use quote::Quote;
-use transcript::{DiffLine, Item, Retry, Tool, Transcript};
 
 actions!(chat, [Send, Stop]);
 
@@ -158,7 +157,7 @@ impl SendState {
 struct Session {
     draft: Draft,
     /// `Err` says why the draft can't talk to pi.
-    agent: Option<Result<Arc<Agent>, String>>,
+    agent: Option<Result<Arc<dyn Agent>, String>>,
     transcript: Transcript,
     list: ListState,
     /// The transcript's rubber band at its ends.
@@ -394,7 +393,7 @@ impl Chat {
         id: &str,
         env: &Arc<ShellEnv>,
         cx: &mut Context<Self>,
-    ) -> Option<futures::channel::mpsc::UnboundedReceiver<AgentEvent>> {
+    ) -> Option<Events> {
         let composer = self.composer.focus_handle(cx);
         let session = self.sessions.get_mut(id)?;
         let draft = &session.draft;
@@ -420,8 +419,8 @@ impl Chat {
         })();
         let (agent, events) = match spec {
             Ok(spec) => {
-                let (agent, events) = Agent::new(spec, IDLE_TIMEOUT, REQUEST_TIMEOUT);
-                (Ok(Arc::new(agent)), Some(events))
+                let (agent, events) = PiAgent::new(spec, IDLE_TIMEOUT, REQUEST_TIMEOUT);
+                (Ok(Arc::new(agent) as Arc<dyn Agent>), Some(events))
             }
             Err(err) => (Err(err), None),
         };
@@ -463,17 +462,17 @@ impl Chat {
             session.history_loaded = true;
             // Requested before any prompt can be sent, so the history pi
             // returns doesn't include it.
-            Self::load_history(id, &agent, cx);
+            Self::load_history(id, &*agent, cx);
         }
         self.request_first_draft(id, cx);
     }
 
-    fn load_history(id: &str, agent: &Agent, cx: &mut Context<Self>) {
-        let messages = agent.get_messages();
+    fn load_history(id: &str, agent: &dyn Agent, cx: &mut Context<Self>) {
+        let history = agent.history();
         let id = id.to_owned();
         cx.spawn(async move |this, cx| {
-            let messages = messages.await;
-            this.update(cx, |this, cx| this.history_loaded(&id, messages, cx))
+            let history = history.await;
+            this.update(cx, |this, cx| this.history_loaded(&id, history, cx))
                 .ok();
         })
         .detach();
@@ -495,7 +494,7 @@ impl Chat {
         let agent = agent.clone();
         session.transcript.retrying_history();
         session.history_ready = false;
-        Self::load_history(&id, &agent, cx);
+        Self::load_history(&id, &*agent, cx);
         self.sync_list(&id, cx);
     }
 
@@ -520,22 +519,22 @@ impl Chat {
     fn history_loaded(
         &mut self,
         id: &str,
-        messages: Result<Vec<serde_json::Value>, draftmux_pi_rpc::Error>,
+        history: Result<History, draftmux_agent::Error>,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.sessions.get_mut(id) else {
             return;
         };
         session.history_ready = true;
-        let messages = match messages {
-            Ok(messages) => messages,
+        let History { earlier, messages } = match history {
+            Ok(history) => history,
             Err(err) => {
                 session.transcript.history_failed(&err.to_string());
                 self.sync_list(id, cx);
                 return;
             }
         };
-        let (mut items, earlier) = transcript::history(&messages);
+        let mut items = transcript::history(&messages);
         if earlier > 0
             && let Some(source) = &session.draft.meta.source
         {
@@ -592,7 +591,7 @@ impl Chat {
                             cx.emit(ChatEvent::Accepted { id: id.clone() });
                         }
                         match reply {
-                            Ok(Disposition::Handled) => session.transcript.handled(),
+                            Ok(Prompted::Handled) => session.transcript.handled(),
                             Ok(_) => return,
                             Err(err) => session.transcript.send_failed(err.to_string()),
                         }
@@ -731,23 +730,23 @@ impl Chat {
             .detach();
     }
 
-    fn on_event(&mut self, id: &str, event: AgentEvent, cx: &mut Context<Self>) {
+    fn on_event(&mut self, id: &str, event: Event, cx: &mut Context<Self>) {
         let Some(session) = self.sessions.get_mut(id) else {
             return;
         };
         let written = match &event {
-            AgentEvent::Pi(pi) if pi.is_draft_write() => {
-                match std::fs::read_to_string(session.draft.draft_path()) {
-                    Ok(text) => Some(text),
-                    Err(err) => {
-                        eprintln!("draftmux: reading the agent's edit: {err}");
-                        None
-                    }
+            Event::ToolFinished {
+                draft_write: true, ..
+            } => match std::fs::read_to_string(session.draft.draft_path()) {
+                Ok(text) => Some(text),
+                Err(err) => {
+                    eprintln!("draftmux: reading the agent's edit: {err}");
+                    None
                 }
-            }
+            },
             _ => None,
         };
-        if let (AgentEvent::Ready(state), Some(model)) = (&event, &session.model) {
+        if let (Event::Ready(state), Some(model)) = (&event, &session.model) {
             model.update(cx, |model, cx| model.set_state(state.clone(), cx));
         }
         let shown = self.current.as_deref() == Some(id);
@@ -1052,17 +1051,21 @@ impl Chat {
             window.request_animation_frame();
         }
         let meta = &session.draft.meta;
-        let target = tool.target(
-            &meta.cwd,
-            &session.draft.draft_path(),
-            std::env::home_dir().as_deref(),
-        );
+        let target = match tool.target() {
+            Target::Path(path) => display_path(
+                path,
+                &meta.cwd,
+                &session.draft.draft_path(),
+                std::env::home_dir().as_deref(),
+            ),
+            Target::Text(text) => text.to_owned(),
+        };
         let running = tool.running();
         let icon = if running {
             spinner(palette).into_any_element()
         } else {
             svg()
-                .path(tool_icon(&tool.name))
+                .path(tool_icon(&tool.kind))
                 .size(px(14.))
                 .text_color(if tool.is_error() {
                     palette.tool_error
@@ -1785,13 +1788,29 @@ fn quote_label(quote: &Quote, faint: Hsla, text: Hsla) -> gpui::Div {
         )
 }
 
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "bash" => TOOL_BASH_ICON,
-        "read" => TOOL_READ_ICON,
-        "edit" => TOOL_EDIT_ICON,
-        "write" => TOOL_WRITE_ICON,
+fn tool_icon(kind: &ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Bash { .. } => TOOL_BASH_ICON,
+        ToolKind::Read { .. } => TOOL_READ_ICON,
+        ToolKind::Edit { .. } => TOOL_EDIT_ICON,
+        ToolKind::Write { .. } => TOOL_WRITE_ICON,
         _ => TOOL_OTHER_ICON,
+    }
+}
+
+/// `path` as the model wrote it, shown relative to `cwd`; the draft itself
+/// is `draft.md`.
+fn display_path(path: &str, cwd: &Path, draft_path: &Path, home: Option<&Path>) -> String {
+    let absolute = match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => cwd.join(path),
+    };
+    if absolute == draft_path {
+        return "draft.md".into();
+    }
+    match absolute.strip_prefix(cwd) {
+        Ok(rest) if !rest.as_os_str().is_empty() => rest.display().to_string(),
+        _ => crate::drafts::tilde(&absolute, home),
     }
 }
 
@@ -1972,7 +1991,7 @@ fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
             .into_iter()
             .enumerate()
             .map(|(i, line)| {
-                let command = tool.name == "bash" && i == 0;
+                let command = matches!(tool.kind, ToolKind::Bash { .. }) && i == 0;
                 div()
                     .px(px(10.))
                     .whitespace_nowrap()
@@ -2051,10 +2070,9 @@ mod tests {
 
     #[test]
     fn streamed_reply_replaces_waiting_slot_and_completion_keeps_it() {
-        use draftmux_pi_rpc::{AssistantDelta, Event};
         let mut transcript = Transcript::default();
         let apply = |transcript: &mut Transcript, event| {
-            transcript.apply(&AgentEvent::Pi(event), None, Instant::now());
+            transcript.apply(&event, None, Instant::now());
         };
         let rows = |transcript: &Transcript| {
             transcript.items.len() + usize::from(needs_activity_row(false, transcript))
@@ -2064,31 +2082,21 @@ mod tests {
         transcript.sent("hello".into(), String::new());
         assert!(needs_activity_row(false, &transcript));
         assert_eq!(rows(&transcript), 2);
-        apply(
-            &mut transcript,
-            Event::MessageStart {
-                message: serde_json::json!({"role": "assistant", "content": []}),
-            },
-        );
+        apply(&mut transcript, Event::AssistantStarted);
         for delta in ["Hello", " there", "."] {
-            apply(
-                &mut transcript,
-                Event::MessageUpdate(AssistantDelta::TextDelta {
-                    content_index: 0,
-                    delta: delta.into(),
-                }),
-            );
+            apply(&mut transcript, Event::AssistantText(delta.into()));
             assert!(!needs_activity_row(false, &transcript));
             assert_eq!(rows(&transcript), 2);
         }
         apply(
             &mut transcript,
-            Event::MessageEnd {
-                message: serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Hello there."}]}),
+            Event::AssistantEnded {
+                text: "Hello there.".into(),
+                stop: draftmux_agent::Stop::Completed,
             },
         );
         assert_eq!(rows(&transcript), 2);
-        apply(&mut transcript, Event::AgentSettled { aborted: false });
+        apply(&mut transcript, Event::RunSettled { aborted: false });
         assert_eq!(rows(&transcript), 2);
         assert!(!needs_activity_row(false, &transcript));
         transcript.sent("again".into(), String::new());
@@ -2098,14 +2106,14 @@ mod tests {
 
     #[test]
     fn running_tools_own_the_activity_indicator() {
-        use draftmux_pi_rpc::Event;
         let mut transcript = Transcript::default();
         transcript.sent("hello".into(), String::new());
         transcript.apply(
-            &AgentEvent::Pi(Event::ToolExecutionStart {
-                tool_call_id: "read-1".into(),
-                tool_name: "read".into(),
-                args: serde_json::json!({"path": "draft.md"}),
+            &Event::ToolStarted(draftmux_agent::ToolCall {
+                id: "read-1".into(),
+                kind: ToolKind::Read {
+                    path: "draft.md".into(),
+                },
             }),
             None,
             Instant::now(),
@@ -2121,6 +2129,21 @@ mod tests {
         assert!(needs_activity_row(false, &transcript));
         transcript.busy = false;
         assert!(!needs_activity_row(false, &transcript));
+    }
+
+    #[test]
+    fn paths_are_shown_relative_to_the_cwd() {
+        let cwd = Path::new("/repo");
+        let draft = Path::new("/data/d1/draft.md");
+        let home = Some(Path::new("/Users/me"));
+        assert_eq!(display_path("src/a.rs", cwd, draft, home), "src/a.rs");
+        assert_eq!(display_path("/repo/src/a.rs", cwd, draft, home), "src/a.rs");
+        assert_eq!(
+            display_path("/data/d1/draft.md", cwd, draft, home),
+            "draft.md"
+        );
+        assert_eq!(display_path("~/notes.md", cwd, draft, home), "~/notes.md");
+        assert_eq!(display_path("/etc/hosts", cwd, draft, home), "/etc/hosts");
     }
 
     #[test]
