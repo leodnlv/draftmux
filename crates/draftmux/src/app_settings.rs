@@ -13,9 +13,9 @@ use crate::file_watch::{WatchedFile, every_poll};
 pub struct AppSettings {
     pub settings: Settings,
     config_dir: PathBuf,
-    /// Why the file couldn't be loaded. A file that doesn't parse isn't
-    /// overwritten until the user changes something; until then the last
-    /// settings that loaded stay in use.
+    /// Why the file couldn't be loaded. A file that doesn't load is never
+    /// overwritten: the last settings that loaded stay in use, and changes
+    /// apply in memory without being saved until the file loads again.
     load_error: Option<SharedString>,
     /// Why the last change couldn't be saved. The change stays in
     /// `settings` and is saved with the next one.
@@ -58,9 +58,10 @@ impl AppSettings {
         this
     }
 
-    /// The error to show: a failed save, else a failed load.
+    /// The error to show: a failed load, which also stops saving, else a
+    /// failed save.
     pub fn error(&self) -> Option<SharedString> {
-        self.save_error.clone().or_else(|| self.load_error.clone())
+        self.load_error.clone().or_else(|| self.save_error.clone())
     }
 
     /// Applies `change` and saves the settings if it changed them.
@@ -71,14 +72,15 @@ impl AppSettings {
 
     /// Applies `change` to the settings on disk, read again first if they
     /// were edited outside the app since the last poll or failed to load,
-    /// so the save doesn't replace those edits.
+    /// so the save doesn't replace those edits. While the file still
+    /// doesn't load, the change applies only in memory.
     fn apply(&mut self, change: impl FnOnce(&mut Settings)) {
         if self.file.changed() || self.load_error.is_some() {
             self.reload();
         }
         let before = self.settings.clone();
         change(&mut self.settings);
-        if self.settings == before && self.save_error.is_none() {
+        if self.load_error.is_some() || self.settings == before && self.save_error.is_none() {
             return;
         }
         self.save_error = self
@@ -110,7 +112,8 @@ impl AppSettings {
             }
             Err(err) => {
                 eprintln!("draftmux: {err:#}");
-                self.load_error = Some(format!("{err:#}").into());
+                self.load_error =
+                    Some(format!("Changes aren't saved until this is fixed: {err:#}").into());
             }
         }
     }
@@ -156,6 +159,24 @@ mod tests {
         let saved = Settings::load(&dir).unwrap();
         assert_eq!(saved.alternatives, Some(2));
         assert_eq!(saved.selection_actions, Some(Vec::new()));
+        assert!(app.error().is_none());
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Settings::path(dir.path());
+        let broken = br#"{"selection_actions": [{"name": "Mine", "prompt": "Do it"}],}"#;
+        std::fs::write(&path, broken).unwrap();
+        let mut app = AppSettings::load(dir.path().to_owned());
+        app.apply(alternatives(2));
+        assert_eq!(std::fs::read(&path).unwrap(), broken);
+        assert_eq!(app.settings.alternatives, Some(2));
+        assert!(app.error().is_some());
+
+        std::fs::write(&path, b"{}").unwrap();
+        app.apply(alternatives(4));
+        assert_eq!(Settings::load(dir.path()).unwrap().alternatives, Some(4));
         assert!(app.error().is_none());
     }
 }

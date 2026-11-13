@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A hand-edited `settings.json` that doesn't parse is no longer overwritten
+  when you change a setting in the app. The change applies until Draftmux
+  restarts, and the Settings window shows the file's error until you fix it.
 - Change the text size of the editor, preview and chat with `⌘+` and `⌘−`
   (`Ctrl` on Linux), and reset it with `⌘0`. The size is remembered, and macOS
   gets a View menu with Zoom In, Zoom Out and Actual Size.
