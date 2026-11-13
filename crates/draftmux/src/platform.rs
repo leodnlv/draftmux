@@ -145,6 +145,52 @@ pub const POPUP_RADIUS: f32 = 14.;
 pub fn popup_background() -> gpui::WindowBackgroundAppearance {
     gpui::WindowBackgroundAppearance::Blurred
 }
+
+/// Keeps `window` drawn as an inactive window while it has the keyboard. The
+/// window server gives a key window a deeper shadow, too heavy for a small
+/// pop-up with a text field; this keeps the inactive window's lighter one.
+///
+/// AppKit has no public switch for it, so `window`'s class gets overrides of
+/// the private methods that report an active appearance. gpui shares that
+/// class among its panels, which in draftmux are only pop-ups.
+pub fn keep_inactive_appearance(window: &gpui::Window) {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    extern "C-unwind" fn inactive(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: gpui's AppKit handle points at the window's live content view
+    // and this runs on the main thread that owns it. `inactive` matches the
+    // `-(BOOL)` signature of the methods it overrides, and adding a method
+    // the class already has leaves it unchanged.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        // `class`, unlike the runtime's, sees through a KVO subclass.
+        let class: *const AnyClass = msg_send![ns_window, class];
+        let imp: Imp = std::mem::transmute(inactive as extern "C-unwind" fn(_, _) -> _);
+        for sel in [
+            objc2::sel!(_hasActiveAppearance),
+            objc2::sel!(_hasActiveAppearanceIgnoringKeyFocus),
+            objc2::sel!(_hasKeyAppearance),
+        ] {
+            objc2::ffi::class_addMethod(class.cast_mut(), sel, imp, c"B@:".as_ptr());
+        }
+        let _: () = msg_send![ns_window, invalidateShadow];
+    }
+}
+
 pub fn frame(
     content: gpui::AnyElement,
     _: &mut gpui::Window,

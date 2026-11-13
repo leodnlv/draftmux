@@ -45,6 +45,7 @@ capture = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
 gpui_platform = { workspace = true, features = ["font-kit"] }
 block2 = "0.6.2"
 objc2 = "0.6.5"
+raw-window-handle = "0.6.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSAppearance",

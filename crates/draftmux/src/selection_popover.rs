@@ -999,6 +999,8 @@ impl SelectionPopover {
             let mut activation = None;
             let mut open = |kind, cx: &mut App| {
                 cx.open_window(options(kind), |window, cx| {
+                    // The comment field makes the panel key.
+                    crate::platform::keep_inactive_appearance(window);
                     activation = Some(popover.update(cx, |_, cx| {
                         cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
