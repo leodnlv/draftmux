@@ -72,13 +72,17 @@ pub fn main(args: Args) -> Result<u8> {
     // Printed before focusing: the draft exists and `show` can read it even
     // if the app can't be reached.
     println!("{}", draft.id);
-    match ipc::send(&ipc::Request::Focus { id: draft.id }) {
+    match ipc::send(&ipc::Request::Focus {
+        id: draft.id.clone(),
+    }) {
         Ok(()) => Ok(0),
         Err(err) => {
             eprintln!(
                 "draftmux: created the draft but couldn't focus it in the app: {err:#}\n\
-                 draftmux: the draft is in {}; don't run open again, that creates another draft",
-                draft.dir.display()
+                 draftmux: the draft is in {}; run `draftmux focus {}` to try again\n\
+                 draftmux: don't run open again, that creates another draft",
+                draft.dir.display(),
+                draft.id
             );
             Ok(1)
         }

@@ -43,6 +43,11 @@
 - `draftmux open --draft-file <path>` hands off a message your agent has
   already written. The draft starts with the file's text and keeps the
   conversation, and Draftmux's agent skips writing a first draft.
+- `draftmux focus <id>` shows a draft in the app, launching it if needed. When
+  `open` creates a draft but can't show it, it now suggests this instead of
+  leaving the draft to be found by hand.
+- `draftmux restore <id>` unarchives a draft. If the app is running, the draft
+  reappears in the sidebar and is selected.
 
 ## v0.1.0 (2026-11-12)
 

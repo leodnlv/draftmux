@@ -13,6 +13,7 @@ mod copy;
 mod diagnostics;
 mod drafts;
 mod file_watch;
+mod focus;
 mod fold;
 mod format;
 mod inline_text;
@@ -29,6 +30,7 @@ mod platform;
 mod process;
 mod profiles;
 mod resources;
+mod restore;
 mod sample;
 mod scrollbar;
 mod selectable;
@@ -70,6 +72,8 @@ enum Command {
     Open(open::Args),
     Show(show::Args),
     List(list::Args),
+    Focus(focus::Args),
+    Restore(restore::Args),
     Skill(skill::Args),
     /// Run the app in this process.
     #[command(hide = true)]
@@ -84,6 +88,8 @@ fn main() -> ExitCode {
         Some(Command::Open(args)) => open::main(args),
         Some(Command::Show(args)) => show::main(args).map(|()| 0),
         Some(Command::List(args)) => list::main(args).map(|()| 0),
+        Some(Command::Focus(args)) => focus::main(args).map(|()| 0),
+        Some(Command::Restore(args)) => restore::main(args),
         Some(Command::Skill(args)) => skill::main(args),
         #[cfg(feature = "capture")]
         Some(Command::Capture(args)) => Ok(capture::main(args)),

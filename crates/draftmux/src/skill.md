@@ -71,8 +71,8 @@ stop and wait. Don't write the message yourself.
 
 If `open` exits 1 after printing an ID, the draft exists but the app couldn't
 focus it: report the error and the ID, and don't run `open` again (that
-creates a second draft). If it exits 1 without an ID, nothing was created;
-report the error.
+creates a second draft). `draftmux focus <id>` retries showing it in the app.
+If `open` exits 1 without an ID, nothing was created; report the error.
 
 ## Draft fields
 
@@ -144,3 +144,8 @@ draftmux list --cwd "$PWD"
 Each line is the ID, last edit time, target, directory and the title the
 sidebar shows. Show the user the drafts that could be this one and ask which
 to use, then read it with `draftmux show <id>`. Never run `open` to recover a draft.
+
+`show` reads archived drafts too. `list --all` includes them, marked
+`(archived)`. If the user wants an archived draft back in Draftmux, run
+`draftmux restore <id>`; `draftmux focus <id>` shows a draft that isn't
+archived.

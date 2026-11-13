@@ -193,6 +193,17 @@ pub fn send(request: &Request) -> Result<()> {
     exchange(stream, request)
 }
 
+/// Sends a request to the app if one is listening. Returns whether it was
+/// sent.
+pub fn send_if_running(request: &Request) -> Result<bool> {
+    let socket = data_dir()?.join(SOCKET);
+    match UnixStream::connect(&socket) {
+        Ok(stream) => exchange(stream, request).map(|()| true),
+        Err(err) if not_listening(&err) => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("connecting to {}", socket.display())),
+    }
+}
+
 /// Asks the app that holds the lock to come to the front, waiting for it to
 /// start listening if it is still starting.
 pub fn activate_running() -> Result<()> {

@@ -655,7 +655,8 @@ impl Chrome {
             )
     }
 
-    /// Selects `id`, as `draftmux open` asks once it has created the draft.
+    /// Selects `id`, as `draftmux open` asks once it has created the draft,
+    /// and `focus` and `restore` ask for one in the drafts list.
     pub fn focus_draft(
         &mut self,
         id: &str,
@@ -663,6 +664,9 @@ impl Chrome {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         self.drafts.refresh();
+        if !self.drafts.rows().iter().any(|row| row.draft.id == id) {
+            anyhow::bail!("draft {id} isn't in the drafts list");
+        }
         self.select(id, window, cx)?;
         cx.notify();
         Ok(())

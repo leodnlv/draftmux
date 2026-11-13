@@ -84,16 +84,9 @@ fn run(args: &Args, store: &Store, out: &mut impl Write, err: &mut impl Write) -
 fn resolve(args: &Args, store: &Store, err: &mut impl Write) -> Result<Draft> {
     let Some(source) = &args.source else {
         let id = args.id.as_deref().expect("clap requires an id or --source");
-        return match store.load(id) {
-            Ok(draft) if draft.meta.is_sample() => Err(anyhow!("no draft with id {id}")),
-            Ok(draft) => Ok(draft),
-            Err(e)
-                if e.downcast_ref::<io::Error>()
-                    .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
-            {
-                Err(anyhow!("no draft with id {id}"))
-            }
-            Err(e) => Err(e),
+        return match crate::drafts::load(store, id)? {
+            draft if draft.meta.is_sample() => Err(anyhow!("no draft with id {id}")),
+            draft => Ok(draft),
         };
     };
 

@@ -4,10 +4,11 @@
 //! draft's pending edits are flushed before it is left, archived or the app
 //! quits, and a switch is refused while they can't be saved.
 
+use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Datelike, Local, Utc};
 use draftmux_settings::Settings;
 use draftmux_storage::{Autosave, Draft, Meta, Status, Store, Syntax, Target, by_activity};
@@ -35,6 +36,20 @@ pub fn convert_mrkdwn(store: &Store, draft: &mut Draft) -> Result<Option<String>
     )?;
     draft.meta = meta;
     Ok(Some(text))
+}
+
+/// Loads draft `id` for a CLI command, reporting a missing draft by its ID.
+pub fn load(store: &Store, id: &str) -> Result<Draft> {
+    store.load(id).map_err(|err| {
+        if err
+            .downcast_ref::<io::Error>()
+            .is_some_and(|err| err.kind() == io::ErrorKind::NotFound)
+        {
+            anyhow!("no draft with id {id}")
+        } else {
+            err
+        }
+    })
 }
 
 /// One sidebar row.
