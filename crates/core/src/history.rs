@@ -12,6 +12,8 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use draftmux_storage::{Edit, History, Store};
 
+use crate::text::normalize_line_endings;
+
 /// The agent turn a draft's next edit belongs to: what the draft was when
 /// the user asked for it, and what they asked.
 pub struct Turn {
@@ -47,8 +49,8 @@ pub struct Turns(HashMap<String, Turn>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recorded {
     /// The write added nothing to the history: there is no turn, the turn
-    /// was already recorded, the write changed nothing, or it was the first
-    /// draft of an empty draft.
+    /// was already recorded, the write changed nothing but line endings, or
+    /// it was the first draft of an empty draft.
     Ignored,
     /// The write's turn was added to the saved history as a new edit.
     Added,
@@ -79,7 +81,7 @@ impl Turns {
             return Ok(Recorded::Ignored);
         };
         // An empty draft's first draft isn't an edit to compare with.
-        if turn.recorded || turn.before == text || turn.before.trim().is_empty() {
+        if turn.recorded || same_lines(&turn.before, text) || turn.before.trim().is_empty() {
             return Ok(Recorded::Ignored);
         }
         let edit = Edit {
@@ -99,6 +101,12 @@ impl Turns {
         }
         Ok(Recorded::Added)
     }
+}
+
+/// `a` and `b` read the same once their line endings are normalized, as the
+/// editor shows them.
+fn same_lines(a: &str, b: &str) -> bool {
+    a == b || normalize_line_endings(a) == normalize_line_endings(b)
 }
 
 /// Adds `edit` to draft `id`'s saved history and returns the history.

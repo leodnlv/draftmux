@@ -192,7 +192,7 @@ fn a_crash_before_history_persists_keeps_the_text_and_loses_the_turn() {
 }
 
 #[test]
-fn a_crlf_write_equal_to_the_normalized_baseline_records_an_edit() {
+fn a_crlf_write_equal_to_the_normalized_baseline_records_nothing() {
     let mut s = Script::new();
     let id = s.draft("One\r\nTwo\r\n");
     s.select(&id);
@@ -201,7 +201,58 @@ fn a_crlf_write_equal_to_the_normalized_baseline_records_an_edit() {
 
     assert_eq!(
         s.agent_writes(&id, "One\r\nTwo\r\n").unwrap(),
+        Recorded::Ignored
+    );
+    assert_eq!(s.history_bytes(&id), None);
+
+    // The turn isn't spent: a later write that changes the draft records it.
+    assert_eq!(
+        s.agent_writes(&id, "One\r\nThree\r\n").unwrap(),
         Recorded::Added
     );
     assert_eq!(s.history(&id).edits[0].before, "One\nTwo\n");
+}
+
+#[test]
+fn an_lf_write_equal_to_a_crlf_baseline_records_nothing() {
+    let mut s = Script::new();
+    let id = s.draft("One\nTwo\n");
+    s.select(&id);
+    s.turns.started(&id, "One\r\nTwo\r\n".into(), "Leave it");
+
+    assert_eq!(
+        s.agent_writes(&id, "One\nTwo\n").unwrap(),
+        Recorded::Ignored
+    );
+    assert_eq!(s.history_bytes(&id), None);
+}
+
+#[test]
+fn a_write_mixing_line_endings_differently_records_nothing() {
+    let mut s = Script::new();
+    let id = s.draft("One\r\nTwo\nThree\rFour\n");
+    s.select(&id);
+    assert_eq!(s.editor.text, "One\nTwo\nThree\nFour\n");
+    s.send("Leave it");
+
+    assert_eq!(
+        s.agent_writes(&id, "One\nTwo\r\nThree\r\nFour\r").unwrap(),
+        Recorded::Ignored
+    );
+    assert_eq!(s.history_bytes(&id), None);
+}
+
+#[test]
+fn a_real_edit_with_new_line_endings_records_the_editor_text() {
+    let mut s = Script::new();
+    let id = s.draft("One\nTwo\n");
+    s.select(&id);
+    s.send("Change two");
+
+    assert_eq!(
+        s.agent_writes(&id, "One\r\nTwo, changed\r\n").unwrap(),
+        Recorded::Added
+    );
+    assert_eq!(s.history(&id).edits[0].before, "One\nTwo\n");
+    assert_eq!(s.editor.text, "One\nTwo, changed\n");
 }
