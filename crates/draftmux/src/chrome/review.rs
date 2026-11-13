@@ -888,39 +888,37 @@ impl Chrome {
                 )
                 // With no change selected it restores the before column.
                 .child(match selected {
-                    Some(_) => bar_button("review-revert", "Revert", &palette)
+                    Some(_) => bar_button("review-revert", "Revert", false, &palette)
                         .tooltip(crate::tooltip::text("Revert This Change (R)"))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.revert_change(window, cx)),
                         ),
-                    None => bar_button("review-revert", "Restore", &palette)
+                    None => bar_button("review-revert", "Restore", false, &palette)
                         .tooltip(crate::tooltip::text("Go Back to the Before Column"))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.restore_before(window, cx)),
                         ),
                 })
                 .child(
-                    bar_button("review-keep", if kept { "Kept" } else { "Keep" }, &palette)
-                        .when(kept, |button| {
+                    bar_button(
+                        "review-keep",
+                        if kept { "Kept" } else { "Keep" },
+                        kept,
+                        &palette,
+                    )
+                    .when_else(
+                        selected.is_some(),
+                        |button| {
                             button
-                                .bg(gpui::transparent_black())
-                                .shadow(Vec::new())
-                                .text_color(palette.muted)
-                                .hover(|style| style.bg(palette.hover).text_color(palette.text))
-                        })
-                        .when_else(
-                            selected.is_some(),
-                            |button| {
-                                button
-                                    .tooltip(crate::tooltip::text(if kept {
-                                        "Mark as Not Reviewed (K)"
-                                    } else {
-                                        "Keep This Change (K)"
-                                    }))
-                                    .on_click(cx.listener(|this, _, _, cx| this.keep_change(cx)))
-                            },
-                            |button| button.opacity(0.45),
-                        ),
+                                .tooltip(crate::tooltip::text(if kept {
+                                    "Mark as Not Reviewed (K)"
+                                } else {
+                                    "Keep This Change (K)"
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| this.keep_change(cx)))
+                        },
+                        |button| button.opacity(0.45),
+                    ),
                 )
         });
         div()
@@ -1069,10 +1067,12 @@ impl Chrome {
     }
 }
 
-/// A review bar button with a hairline ring, like a push button.
+/// A review bar button with a hairline ring, like a push button, or
+/// `plain`, a muted label without the ring.
 fn bar_button(
     id: &'static str,
     label: &'static str,
+    plain: bool,
     palette: &Palette,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -1084,12 +1084,24 @@ fn bar_button(
         .items_center()
         .rounded(px(6.))
         .font_weight(FontWeight::MEDIUM)
-        .bg(palette.control)
-        .shadow(vec![
-            shadow(palette.line_strong, 0., 0., 0.5),
-            shadow(palette.card_drop, 1., 1., 0.),
-        ])
-        .hover(|style| style.bg(palette.control_hover))
+        // gpui allows one hover style per element, so both looks set it here.
+        .when_else(
+            plain,
+            |button| {
+                button
+                    .text_color(palette.muted)
+                    .hover(|style| style.bg(palette.hover).text_color(palette.text))
+            },
+            |button| {
+                button
+                    .bg(palette.control)
+                    .shadow(vec![
+                        shadow(palette.line_strong, 0., 0., 0.5),
+                        shadow(palette.card_drop, 1., 1., 0.),
+                    ])
+                    .hover(|style| style.bg(palette.control_hover))
+            },
+        )
         .active(|style| style.opacity(0.8))
         .child(label)
 }
