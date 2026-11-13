@@ -286,17 +286,28 @@ impl Element for InlineText {
         if let Some(hitbox) = &hitboxes.text {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
-        // The marks, then the selection, whose rectangles are reported.
-        let (selected, color) = self.select.as_ref().map_or((Vec::new(), None), |select| {
+        // A flash, the marks, then the selection, whose rectangles are
+        // reported.
+        let selected = self.select.as_ref().map_or(Vec::new(), |select| {
             let len = self.segments.iter().map(|s| s.text.len()).sum();
             let state = select.state.read(cx);
-            let mut ranges: Vec<_> = state
-                .marks_in(select.key, len)
-                .into_iter()
-                .map(|range| (range, false))
-                .collect();
-            ranges.extend(state.range_in(select.key, len).map(|range| (range, true)));
-            (ranges, Some(select.color))
+            let mut ranges = Vec::new();
+            if let Some((flashed, color)) = state.flash_in(select.key, len) {
+                window.request_animation_frame();
+                ranges.extend(flashed.into_iter().map(|range| (range, color, false)));
+            }
+            ranges.extend(
+                state
+                    .marks_in(select.key, len)
+                    .into_iter()
+                    .map(|range| (range, select.color, false)),
+            );
+            ranges.extend(
+                state
+                    .range_in(select.key, len)
+                    .map(|range| (range, select.color, true)),
+            );
+            ranges
         });
         // Each piece's fragments come in order, so one cursor per piece
         // cuts them without reshaping.
@@ -311,11 +322,11 @@ impl Element for InlineText {
                 if let Some(chip) = &segment.chip {
                     paint_chip(chip, segment, piece, frag, &part, x, baseline, window, cx);
                 }
-                for (selected, live) in &selected {
+                for (selected, color, live) in &selected {
                     let start = selected.start.max(piece.start + frag.range.start);
                     let end = selected.end.min(piece.start + frag.range.end);
                     if start < end
-                        && let (Some(color), Some(select)) = (color, &self.select)
+                        && let Some(select) = &self.select
                     {
                         let at = |ix: usize| {
                             x + piece.line.x_for_index(ix - piece.start)
@@ -325,7 +336,7 @@ impl Element for InlineText {
                             point(at(start), top),
                             point(at(end), top + shaped.line_height),
                         );
-                        window.paint_quad(fill(rect, color));
+                        window.paint_quad(fill(rect, *color));
                         if *live {
                             select
                                 .state

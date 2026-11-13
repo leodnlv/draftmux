@@ -38,7 +38,7 @@ use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
-use crate::selectable::{Scroller, SelectionChanged, SelectionStarted, TextSelection};
+use crate::selectable::{Pos, Scroller, SelectionChanged, SelectionStarted, TextSelection};
 use crate::selection_popover::{SelectionPopover, SelectionPopoverEvent};
 use crate::source_map::SourceMap;
 use crate::theme::{self, Palette};
@@ -117,6 +117,8 @@ pub struct Chrome {
     preview_map: Option<SourceMap>,
     /// The editor selection last set from the preview's.
     mirrored: Option<Range<usize>>,
+    /// When the editor flash last tinted in the preview started.
+    mirrored_flash: Option<Instant>,
     /// At least one of the markdown editor and the preview is shown.
     show_editor: bool,
     show_preview: bool,
@@ -159,6 +161,7 @@ impl Render for Chrome {
         let palette = *theme::palette(cx);
         self.fit_to_width(window, cx);
         self.leaving_rows.retain(sidebar::LeavingRow::folding);
+        self.mirror_flash(window, cx);
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let content = if self.drafts.current().is_some() {
             div()
@@ -458,6 +461,7 @@ impl Chrome {
             preview_selection,
             preview_map: None,
             mirrored: None,
+            mirrored_flash: None,
             show_editor: true,
             show_preview: true,
             narrow: false,
@@ -920,24 +924,61 @@ impl Chrome {
         // Edits drop the extra selections, so a preview of other text has
         // none to show.
         if !ranges.is_empty() && editor.text() == self.preview_source {
-            let selection = self.preview_selection.read(cx);
-            let map = self.preview_map.get_or_insert_with(|| {
-                SourceMap::new(
-                    markup::frontmatter::parse(&self.preview_source).body,
-                    selection.paragraphs(),
-                )
-            });
-            let body_offset = markup::frontmatter::parse(&self.preview_source).body_offset;
-            marks = ranges
-                .into_iter()
-                .filter(|range| range.end > body_offset)
-                .filter_map(|range| {
-                    map.rendered(range.start.saturating_sub(body_offset)..range.end - body_offset)
-                })
-                .collect();
+            marks = self.preview_marks(ranges, cx);
         }
         self.preview_selection
             .update(cx, |selection, cx| selection.set_marks(marks, cx));
+    }
+
+    /// Where `ranges` of the previewed markdown were rendered in the preview.
+    fn preview_marks(&mut self, ranges: Vec<Range<usize>>, cx: &App) -> Vec<(Pos, Pos)> {
+        let selection = self.preview_selection.read(cx);
+        let map = self.preview_map.get_or_insert_with(|| {
+            SourceMap::new(
+                markup::frontmatter::parse(&self.preview_source).body,
+                selection.paragraphs(),
+            )
+        });
+        let body_offset = markup::frontmatter::parse(&self.preview_source).body_offset;
+        ranges
+            .into_iter()
+            .filter(|range| range.end > body_offset)
+            .filter_map(|range| {
+                map.rendered(range.start.saturating_sub(body_offset)..range.end - body_offset)
+            })
+            .collect()
+    }
+
+    /// Tints in the preview what the editor's flash points out, once the
+    /// preview shows the flashed text, fading in step with the editor.
+    fn mirror_flash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx);
+        let Some((ranges, started)) = editor.flashing() else {
+            return;
+        };
+        if self.mirrored_flash == Some(started) {
+            return;
+        }
+        // The preview catches up with the text, and publishes its
+        // paragraphs as it paints, a frame or more later.
+        if editor.text() != self.preview_source
+            || self
+                .preview_selection
+                .read(cx)
+                .paragraphs()
+                .next()
+                .is_none()
+        {
+            window.request_animation_frame();
+            return;
+        }
+        let ranges = ranges.to_vec();
+        self.mirrored_flash = Some(started);
+        let marks = self.preview_marks(ranges, cx);
+        let color = theme::palette(cx).change_flash;
+        self.preview_selection.update(cx, |selection, cx| {
+            selection.set_flash(marks, started, color, cx)
+        });
     }
 
     /// Counts a change made to the selected draft's file outside the editor

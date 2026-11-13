@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, KeyBinding,
@@ -124,6 +124,9 @@ pub struct TextSelection {
     /// Ranges painted like the selection besides it, start and end in
     /// reading order.
     marks: Vec<(Pos, Pos)>,
+    /// Ranges tinted in a colour that fades, from a start time, as the
+    /// editor's [`flash`](editor::Editor::flash) does.
+    flash: Option<(Vec<(Pos, Pos)>, Instant, Hsla)>,
     /// While the button is down: what the drag extends by and the unit it
     /// started on, which stays selected whichever way it goes.
     dragging: Option<(Unit, Pos, Pos)>,
@@ -168,6 +171,7 @@ impl TextSelection {
             anchor: None,
             head: None,
             marks: Vec::new(),
+            flash: None,
             dragging: None,
             scroller: None,
             pointer: Point::default(),
@@ -192,6 +196,7 @@ impl TextSelection {
     /// paragraphs reuse the old keys.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.texts.clear();
+        self.flash = None;
         self.set_marks(Vec::new(), cx);
         self.clear(cx);
     }
@@ -210,6 +215,31 @@ impl TextSelection {
             .iter()
             .filter_map(|&(start, end)| part_in(start, end, key, len))
             .collect()
+    }
+
+    /// Tints `ranges` in `color`, fading it as an editor flash that started
+    /// at `started` fades.
+    pub fn set_flash(
+        &mut self,
+        ranges: Vec<(Pos, Pos)>,
+        started: Instant,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) {
+        self.flash = Some((ranges, started, color));
+        cx.notify();
+    }
+
+    /// The flashed parts of paragraph `key`, whose text is `len` bytes
+    /// long, and their tint now; `None` once it has faded.
+    pub fn flash_in(&self, key: Key, len: usize) -> Option<(Vec<Range<usize>>, Hsla)> {
+        let (ranges, started, color) = self.flash.as_ref()?;
+        let alpha = editor::flash_alpha(*started)?;
+        let parts: Vec<_> = ranges
+            .iter()
+            .filter_map(|&(start, end)| part_in(start, end, key, len))
+            .collect();
+        Some((parts, color.opacity(color.a * alpha)))
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {

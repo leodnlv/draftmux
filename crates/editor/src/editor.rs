@@ -323,6 +323,13 @@ pub(crate) struct Flash {
 /// How long [`Editor::flash`]'s tint takes to fade away.
 pub(crate) const FLASH_DURATION: Duration = Duration::from_millis(900);
 
+/// The opacity of a flash tint that started at `started`, faded by its
+/// square so it lingers before it goes; `None` once it has gone.
+pub fn flash_alpha(started: Instant) -> Option<f32> {
+    let progress = started.elapsed().as_secs_f32() / FLASH_DURATION.as_secs_f32();
+    (progress < 1.).then(|| 1. - progress * progress)
+}
+
 /// How long the caret stays on, and then off, while blinking.
 const BLINK_PERIOD: Duration = Duration::from_millis(530);
 /// How often a drag held outside the text scrolls it by a row.
@@ -535,6 +542,16 @@ impl Editor {
             revision: self.buffer.revision(),
         });
         cx.notify();
+    }
+
+    /// The ranges [`Editor::flash`] points out and when it started, while
+    /// the tint lasts and the text is unchanged.
+    pub fn flashing(&self) -> Option<(&[Range<usize>], Instant)> {
+        self.flash
+            .as_ref()
+            .filter(|flash| flash.revision == self.buffer.revision())
+            .filter(|flash| flash_alpha(flash.started).is_some())
+            .map(|flash| (&flash.ranges[..], flash.started))
     }
 
     /// The viewport height, content height and scroll offset as last laid

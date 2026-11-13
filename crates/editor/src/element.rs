@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::buffer::Affinity;
-use crate::editor::{Editor, EditorStyle, FLASH_DURATION};
+use crate::editor::{Editor, EditorStyle, flash_alpha};
 use crate::highlight::Styles;
 use crate::movement::RowGeometry;
 
@@ -345,14 +345,12 @@ impl Element for EditorElement {
             cx,
         );
 
-        // Faded by its square, so it lingers before it goes.
         let flash = editor
             .flash
             .as_ref()
             .filter(|flash| flash.revision == layout.revision)
             .and_then(|flash| {
-                let progress = flash.started.elapsed().as_secs_f32() / FLASH_DURATION.as_secs_f32();
-                (progress < 1.).then(|| (flash.ranges.clone(), 1. - progress * progress))
+                flash_alpha(flash.started).map(|alpha| (flash.ranges.clone(), alpha))
             });
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some((ranges, alpha)) = flash {
