@@ -54,6 +54,26 @@ fetch() {
 install_macos() {
   [ "$(uname -m)" = arm64 ] || fail "Draftmux for macOS needs an Apple silicon Mac"
   need codesign
+  dir="${DRAFTMUX_APP_DIR:-/Applications}"
+  if [ -z "${DRAFTMUX_APP_DIR:-}" ] && [ ! -w "$dir" ]; then dir="$HOME/Applications"; fi
+  target="$dir/Draftmux.app"
+  bin="${DRAFTMUX_INSTALL_PREFIX:-$HOME/.local}/bin"
+  link="$bin/draftmux"
+  # Only ever replace a previous Draftmux install, checked before anything
+  # is written.
+  if [ -L "$target" ]; then
+    fail "refusing to replace $target, which isn't Draftmux"
+  elif [ -e "$target" ]; then
+    existing=$(defaults read "$target/Contents/Info" CFBundleIdentifier 2>/dev/null || true)
+    [ "$existing" = "$bundle_id" ] || fail "refusing to replace $target, which isn't Draftmux"
+  fi
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    case $(readlink "$link" || true) in
+      */Draftmux.app/Contents/MacOS/draftmux) ;;
+      *) fail "refusing to replace $link, which isn't Draftmux's command" ;;
+    esac
+  fi
+
   name="Draftmux-$version-arm64-app"
   fetch "$name.tar.gz" "$name.sha256"
   mkdir extracted
@@ -63,30 +83,20 @@ install_macos() {
   codesign --verify -R="anchor apple generic and certificate leaf[subject.OU] = \"$team\"" \
     "$app" 2>/dev/null || fail "Draftmux.app isn't signed by Draftmux's developer"
 
-  dir="${DRAFTMUX_APP_DIR:-/Applications}"
-  if [ -z "${DRAFTMUX_APP_DIR:-}" ] && [ ! -w "$dir" ]; then dir="$HOME/Applications"; fi
-  mkdir -p "$dir"
-  target="$dir/Draftmux.app"
-  if [ -e "$target" ]; then
-    existing=$(defaults read "$target/Contents/Info" CFBundleIdentifier 2>/dev/null || true)
-    [ "$existing" = "$bundle_id" ] || fail "refusing to replace $target, which isn't Draftmux"
+  mkdir -p "$dir" "$bin"
+  # Staged next to the target so the swap is a rename, and swapped in so a
+  # failed copy or move leaves the installed app in place.
+  staging=$(mktemp -d "$dir/.Draftmux-install.XXXXXX")
+  ditto "$app" "$staging/Draftmux.app"
+  if [ -e "$target" ]; then mv "$target" "$staging/Draftmux.app.old"; fi
+  if ! mv "$staging/Draftmux.app" "$target"; then
+    if [ -e "$staging/Draftmux.app.old" ]; then mv "$staging/Draftmux.app.old" "$target"; fi
+    fail "couldn't move Draftmux.app into $dir"
   fi
-  # Swapped in with renames so a failed copy leaves the installed app intact.
-  rm -rf "$dir/.Draftmux-install.app" "$dir/.Draftmux-old.app"
-  ditto "$app" "$dir/.Draftmux-install.app"
-  if [ -e "$target" ]; then mv "$target" "$dir/.Draftmux-old.app"; fi
-  mv "$dir/.Draftmux-install.app" "$target"
-  rm -rf "$dir/.Draftmux-old.app"
+  rm -rf "$staging"
+  staging=
 
-  bin="${DRAFTMUX_INSTALL_PREFIX:-$HOME/.local}/bin"
-  link="$bin/draftmux"
-  mkdir -p "$bin"
-  if [ -e "$link" ] || [ -L "$link" ]; then
-    case $(readlink "$link" || true) in
-      */Draftmux.app/Contents/MacOS/draftmux) rm "$link" ;;
-      *) fail "refusing to replace $link, which isn't Draftmux's command" ;;
-    esac
-  fi
+  if [ -e "$link" ] || [ -L "$link" ]; then rm "$link"; fi
   ln -s "$target/Contents/MacOS/draftmux" "$link"
   echo "Installed Draftmux $version in $dir and linked $link"
   case ":$PATH:" in
@@ -113,8 +123,10 @@ main() {
   need tar
   version="${DRAFTMUX_VERSION:-$(latest_version)}"
   version="${version#v}"
+  staging=
   work=$(mktemp -d)
-  trap 'rm -rf "$work"' EXIT
+  trap 'rm -rf "$work" ${staging:+"$staging"}' EXIT
+  trap 'exit 1' HUP INT TERM
   cd "$work"
   case $(uname -s) in
     Darwin) install_macos ;;

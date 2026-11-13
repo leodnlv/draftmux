@@ -5,6 +5,9 @@
 - A hand-edited `settings.json` that doesn't parse is no longer overwritten
   when you change a setting in the app. The change applies until Draftmux
   restarts, and the Settings window shows the file's error until you fix it.
+- The install script checks that it may replace both the app and the
+  `draftmux` command before changing either, and puts the installed app back if
+  moving the new one into place fails.
 - Change the text size of the editor, preview and chat with `⌘+` and `⌘−`
   (`Ctrl` on Linux), and reset it with `⌘0`. The size is remembered, and macOS
   gets a View menu with Zoom In, Zoom Out and Actual Size.

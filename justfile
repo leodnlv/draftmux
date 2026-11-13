@@ -80,6 +80,7 @@ test-scripts:
     scripts/test-linux-install
     scripts/test-assemble-macos-app
     scripts/test-install
+    scripts/test-install-sh
     scripts/test-create-macos-dmg
     scripts/test-verify-macos-release
     scripts/test-homebrew-cask
