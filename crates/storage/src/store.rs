@@ -16,6 +16,7 @@ const SESSION_DIR: &str = "session";
 const SAMPLE_MARKER: &str = ".sample-created";
 const CHAT_WIDTH: &str = ".chat-width";
 const SIDEBAR_HIDDEN: &str = ".sidebar-hidden";
+const TEXT_ZOOM: &str = ".text-zoom";
 const SELECTION_ADDED: &str = ".selection-added";
 
 /// The drafts directory. Stateless: every call reads or writes the files
@@ -312,6 +313,21 @@ impl Store {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("creating {}", self.root.display()))?;
         atomic::write(&self.root.join(CHAT_WIDTH), width.to_string().as_bytes())
+    }
+
+    /// The factor the user last scaled text by, if it was ever changed.
+    pub fn text_zoom(&self) -> Option<f32> {
+        let text = std::fs::read_to_string(self.root.join(TEXT_ZOOM)).ok()?;
+        text.trim()
+            .parse()
+            .ok()
+            .filter(|zoom: &f32| zoom.is_finite() && *zoom > 0.)
+    }
+
+    pub fn set_text_zoom(&self, zoom: f32) -> Result<()> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        atomic::write(&self.root.join(TEXT_ZOOM), zoom.to_string().as_bytes())
     }
 
     /// Missing or invalid preferences keep the sidebar visible.
@@ -655,6 +671,18 @@ mod tests {
         assert_eq!(store.chat_width(), None);
         store.set_chat_width(412.5).unwrap();
         assert_eq!(store.chat_width(), Some(412.5));
+        assert!(store.scan().unwrap().drafts.is_empty());
+    }
+
+    #[test]
+    fn text_zoom_round_trips_and_is_not_a_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        assert_eq!(store.text_zoom(), None);
+        store.set_text_zoom(1.2).unwrap();
+        assert_eq!(store.text_zoom(), Some(1.2));
+        std::fs::write(root.path().join(TEXT_ZOOM), "0").unwrap();
+        assert_eq!(store.text_zoom(), None);
         assert!(store.scan().unwrap().drafts.is_empty());
     }
 

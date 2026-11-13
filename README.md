@@ -24,7 +24,7 @@ Status: early release; expect rough edges.
 - **Chat with the draft's agent.** Ask for changes in plain words. It runs with
   your pi profile, so your skills are available.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
-  text or plain text.
+  text or plain text. `⌘+` and `⌘−` change the text size, and `⌘0` resets it.
 - **Selection actions.** Select text for alternatives, Shorten or Tighten, or
   your own actions. Options appear as previews while pi generates the rest;
   choose one when the request finishes. With text selected, a chat message

@@ -42,7 +42,17 @@ use crate::source_map::SourceMap;
 use crate::theme::{self, Palette};
 use crate::update::{self, Updater};
 
-actions!(chrome, [ToggleEditor, TogglePreview, ToggleSidebar]);
+actions!(
+    chrome,
+    [
+        ToggleEditor,
+        TogglePreview,
+        ToggleSidebar,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom
+    ]
+);
 
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const SIDEBAR_WIDTH: Pixels = px(228.);
@@ -68,6 +78,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(editor::secondary!("\\"), ToggleSidebar, None),
         KeyBinding::new(editor::secondary!("alt-e"), ToggleEditor, None),
         KeyBinding::new(editor::secondary!("alt-p"), TogglePreview, None),
+        KeyBinding::new(editor::secondary!("="), ZoomIn, None),
+        KeyBinding::new(editor::secondary!("+"), ZoomIn, None),
+        KeyBinding::new(editor::secondary!("-"), ZoomOut, None),
+        KeyBinding::new(editor::secondary!("0"), ResetZoom, None),
     ]);
 }
 
@@ -210,6 +224,13 @@ impl Render for Chrome {
             .on_action(
                 cx.listener(|this, _: &TogglePreview, window, cx| this.toggle_preview(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom(theme::get(cx).zoom + theme::ZOOM_STEP, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom(theme::get(cx).zoom - theme::ZOOM_STEP, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.zoom(1., cx)))
             .on_action(cx.listener(|this, _: &Format, _, cx| {
                 if this.drafts.current().is_some() {
                     this.formatter
@@ -277,6 +298,9 @@ impl Render for Chrome {
 
 impl Chrome {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if let Some(zoom) = store.text_zoom() {
+            theme::set_zoom(zoom, cx);
+        }
         let editor = theme::editor(Palette::editor_style, cx);
         let formatter = cx.new(|cx| Formatter::new(editor.clone(), cx));
         let chat = cx.new(|cx| Chat::new(editor.clone(), cx));
@@ -598,6 +622,14 @@ impl Chrome {
             }
         });
         cx.notify();
+    }
+
+    /// Scales the editor's, preview's and chat's text and remembers it.
+    fn zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = theme::set_zoom(zoom, cx);
+        if let Err(err) = self.store.set_text_zoom(zoom) {
+            eprintln!("draftmux: saving the text zoom: {err:#}");
+        }
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {

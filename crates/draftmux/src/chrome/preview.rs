@@ -21,7 +21,7 @@ pub(super) struct Preview {
     pub selection: Entity<TextSelection>,
     pub scroll: ScrollHandle,
     pub cache: BlockCache,
-    pub appearance: Option<(Target, bool, f32)>,
+    pub appearance: Option<(Target, bool, f32, f32)>,
     /// The agent is writing into the draft, or about to write its first
     /// draft; an empty preview shows a skeleton of the message instead of
     /// "Nothing to preview".
@@ -182,7 +182,7 @@ impl Preview {
         let theme = theme::get(cx);
         let appearance = self
             .target
-            .map(|target| (target, theme.dark, window.scale_factor()));
+            .map(|target| (target, theme.dark, window.scale_factor(), theme.zoom));
         if self.appearance != appearance {
             self.cache.clear();
             self.appearance = appearance;
@@ -198,7 +198,8 @@ impl Preview {
         let width = (bounds.size.width - window.rem_size() * 3.).max(px(0.));
         let (body, background) = match (&self.document, self.target) {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
-                let style = std::rc::Rc::new(markup_view::style(target, theme.dark));
+                let style =
+                    std::rc::Rc::new(markup_view::style(target, theme.dark).zoomed(theme.zoom));
                 (
                     markup_view::render_preview(
                         doc,
@@ -220,7 +221,7 @@ impl Preview {
             _ if self.writing
                 && let Some(target) = self.target =>
             {
-                let style = markup_view::style(target, theme.dark);
+                let style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
                 (
                     super::skeleton::render(target, &style),
                     Some(style.background),

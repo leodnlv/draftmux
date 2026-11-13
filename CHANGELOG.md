@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Change the text size of the editor, preview and chat with `⌘+` and `⌘−`
+  (`Ctrl` on Linux), and reset it with `⌘0`. The size is remembered, and macOS
+  gets a View menu with Zoom In, Zoom Out and Actual Size.
 - Edit several passages with one chat message. Hold `⌘` (`Ctrl` on Linux)
   while dragging in the editor or the preview to add a selection; the
   selections attach to the chat as quotes, and pi edits each one in place.

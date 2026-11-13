@@ -4,6 +4,7 @@
 //! [`Theme`] is a gpui global read at render time, so any window can use it
 //! with [`get`] or [`palette`]. Appearance changes call [`sync_window`], which
 //! refreshes every window; editors made with [`editor`] restyle themselves.
+//! The same goes for the text zoom the user sets with [`set_zoom`].
 //!
 //! Blurred windows keep their blur when Reduce Transparency is on: the
 //! surfaces that would show it paint [`Palette::sidebar`] and
@@ -18,10 +19,18 @@ pub use editor::platform::MONO;
 use editor::{ContextMenuItem, Editor, EditorStyle};
 use gpui::{AnyElement, App, AppContext, Entity, Global, Hsla, IntoElement, Window, rgba};
 
+/// How much one Zoom In or Zoom Out changes the text size.
+pub const ZOOM_STEP: f32 = 0.1;
+const MIN_ZOOM: f32 = 0.7;
+const MAX_ZOOM: f32 = 2.;
+
 pub struct Theme {
     pub dark: bool,
     pub reduce_transparency: bool,
     pub palette: Palette,
+    /// The size of the editors', preview's and chat's text relative to the
+    /// default.
+    pub zoom: f32,
     /// Keeps the accessibility display options observer registered.
     _observer: platform::AppearanceObserver,
 }
@@ -46,6 +55,7 @@ pub fn init(cx: &mut App) {
         dark,
         reduce_transparency,
         palette: Palette::resolve(dark, reduce_transparency),
+        zoom: 1.,
         _observer: observer,
     });
 }
@@ -75,15 +85,38 @@ fn update(dark: bool, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// An empty editor styled by `style` from the palette, restyled whenever the
-/// theme changes.
+/// Sets the text zoom, limited to the range the layout supports and rounded
+/// to a step, and returns what it was set to.
+pub fn set_zoom(zoom: f32, cx: &mut App) -> f32 {
+    let zoom = (zoom.clamp(MIN_ZOOM, MAX_ZOOM) / ZOOM_STEP).round() * ZOOM_STEP;
+    if get(cx).zoom != zoom {
+        cx.global_mut::<Theme>().zoom = zoom;
+        cx.refresh_windows();
+    }
+    zoom
+}
+
+/// `style` with its text and the space around it scaled by `zoom`.
+pub fn zoom_editor(style: EditorStyle, zoom: f32) -> EditorStyle {
+    EditorStyle {
+        font_size: style.font_size * zoom,
+        line_height: style.line_height * zoom,
+        padding_x: style.padding_x * zoom,
+        padding_top: style.padding_top * zoom,
+        padding_bottom: style.padding_bottom * zoom,
+        ..style
+    }
+}
+
+/// An empty editor styled by `style` from the palette and zoomed, restyled
+/// whenever the theme or zoom changes.
 pub fn editor(style: fn(&Palette) -> EditorStyle, cx: &mut App) -> Entity<Editor> {
     cx.new(|cx| {
         let mut editor = Editor::new("", cx);
-        editor.set_style(style(palette(cx)), cx);
+        editor.set_style(zoom_editor(style(palette(cx)), get(cx).zoom), cx);
         editor.set_context_menu(Rc::new(context_menu));
         cx.observe_global::<Theme>(move |editor: &mut Editor, cx| {
-            let style = style(palette(cx));
+            let style = zoom_editor(style(palette(cx)), get(cx).zoom);
             editor.set_style(style, cx);
         })
         .detach();

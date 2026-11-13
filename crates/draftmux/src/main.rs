@@ -152,6 +152,11 @@ fn run_app() -> Result<()> {
                     MenuItem::action("Undo", editor::Undo),
                     MenuItem::action("Redo", editor::Redo),
                 ]),
+                Menu::new("View").items([
+                    MenuItem::action("Actual Size", chrome::ResetZoom),
+                    MenuItem::action("Zoom In", chrome::ZoomIn),
+                    MenuItem::action("Zoom Out", chrome::ZoomOut),
+                ]),
             ]);
 
             let options = WindowOptions {

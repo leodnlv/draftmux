@@ -120,6 +120,8 @@ pub struct Chat {
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
+    /// The text zoom `style` was made for.
+    style_zoom: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -224,8 +226,18 @@ impl Chat {
             cx.notify();
         })
         .detach();
-        cx.observe_global::<Theme>(|this, cx| this.style = message_style(theme::get(cx).dark))
-            .detach();
+        cx.observe_global::<Theme>(|this: &mut Self, cx| {
+            let zoom = this.style_zoom;
+            this.style = message_style(theme::get(cx));
+            this.style_zoom = theme::get(cx).zoom;
+            // Item heights measured at another text size no longer hold.
+            if this.style_zoom != zoom {
+                for session in this.sessions.values() {
+                    session.list.remeasure();
+                }
+            }
+        })
+        .detach();
         let text_selection = cx.new(TextSelection::new);
         cx.observe(&text_selection, |_, _, cx| cx.notify()).detach();
         Self {
@@ -238,7 +250,8 @@ impl Chat {
             chip: Vec::new(),
             settle_chip: Task::ready(()),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
-            style: message_style(theme::get(cx).dark),
+            style: message_style(theme::get(cx)),
+            style_zoom: theme::get(cx).zoom,
         }
     }
 
@@ -1520,13 +1533,13 @@ fn sample_card(palette: &Palette) -> impl IntoElement {
 }
 
 /// Assistant messages: GitHub's markdown at chat size.
-fn message_style(dark: bool) -> MarkupStyle {
-    let mut style = MarkupStyle::github(dark);
+fn message_style(theme: &Theme) -> MarkupStyle {
+    let mut style = MarkupStyle::github(theme.dark);
     style.text_size = px(13.);
     style.block_gap = px(8.);
     style.heading_gap = px(12.);
     style.code_padding = px(10.);
-    style
+    style.zoomed(theme.zoom)
 }
 
 /// The composer's input: the UI font at chat size.

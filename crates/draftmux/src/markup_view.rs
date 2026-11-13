@@ -233,7 +233,67 @@ impl AlertColors {
     }
 }
 
+impl Chip {
+    fn zoomed(self, zoom: f32) -> Self {
+        Self {
+            pad_x: self.pad_x * zoom,
+            pad_top: self.pad_top * zoom,
+            pad_bottom: self.pad_bottom * zoom,
+            icon: self.icon.map(|icon| Icon {
+                size: icon.size * zoom,
+                gap: icon.gap * zoom,
+                ..icon
+            }),
+            ..self
+        }
+    }
+}
+
+impl InlineBox {
+    fn zoomed(self, zoom: f32) -> Self {
+        Self {
+            chip: self.chip.zoomed(zoom),
+            ..self
+        }
+    }
+}
+
 impl MarkupStyle {
+    /// The style with its text and the space between and around blocks
+    /// scaled by `zoom`. Rules, borders and corners keep their size.
+    pub fn zoomed(self, zoom: f32) -> Self {
+        let (pad_x, pad_y) = self.table_cell_padding;
+        Self {
+            text_size: self.text_size * zoom,
+            margins: self.margins.map(|margins| Margins {
+                rule: margins.rule * zoom,
+                ..margins
+            }),
+            block_gap: self.block_gap * zoom,
+            heading_gap: self.heading_gap * zoom,
+            tight_item_gap: self.tight_item_gap * zoom,
+            text_gap: self.text_gap * zoom,
+            list_indent: self.list_indent * zoom,
+            bullet: Bullet {
+                size: self.bullet.size * zoom,
+                left: self.bullet.left * zoom,
+                top: self.bullet.top * zoom,
+                ring_width: self.bullet.ring_width,
+            },
+            ordered_marker_gap: self.ordered_marker_gap * zoom,
+            inline_code: self.inline_code.zoomed(zoom),
+            mention: self.mention.map(|mention| mention.zoomed(zoom)),
+            url_slug: self.url_slug.map(|slug| slug.zoomed(zoom)),
+            blank_line: self.blank_line.map(|line| line * zoom),
+            code_text_size: self.code_text_size * zoom,
+            code_padding: self.code_padding * zoom,
+            quote_padding: self.quote_padding * zoom,
+            table_cell_padding: (pad_x * zoom, pad_y * zoom),
+            rule_padding: self.rule_padding * zoom,
+            ..self
+        }
+    }
+
     /// GitHub's markdown body in Primer's light or dark colors.
     pub fn github(dark: bool) -> Self {
         let c = |light: u32, dark_hex: u32| -> Hsla {
