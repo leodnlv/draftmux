@@ -91,6 +91,13 @@ impl ReviewState {
         Some(compared)
     }
 
+    /// Whether the comparison's byte ranges describe this text and baseline.
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        self.compared.as_ref().is_some_and(|compared| {
+            compared.text == text && self.base() == Some(compared.base.as_str())
+        })
+    }
+
     pub fn comparison(&self) -> Option<&Comparison> {
         self.compared.as_ref().map(|compared| &compared.comparison)
     }

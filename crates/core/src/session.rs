@@ -95,10 +95,12 @@ pub struct Session {
     held: Option<Held>,
     /// The drafts whose agent is running, as last reported.
     running: HashSet<String>,
-    /// The drafts whose first-draft prompt was sent and not yet accepted by
-    /// the agent. Not persisted: after a restart the first draft of a draft
-    /// still marked pending is requested again.
+    /// The drafts whose first-draft prompt was sent and whose acceptance
+    /// hasn't been persisted. Not persisted: after a restart the first
+    /// draft of a draft still marked pending is requested again.
     requested: HashSet<String>,
+    /// Accepted requests whose pending flag still needs to be saved.
+    accepted: HashSet<String>,
 }
 
 /// The pending edit isn't saved by the autosave timer because the file
@@ -130,6 +132,7 @@ impl Session {
             held: None,
             running: HashSet::new(),
             requested: HashSet::new(),
+            accepted: HashSet::new(),
         }
     }
 
@@ -159,6 +162,11 @@ impl Session {
         &self.review
     }
 
+    /// Compares the session's reported editor text with the review baseline.
+    pub fn sync_review(&mut self) -> Option<std::rc::Rc<crate::review::Compared>> {
+        self.review.compare(&self.text)
+    }
+
     /// The review, for comparing and selecting changes. Keeping and
     /// reverting go through the session.
     pub fn review_mut(&mut self) -> &mut ReviewState {
@@ -186,9 +194,8 @@ impl Session {
         epoch == self.epoch && revision == self.revision
     }
 
-    /// Why the selected draft's last save failed. A save refused because
-    /// the file changed outside the editor isn't a failure: the user is
-    /// asked which version to keep.
+    /// Why the selected draft's last save failed. Autosave conflicts wait
+    /// for the outside-edit question; an explicit flush reports them.
     pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
     }
@@ -198,6 +205,7 @@ impl Session {
     pub fn select(&mut self, id: &str) -> Result<Outcome> {
         let text = self.drafts.select(id)?;
         self.save_error = None;
+        self.asking = false;
         self.held = None;
         self.epoch.0 += 1;
         self.review = ReviewState::new(EditLog::load(self.drafts.store(), id));
@@ -206,6 +214,8 @@ impl Session {
 
     /// Empties the editor after the selected draft left the list.
     pub fn deselect(&mut self) -> Outcome {
+        self.save_error = None;
+        self.asking = false;
         self.held = None;
         self.epoch.0 += 1;
         self.review = ReviewState::default();
@@ -295,9 +305,6 @@ impl Session {
     }
 
     fn save_failed(&mut self, err: &anyhow::Error) {
-        if err.is::<Conflict>() {
-            return;
-        }
         eprintln!("draftmux: saving draft: {err:#}");
         self.save_error = Some(format!("Couldn't save: {err:#}"));
     }
@@ -379,10 +386,11 @@ impl Session {
     /// file changed again. Then autosave goes on, and a save the file
     /// still refuses is asked about by the next check.
     pub fn answer(&mut self, question: Question, choice: Choice) -> Outcome {
+        if question.epoch != self.epoch || self.drafts.current_id() != Some(question.id.as_str()) {
+            return self.due();
+        }
         self.asking = false;
-        if question.epoch != self.epoch
-            || self.drafts.current_id() != Some(question.id.as_str())
-            || self.drafts.deadline().is_none()
+        if self.drafts.deadline().is_none()
             || self.drafts.changed_on_disk().ok().flatten().as_ref() != Some(&question.disk)
         {
             self.held = None;
@@ -511,6 +519,10 @@ impl Session {
     /// since the app started. Starts no turn, so the first draft isn't
     /// recorded as an edit.
     pub fn first_draft_ready(&mut self, id: &str, prompt: String) -> Outcome {
+        if self.accepted.contains(id) {
+            self.first_draft_requested(id);
+            return Outcome::default();
+        }
         let pending = self
             .drafts
             .current()
@@ -545,7 +557,8 @@ impl Session {
     /// A prompt the agent rejects or never answers leaves it pending: the
     /// chat offers Retry, and the next start requests it again.
     pub fn prompt_accepted(&mut self, id: &str) {
-        if self.requested.remove(id) {
+        if self.requested.contains(id) {
+            self.accepted.insert(id.to_owned());
             self.first_draft_requested(id);
         }
     }
@@ -553,6 +566,9 @@ impl Session {
     fn first_draft_requested(&mut self, id: &str) {
         if let Err(err) = self.drafts.first_draft_requested(id) {
             eprintln!("draftmux: recording the first-draft request: {err:#}");
+        } else {
+            self.accepted.remove(id);
+            self.requested.remove(id);
         }
     }
 
@@ -586,6 +602,7 @@ impl Session {
             return Ok(Outcome::default());
         };
         self.refuse_while_running()?;
+        self.refuse_stale_review()?;
         if self.review.is_kept(ix) {
             self.review.keep(ix, false);
             if let Err(err) = self.save_kept() {
@@ -611,6 +628,7 @@ impl Session {
             return Ok(Outcome::default());
         };
         self.refuse_while_running()?;
+        self.refuse_stale_review()?;
         Ok(Outcome {
             effects: vec![Effect::ReplaceAll {
                 epoch: self.epoch,
@@ -619,6 +637,13 @@ impl Session {
             }],
             deadline: None,
         })
+    }
+
+    fn refuse_stale_review(&self) -> Result<()> {
+        if !self.review.matches(&self.text) {
+            bail!("The draft changed. Refresh the comparison before reverting.");
+        }
+        Ok(())
     }
 
     fn refuse_while_running(&self) -> Result<()> {

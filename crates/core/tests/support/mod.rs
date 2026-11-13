@@ -131,8 +131,7 @@ impl Script {
             self.timer = Some((self.session.epoch(), deadline));
         }
         // The review follows every change, as the app's does.
-        let text = self.editor.text.clone();
-        self.session.review_mut().compare(&text);
+        self.session.sync_review();
     }
 
     pub fn review(&self) -> &ReviewState {
@@ -168,8 +167,7 @@ impl Script {
     /// The user picks "Show Changes Since" edit `since`.
     pub fn compare_since(&mut self, since: usize) {
         self.session.review_mut().compare_since(since);
-        let text = self.editor.text.clone();
-        self.session.review_mut().compare(&text);
+        self.session.sync_review();
     }
 
     /// The selected draft's loaded log.

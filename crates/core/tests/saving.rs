@@ -121,7 +121,7 @@ fn a_conflict_is_not_reported_as_a_save_error_or_retried() {
     assert!(s.session.drafts().deadline().is_some());
     assert_eq!(s.timer, None);
     assert!(s.leave_window().is_err());
-    assert_eq!(s.session.save_error(), None);
+    assert!(s.session.save_error().is_some());
 }
 
 #[test]

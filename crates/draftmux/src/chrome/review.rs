@@ -168,8 +168,7 @@ impl Chrome {
     /// Brings the comparison, the Changes count and the redline up to date
     /// with the draft and the review.
     pub(super) fn sync_review(&mut self, cx: &mut Context<Self>) {
-        let text = self.editor.read(cx).text().to_owned();
-        let compared = self.session.review_mut().compare(&text);
+        let compared = self.session.sync_review();
         let target = self
             .session
             .drafts()

@@ -862,8 +862,8 @@ impl Chrome {
             ChatEvent::Accepted { id } => self.session.prompt_accepted(id),
             ChatEvent::DraftWritten { id, text } => {
                 let current = self.session.drafts().current_id() == Some(id.as_str());
-                // Shown now rather than on the next poll. Nothing is pending
-                // while the agent runs, so there's no conflict.
+                // Show the write now if no edit is pending; otherwise the
+                // next outside-edit check asks which version to keep.
                 let (recorded, outcome) = self.session.agent_wrote(id, text, Utc::now());
                 match recorded {
                     Ok(Recorded::Added) if current => self.edit_recorded(cx),
@@ -1228,8 +1228,8 @@ impl Chrome {
     pub fn flush_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
         match self.session.flush() {
             Ok(()) => true,
-            Err(_) => {
-                cx.notify();
+            Err(err) => {
+                self.show_error(format!("Couldn't close: {err:#}"), cx);
                 false
             }
         }
