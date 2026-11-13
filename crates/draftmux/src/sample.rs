@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use draftmux_settings::Settings;
-use draftmux_storage::{Draft, NewDraft, Store, Target};
+use draftmux_storage::{Backend, Draft, NewDraft, PiSession, Store, Target};
 
 use crate::{open, source};
 
@@ -55,13 +55,17 @@ pub fn create(store: &Store, settings: &Settings, home: &Path) -> Result<Draft> 
         title: TITLE.to_owned(),
         source: None,
         cwd: home.to_owned(),
-        pi_agent_dir,
+        backend: Backend::pi(pi_agent_dir.clone()),
         note: None,
         settings: resolved.draft_settings(),
         text: TEXT.to_owned(),
     };
     let draft = store.create_with_session(new, |draft| {
-        claude_convert::empty(home, &model).write_into(&draft.session_dir())
+        let file = claude_convert::empty(home, &model).write_into(&draft.session_dir())?;
+        Ok(Backend::Pi(PiSession {
+            agent_dir: pi_agent_dir,
+            session_file: Some(file),
+        }))
     })?;
     // The draft itself keeps the store from counting as unused.
     if let Err(err) = store.mark_sample_created() {

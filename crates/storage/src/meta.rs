@@ -1,42 +1,40 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use uuid::Uuid;
 
 /// Contents of a draft's `meta.json`. The draft ID is the directory name and
 /// is not stored here.
+///
+/// Read and written through [`MetaFile`], which keeps the Pi layout older
+/// builds read and rejects any backend descriptor that isn't valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "MetaFile", into = "MetaFile")]
 pub struct Meta {
     pub target: Target,
     /// The markup the text is written in. A Slack draft without it is in
     /// Slack's mrkdwn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syntax: Option<Syntax>,
     pub status: Status,
-    #[serde(default)]
     pub title: String,
     /// The session the draft was handed off from; none for the sample draft.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Independent of [`Meta::backend`]: a Claude Code transcript converted
+    /// into a pi session is a Claude source on the Pi backend.
     pub source: Option<Source>,
-    /// Working directory pi runs in.
+    /// Working directory the agent runs in.
     pub cwd: PathBuf,
-    /// The draft's pi session file, known once the session has been created.
-    #[serde(default)]
-    pub pi_session_file: Option<PathBuf>,
-    /// pi profile the draft is pinned to (`PI_CODING_AGENT_DIR`).
-    pub pi_agent_dir: PathBuf,
+    /// The agent the draft runs on, fixed when the draft is created.
+    pub backend: Backend,
     /// Free-form note from the agent that handed the draft off
     /// (`draftmux open --note`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Whether the app still has to ask pi for the first draft. Set for a
-    /// handed-off draft and cleared once the app sends that request, so it
-    /// is sent once even if the app is restarted.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Whether the app still has to ask the agent for the first draft. Set
+    /// for a handed-off draft and cleared once the app sends that request,
+    /// so it is sent once even if the app is restarted.
     pub first_draft_pending: bool,
     /// Settings resolved for the draft's directory when it was created.
     /// Later settings changes leave them alone.
-    #[serde(default)]
     pub settings: DraftSettings,
     pub created_at: DateTime<Utc>,
     /// Last activity; the drafts list is sorted by this, newest first.
@@ -52,6 +50,215 @@ impl Meta {
     /// Whether the text is in Slack's mrkdwn rather than Markdown.
     pub fn is_mrkdwn(&self) -> bool {
         self.target == Target::Slack && self.syntax.is_none()
+    }
+
+    /// The draft's pi session; none for a draft on another backend.
+    pub fn pi(&self) -> Option<&PiSession> {
+        match &self.backend {
+            Backend::Pi(pi) => Some(pi),
+            Backend::Claude(_) => None,
+        }
+    }
+
+    /// Errors for a descriptor [`MetaFile`] would reject, so the store
+    /// never writes one it couldn't read back.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let Backend::Claude(claude) = &self.backend else {
+            return Ok(());
+        };
+        if self.settings.selection_model.is_some() {
+            return Err("a Claude draft has a pi selection_model".into());
+        }
+        if let Some(dir) = &claude.config_dir
+            && !dir.is_absolute()
+        {
+            return Err(format!(
+                "the Claude config_dir {} is not absolute",
+                dir.display()
+            ));
+        }
+        if let Some(transcript) = &claude.transcript {
+            if !transcript.is_absolute() {
+                return Err(format!(
+                    "the Claude transcript {} is not absolute",
+                    transcript.display()
+                ));
+            }
+            // Claude Code resumes a transcript in place only under this
+            // name, and writes to a new file beside it otherwise.
+            let name = format!("{}.jsonl", claude.session_id);
+            if transcript.file_name() != Some(name.as_ref()) {
+                return Err(format!(
+                    "the Claude transcript {} is not named {name}",
+                    transcript.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The agent a draft runs on (see [`Meta::backend`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backend {
+    Pi(PiSession),
+    Claude(ClaudeSession),
+}
+
+impl Backend {
+    /// A Pi backend pinned to the profile `agent_dir`, before its session
+    /// exists.
+    pub fn pi(agent_dir: impl Into<PathBuf>) -> Self {
+        Backend::Pi(PiSession {
+            agent_dir: agent_dir.into(),
+            session_file: None,
+        })
+    }
+}
+
+/// A draft's pi session. Stored as the top-level `pi_session_file` and
+/// `pi_agent_dir`, without a `backend` key, as before there were other
+/// backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiSession {
+    /// pi profile the draft is pinned to (`PI_CODING_AGENT_DIR`).
+    pub agent_dir: PathBuf,
+    /// The draft's pi session file, known once the session has been created.
+    pub session_file: Option<PathBuf>,
+}
+
+/// A draft's Claude Code session. Stored under `backend` with no `pi_*`
+/// keys, so a build that predates other backends fails to read the draft
+/// rather than run it on pi.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeSession {
+    /// The native session ID (`--session-id`), known before the session
+    /// has a transcript.
+    pub session_id: Uuid,
+    /// The session's transcript, `<session_id>.jsonl`, once it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<PathBuf>,
+    /// `CLAUDE_CONFIG_DIR` for the session; none leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<PathBuf>,
+}
+
+/// The `backend` value of `meta.json`. Pi has no variant: a draft without
+/// `backend` is a Pi draft.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum BackendFile {
+    Claude(ClaudeSession),
+}
+
+/// `meta.json` as stored. The `pi_*` and `backend` keys read as present even
+/// when `null`, so a key that doesn't belong is an error whatever its value;
+/// only `pi_session_file` may be `null`.
+#[derive(Serialize, Deserialize)]
+struct MetaFile {
+    target: Target,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    syntax: Option<Syntax>,
+    status: Status,
+    #[serde(default)]
+    title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<Source>,
+    cwd: PathBuf,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    backend: Option<BackendFile>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pi_session_file: Option<Option<PathBuf>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pi_agent_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    first_draft_pending: bool,
+    #[serde(default)]
+    settings: DraftSettings,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+/// `Some` for a key that is present, so `null` reaches `T`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+impl TryFrom<MetaFile> for Meta {
+    type Error = String;
+
+    fn try_from(file: MetaFile) -> Result<Self, String> {
+        let backend = match (file.backend, file.pi_session_file, file.pi_agent_dir) {
+            (None, session_file, Some(agent_dir)) => Backend::Pi(PiSession {
+                agent_dir,
+                session_file: session_file.flatten(),
+            }),
+            (None, _, None) => return Err("missing field `pi_agent_dir`".into()),
+            (Some(BackendFile::Claude(claude)), None, None) => Backend::Claude(claude),
+            (Some(BackendFile::Claude(_)), _, _) => {
+                return Err("a Claude draft has pi_session_file or pi_agent_dir".into());
+            }
+        };
+        let meta = Meta {
+            target: file.target,
+            syntax: file.syntax,
+            status: file.status,
+            title: file.title,
+            source: file.source,
+            cwd: file.cwd,
+            backend,
+            note: file.note,
+            first_draft_pending: file.first_draft_pending,
+            settings: file.settings,
+            created_at: file.created_at,
+            updated_at: file.updated_at,
+        };
+        meta.validate()?;
+        Ok(meta)
+    }
+}
+
+impl From<Meta> for MetaFile {
+    fn from(meta: Meta) -> Self {
+        let (backend, pi_session_file, pi_agent_dir) = match meta.backend {
+            Backend::Pi(pi) => (None, Some(pi.session_file), Some(pi.agent_dir)),
+            Backend::Claude(claude) => (Some(BackendFile::Claude(claude)), None, None),
+        };
+        MetaFile {
+            target: meta.target,
+            syntax: meta.syntax,
+            status: meta.status,
+            title: meta.title,
+            source: meta.source,
+            cwd: meta.cwd,
+            backend,
+            pi_session_file,
+            pi_agent_dir,
+            note: meta.note,
+            first_draft_pending: meta.first_draft_pending,
+            settings: meta.settings,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+        }
     }
 }
 
@@ -175,6 +382,8 @@ pub enum SourceKind {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const FIXTURE: &str = r#"{
@@ -207,6 +416,11 @@ mod tests {
         assert_eq!(meta.target, Target::Slack);
         assert_eq!(meta.status, Status::Archived);
         assert_eq!(meta.source.as_ref().unwrap().kind, SourceKind::Claude);
+        // A converted Claude Code transcript runs on Pi.
+        assert_eq!(
+            meta.pi().unwrap().agent_dir,
+            Path::new("/Users/me/.pi/agent")
+        );
         assert_eq!(meta.updated_at.to_rfc3339(), "2026-11-08T11:30:00+00:00");
 
         let json = serde_json::to_string_pretty(&meta).unwrap();
@@ -224,11 +438,16 @@ mod tests {
         let meta: Meta = serde_json::from_value(value).unwrap();
         assert_eq!(meta.title, "");
         assert_eq!(meta.syntax, None);
-        assert_eq!(meta.pi_session_file, None);
+        assert_eq!(meta.backend, Backend::pi("/Users/me/.pi/agent"));
         assert_eq!(meta.note, None);
         assert!(!meta.first_draft_pending);
         assert_eq!(meta.settings, DraftSettings::default());
         assert!(meta.settings.context_files);
+
+        // Written as before there were other backends.
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["pi_session_file"], serde_json::Value::Null);
+        assert!(json.get("backend").is_none());
     }
 
     #[test]
@@ -281,5 +500,171 @@ mod tests {
             }
         }
         assert_eq!(Target::from_name("Github"), None);
+    }
+
+    const CLAUDE_FIXTURE: &str = r#"{
+  "target": "github",
+  "syntax": "markdown",
+  "status": "active",
+  "title": "PR body",
+  "source": {
+    "kind": "claude",
+    "path": "/Users/me/.claude/projects/x/abc.jsonl"
+  },
+  "cwd": "/Users/me/code/app",
+  "backend": {
+    "kind": "claude",
+    "session_id": "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60",
+    "transcript": "/Users/me/.claude/projects/-Users-me-code-app/0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60.jsonl",
+    "config_dir": "/Users/me/.claude-work"
+  },
+  "first_draft_pending": true,
+  "settings": {
+    "context_files": true
+  },
+  "created_at": "2026-11-08T10:00:00Z",
+  "updated_at": "2026-11-08T11:30:00Z"
+}"#;
+
+    fn claude_value() -> serde_json::Value {
+        serde_json::from_str(CLAUDE_FIXTURE).unwrap()
+    }
+
+    fn parse(value: serde_json::Value) -> Result<Meta, String> {
+        serde_json::from_value(value).map_err(|err| err.to_string())
+    }
+
+    #[test]
+    fn claude_session_round_trips_without_pi_keys() {
+        let meta: Meta = serde_json::from_str(CLAUDE_FIXTURE).unwrap();
+        let Backend::Claude(claude) = &meta.backend else {
+            panic!("not Claude: {:?}", meta.backend);
+        };
+        assert_eq!(
+            claude.session_id.to_string(),
+            "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60"
+        );
+        assert!(meta.pi().is_none());
+        assert_eq!(serde_json::to_string_pretty(&meta).unwrap(), CLAUDE_FIXTURE);
+
+        // Before the session has a transcript, and without a config dir.
+        let mut value = claude_value();
+        let backend = value["backend"].as_object_mut().unwrap();
+        backend.remove("transcript");
+        backend.remove("config_dir");
+        let meta = parse(value.clone()).unwrap();
+        let Backend::Claude(claude) = &meta.backend else {
+            panic!("not Claude");
+        };
+        assert_eq!((&claude.transcript, &claude.config_dir), (&None, &None));
+        assert_eq!(serde_json::to_value(&meta).unwrap(), value);
+    }
+
+    #[test]
+    fn rejects_unknown_and_inconsistent_descriptors() {
+        type Edit = fn(&mut serde_json::Value);
+        let cases: &[(&str, Edit)] = &[
+            ("unknown backend", |v| v["backend"]["kind"] = "codex".into()),
+            // Pi is stored without a backend, so `pi` has no second form.
+            ("explicit pi", |v| {
+                v["backend"] = serde_json::json!({"kind": "pi"})
+            }),
+            ("backend without kind", |v| {
+                v["backend"].as_object_mut().unwrap().remove("kind");
+            }),
+            ("null backend", |v| v["backend"] = serde_json::Value::Null),
+            ("unknown Claude field", |v| {
+                v["backend"]["model"] = "opus".into()
+            }),
+            ("Claude with a pi profile", |v| {
+                v["pi_agent_dir"] = "/Users/me/.pi/agent".into();
+            }),
+            ("Claude with a null pi session", |v| {
+                v["pi_session_file"] = serde_json::Value::Null;
+            }),
+            ("Claude with a null pi profile", |v| {
+                v["pi_agent_dir"] = serde_json::Value::Null;
+            }),
+            ("Claude with a pi selection model", |v| {
+                v["settings"]["selection_model"] = serde_json::json!({
+                    "provider": "anthropic",
+                    "model_id": "claude-haiku-5-5",
+                    "thinking": "low"
+                });
+            }),
+            ("bad session id", |v| {
+                v["backend"]["session_id"] = "abc".into()
+            }),
+            ("missing session id", |v| {
+                v["backend"].as_object_mut().unwrap().remove("session_id");
+            }),
+            ("relative transcript", |v| {
+                v["backend"]["transcript"] = "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60.jsonl".into();
+            }),
+            ("transcript named for another session", |v| {
+                v["backend"]["transcript"] = "/tmp/copy.jsonl".into();
+            }),
+            ("relative config dir", |v| {
+                v["backend"]["config_dir"] = ".claude".into()
+            }),
+            ("Claude draft without backend", |v| {
+                v.as_object_mut().unwrap().remove("backend");
+            }),
+        ];
+        for (name, edit) in cases {
+            let mut value = claude_value();
+            edit(&mut value);
+            assert!(parse(value).is_err(), "{name} accepted");
+        }
+
+        let mut value: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        value["pi_agent_dir"] = serde_json::Value::Null;
+        assert!(parse(value.clone()).is_err());
+        value.as_object_mut().unwrap().remove("pi_agent_dir");
+        assert_eq!(parse(value).unwrap_err(), "missing field `pi_agent_dir`");
+    }
+
+    /// `Meta` as builds before other backends read it: `pi_agent_dir` is
+    /// required and unknown keys are ignored.
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct PiOnlyMeta {
+        target: Target,
+        #[serde(default)]
+        syntax: Option<Syntax>,
+        status: Status,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        source: Option<Source>,
+        cwd: PathBuf,
+        #[serde(default)]
+        pi_session_file: Option<PathBuf>,
+        pi_agent_dir: PathBuf,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        first_draft_pending: bool,
+        #[serde(default)]
+        settings: DraftSettings,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    }
+
+    #[test]
+    fn older_builds_reject_claude_drafts_and_read_pi_ones() {
+        let err = serde_json::from_str::<PiOnlyMeta>(CLAUDE_FIXTURE)
+            .err()
+            .expect("an older build read a Claude draft");
+        assert!(
+            err.to_string().contains("missing field `pi_agent_dir`"),
+            "{err}"
+        );
+
+        let meta: Meta = serde_json::from_str(FIXTURE).unwrap();
+        let old: PiOnlyMeta = serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        let pi = meta.pi().unwrap();
+        assert_eq!(old.pi_agent_dir, pi.agent_dir);
+        assert_eq!(old.pi_session_file, pi.session_file);
     }
 }

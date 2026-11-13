@@ -442,7 +442,7 @@ impl SelectionPopover {
             && self
                 .draft
                 .as_ref()
-                .is_some_and(|draft| draft.meta.pi_session_file.is_some())
+                .is_some_and(|draft| draft.meta.pi().is_some_and(|pi| pi.session_file.is_some()))
     }
 
     fn editor_event(&mut self, event: &EditorEvent, cx: &mut Context<Self>) {

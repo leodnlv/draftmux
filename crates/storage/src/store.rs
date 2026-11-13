@@ -7,7 +7,7 @@ use chrono::Utc;
 
 use crate::atomic;
 use crate::history::History;
-use crate::meta::{DraftSettings, Meta, Source, Status, Syntax, Target};
+use crate::meta::{Backend, DraftSettings, Meta, Source, Status, Syntax, Target};
 
 const DRAFT_FILE: &str = "draft.md";
 const META_FILE: &str = "meta.json";
@@ -36,7 +36,8 @@ pub struct NewDraft {
     pub title: String,
     pub source: Option<Source>,
     pub cwd: PathBuf,
-    pub pi_agent_dir: PathBuf,
+    /// The backend the draft is pinned to, before its session exists.
+    pub backend: Backend,
     pub note: Option<String>,
     pub settings: DraftSettings,
     /// The draft's text to start with. A handed-off draft that starts empty
@@ -105,24 +106,17 @@ impl Store {
     /// Creates `<id>/` with `draft.md` and `session/`, then writes
     /// `meta.json` last so a scan never lists a half-created draft.
     pub fn create(&self, new: NewDraft) -> Result<Draft> {
-        self.create_draft(new, |_| Ok(None))
+        self.create_with_session(new, |draft| Ok(draft.meta.backend.clone()))
     }
 
-    /// Like [`Store::create`], but `session` creates the draft's pi session
-    /// file before `meta.json` is written, and returns its path for
-    /// `pi_session_file`. If it fails, the draft directory is removed.
+    /// Like [`Store::create`], but `session` creates the draft's session
+    /// before `meta.json` is written, and returns the backend with it in
+    /// place of [`NewDraft::backend`]. If it fails, or returns a backend
+    /// `meta.json` can't hold, the draft directory is removed.
     pub fn create_with_session(
         &self,
         new: NewDraft,
-        session: impl FnOnce(&Draft) -> Result<PathBuf>,
-    ) -> Result<Draft> {
-        self.create_draft(new, |draft| session(draft).map(Some))
-    }
-
-    fn create_draft(
-        &self,
-        new: NewDraft,
-        session: impl FnOnce(&Draft) -> Result<Option<PathBuf>>,
+        session: impl FnOnce(&Draft) -> Result<Backend>,
     ) -> Result<Draft> {
         let id = uuid::Uuid::now_v7().to_string();
         let dir = self.root.join(&id);
@@ -141,8 +135,7 @@ impl Store {
                 title: new.title,
                 source: new.source,
                 cwd: new.cwd,
-                pi_session_file: None,
-                pi_agent_dir: new.pi_agent_dir,
+                backend: new.backend,
                 note: new.note,
                 first_draft_pending,
                 settings: new.settings,
@@ -152,8 +145,8 @@ impl Store {
         };
         let result = atomic::write(&draft.draft_path(), new.text.as_bytes())
             .and_then(|()| session(&draft))
-            .and_then(|file| {
-                draft.meta.pi_session_file = file;
+            .and_then(|backend| {
+                draft.meta.backend = backend;
                 write_meta(&draft.dir, &draft.meta)
             });
         if let Err(err) = result {
@@ -422,6 +415,8 @@ fn read_meta(dir: &Path) -> Result<Meta> {
 }
 
 fn write_meta(dir: &Path, meta: &Meta) -> Result<()> {
+    meta.validate()
+        .map_err(|err| anyhow::anyhow!("writing {}: {err}", dir.join(META_FILE).display()))?;
     let mut json = serde_json::to_vec_pretty(meta)?;
     json.push(b'\n');
     atomic::write(&dir.join(META_FILE), &json)
@@ -432,7 +427,7 @@ mod tests {
     use chrono::{Duration, TimeZone};
 
     use super::*;
-    use crate::meta::SourceKind;
+    use crate::meta::{ClaudeSession, PiSession, SourceKind};
 
     fn new_draft(title: &str) -> NewDraft {
         NewDraft {
@@ -443,7 +438,7 @@ mod tests {
                 path: "/tmp/source session.jsonl".into(),
             }),
             cwd: "/tmp/repo".into(),
-            pi_agent_dir: "/tmp/.pi/agent".into(),
+            backend: Backend::pi("/tmp/.pi/agent"),
             note: None,
             settings: Default::default(),
             text: String::new(),
@@ -538,12 +533,95 @@ mod tests {
                 assert!(!draft.dir.join(META_FILE).exists());
                 let file = draft.session_dir().join("s.jsonl");
                 std::fs::write(&file, "")?;
-                Ok(file)
+                Ok(Backend::Pi(PiSession {
+                    agent_dir: draft.meta.pi().unwrap().agent_dir.clone(),
+                    session_file: Some(file),
+                }))
             })
             .unwrap();
         let file = draft.session_dir().join("s.jsonl");
-        assert_eq!(draft.meta.pi_session_file.as_ref(), Some(&file));
+        assert_eq!(draft.meta.pi().unwrap().session_file.as_ref(), Some(&file));
+        assert_eq!(
+            draft.meta.pi().unwrap().agent_dir,
+            Path::new("/tmp/.pi/agent")
+        );
         assert_eq!(store.load(&draft.id).unwrap().meta, draft.meta);
+    }
+
+    fn claude_session(session_id: uuid::Uuid) -> Backend {
+        Backend::Claude(ClaudeSession {
+            session_id,
+            transcript: None,
+            config_dir: None,
+        })
+    }
+
+    #[test]
+    fn claude_drafts_are_stored_without_pi_values() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let session_id = uuid::Uuid::now_v7();
+        let new = NewDraft {
+            backend: claude_session(session_id),
+            ..new_draft("a")
+        };
+        let draft = store
+            .create_with_session(new, |draft| {
+                let Backend::Claude(claude) = &draft.meta.backend else {
+                    bail!("not Claude");
+                };
+                Ok(Backend::Claude(ClaudeSession {
+                    transcript: Some(draft.session_dir().join(format!("{session_id}.jsonl"))),
+                    ..claude.clone()
+                }))
+            })
+            .unwrap();
+        assert!(draft.meta.pi().is_none());
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(draft.dir.join(META_FILE)).unwrap()).unwrap();
+        assert!(json.get("pi_agent_dir").is_none());
+        assert!(json.get("pi_session_file").is_none());
+        assert_eq!(json["backend"]["kind"], "claude");
+
+        let meta = store.save_text(&draft.id, "Hello\n").unwrap();
+        assert_eq!(meta.backend, draft.meta.backend);
+        assert_eq!(store.load(&draft.id).unwrap().meta, meta);
+        assert_eq!(ids(store.scan().unwrap().active()), [&draft.id]);
+    }
+
+    #[test]
+    fn invalid_session_from_the_session_step_leaves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let session_id = uuid::Uuid::now_v7();
+        let err = store
+            .create_with_session(new_draft("a"), |_| {
+                Ok(Backend::Claude(ClaudeSession {
+                    session_id,
+                    transcript: Some("/tmp/renamed copy.jsonl".into()),
+                    config_dir: None,
+                }))
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("is not named"), "{err:#}");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+        // Nor can an update write one.
+        let draft = store.create(new_draft("b")).unwrap();
+        let before = std::fs::read(draft.dir.join(META_FILE)).unwrap();
+        let err = store
+            .update_meta(&draft.id, |meta| {
+                meta.backend = claude_session(session_id);
+                meta.settings.selection_model = Some(crate::ModelChoice {
+                    provider: "anthropic".into(),
+                    model_id: "claude-haiku-5-5".into(),
+                    thinking: "low".into(),
+                });
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("selection_model"), "{err:#}");
+        assert_eq!(std::fs::read(draft.dir.join(META_FILE)).unwrap(), before);
     }
 
     #[test]
@@ -555,6 +633,55 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_string(), "fork failed");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn legacy_drafts_load_unchanged_and_keep_their_files() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let id = "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60";
+        let dir = root.path().join(id);
+        std::fs::create_dir(&dir).unwrap();
+        // Written before backends: Claude provenance, no session file yet.
+        let legacy = r#"{"target":"github","status":"active",
+            "source":{"kind":"claude","path":"/tmp/a.jsonl"},
+            "cwd":"/tmp/repo","pi_agent_dir":"/tmp/profile",
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(dir.join(META_FILE), legacy).unwrap();
+        std::fs::write(dir.join(DRAFT_FILE), "Text\n").unwrap();
+        let history = r#"{"edits":[],"kept":["a\u0000b"]}"#;
+        std::fs::write(dir.join(HISTORY_FILE), history).unwrap();
+
+        // An unreadable descriptor is reported, not taken for Pi.
+        let other = root.path().join("0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f61");
+        std::fs::create_dir(&other).unwrap();
+        let unknown = legacy.replace(r#""cwd""#, r#""backend":{"kind":"codex"},"cwd""#);
+        std::fs::write(other.join(META_FILE), unknown).unwrap();
+
+        let scan = store.scan().unwrap();
+        assert_eq!(ids(scan.drafts.iter()), [id]);
+        assert_eq!(scan.errors.len(), 1);
+        assert_eq!(scan.errors[0].0, other);
+        let meta = store.load(id).unwrap().meta;
+        assert_eq!(meta.backend, Backend::pi("/tmp/profile"));
+        assert_eq!(meta.source.unwrap().kind, SourceKind::Claude);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(META_FILE)).unwrap(),
+            legacy
+        );
+
+        let meta = store.archive(id).unwrap();
+        assert_eq!(meta.backend, Backend::pi("/tmp/profile"));
+        assert_eq!(store.read_text(id).unwrap(), "Text\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(HISTORY_FILE)).unwrap(),
+            history
+        );
+        assert_eq!(store.history(id).unwrap().kept, ["a\0b"]);
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(META_FILE)).unwrap()).unwrap();
+        assert_eq!(json["pi_agent_dir"], "/tmp/profile");
+        assert!(json.get("backend").is_none());
     }
 
     #[test]

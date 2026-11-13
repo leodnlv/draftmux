@@ -90,7 +90,7 @@ impl Action {
 /// editor's current text.
 #[derive(Debug, Clone)]
 pub struct Request {
-    /// The draft's pi session file (`Meta::pi_session_file`).
+    /// The draft's pi session file (`PiSession::session_file`).
     pub session_file: PathBuf,
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
@@ -101,12 +101,14 @@ pub struct Request {
 }
 
 impl Request {
-    /// `None` when the draft has no pi session yet.
+    /// `None` when the draft has no pi session, as yet or because it runs on
+    /// another backend.
     pub fn new(meta: &Meta, text: String, range: Range<usize>, action: Action) -> Option<Self> {
+        let pi = meta.pi()?;
         Some(Self {
-            session_file: meta.pi_session_file.clone()?,
+            session_file: pi.session_file.clone()?,
             cwd: meta.cwd.clone(),
-            agent_dir: meta.pi_agent_dir.clone(),
+            agent_dir: pi.agent_dir.clone(),
             target: meta.target,
             text,
             range,
@@ -321,6 +323,41 @@ mod tests {
             range: start..start + selected.len(),
             action,
         }
+    }
+
+    #[test]
+    fn requests_need_a_pi_session() {
+        let mut meta = Meta {
+            target: Target::Github,
+            syntax: None,
+            status: draftmux_storage::Status::Active,
+            title: String::new(),
+            source: None,
+            cwd: "/repo".into(),
+            backend: draftmux_storage::Backend::pi("/profile"),
+            note: None,
+            first_draft_pending: false,
+            settings: DraftSettings::default(),
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        };
+        let new =
+            |meta: &Meta| Request::new(meta, "Hi".into(), 0..2, Action::Instruction("x".into()));
+        assert!(new(&meta).is_none());
+
+        meta.backend = draftmux_storage::Backend::Pi(draftmux_storage::PiSession {
+            agent_dir: "/profile".into(),
+            session_file: Some("/drafts/x/session/s.jsonl".into()),
+        });
+        let request = new(&meta).unwrap();
+        assert_eq!(request.agent_dir, Path::new("/profile"));
+
+        meta.backend = draftmux_storage::Backend::Claude(draftmux_storage::ClaudeSession {
+            session_id: "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60".parse().unwrap(),
+            transcript: None,
+            config_dir: None,
+        });
+        assert!(new(&meta).is_none());
     }
 
     #[test]

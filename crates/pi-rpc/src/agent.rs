@@ -28,7 +28,7 @@ pub type CommandFactory = Arc<dyn Fn() -> Command + Send + Sync>;
 /// Everything needed to start a draft's pi process.
 pub struct LaunchSpec {
     pub command: CommandFactory,
-    /// The draft's pi session file (`Meta::pi_session_file`).
+    /// The draft's pi session file (`PiSession::session_file` in storage).
     pub session_file: PathBuf,
     /// The bundled `pi-extension/draftmux.ts`.
     pub extension: PathBuf,

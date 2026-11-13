@@ -14,7 +14,7 @@ use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use claude_convert::ModelSelection;
 use draftmux_pi_rpc::{ForkSpec, ModelOverride};
 use draftmux_settings::Settings;
-use draftmux_storage::{Draft, NewDraft, Source, SourceKind, Store, Target};
+use draftmux_storage::{Backend, Draft, NewDraft, PiSession, Source, SourceKind, Store, Target};
 
 use crate::{ipc, resources, source};
 
@@ -122,7 +122,8 @@ fn create(
     )?;
     let target = args.target.unwrap_or(resolved.target.value);
     let model = resolved.model_override();
-    let new = |path, cwd, pi_agent_dir| NewDraft {
+    // Every handoff runs on Pi; a Claude Code transcript is converted.
+    let new = |path, cwd, pi_agent_dir: &Path| NewDraft {
         target,
         title: String::new(),
         source: Some(Source {
@@ -130,7 +131,7 @@ fn create(
             path,
         }),
         cwd,
-        pi_agent_dir,
+        backend: Backend::pi(pi_agent_dir),
         note: args.note.clone(),
         settings: resolved.draft_settings(),
         text: text.clone(),
@@ -145,14 +146,13 @@ fn create(
                 );
             }
             let extension = resources::pi_extension()?;
-            store.create_with_session(new(path.clone(), info.cwd, pi_agent_dir), |draft| {
-                let meta = &draft.meta;
+            store.create_with_session(new(path.clone(), info.cwd, &pi_agent_dir), |draft| {
                 let spec = ForkSpec {
                     source: path.clone(),
                     session_dir: draft.session_dir(),
                     extension,
-                    cwd: meta.cwd.clone(),
-                    agent_dir: meta.pi_agent_dir.clone(),
+                    cwd: draft.meta.cwd.clone(),
+                    agent_dir: pi_agent_dir.clone(),
                     draft_path: draft.draft_path(),
                     model,
                     timeout: FORK_TIMEOUT,
@@ -162,15 +162,22 @@ fn create(
                 if let Some(warning) = forked.warning {
                     eprintln!("draftmux: {warning}");
                 }
-                Ok(forked.session_file)
+                Ok(Backend::Pi(PiSession {
+                    agent_dir: pi_agent_dir,
+                    session_file: Some(forked.session_file),
+                }))
             })
         }
         // Converted before the draft exists, so a transcript that can't be
         // converted creates nothing.
         SourceKind::Claude => {
             let session = convert_claude(&path, &info.cwd, &pi_agent_dir, model)?;
-            store.create_with_session(new(path, info.cwd, pi_agent_dir), |draft| {
-                session.write_into(&draft.session_dir())
+            store.create_with_session(new(path, info.cwd, &pi_agent_dir), |draft| {
+                let file = session.write_into(&draft.session_dir())?;
+                Ok(Backend::Pi(PiSession {
+                    agent_dir: pi_agent_dir,
+                    session_file: Some(file),
+                }))
             })
         }
     }
@@ -302,11 +309,11 @@ cat > /dev/null
         assert_eq!(meta.source.as_ref().unwrap().kind, SourceKind::Pi);
         assert_eq!(meta.source.as_ref().unwrap().path, session);
         assert_eq!(meta.cwd, cwd);
-        assert_eq!(meta.pi_agent_dir, profile);
+        assert_eq!(meta.pi().unwrap().agent_dir, profile);
         assert_eq!(meta.target, Target::Slack);
         assert_eq!(meta.note.as_deref(), Some("release notes"));
         assert_eq!(
-            meta.pi_session_file,
+            meta.pi().unwrap().session_file,
             Some(draft.session_dir().join("fork.jsonl"))
         );
 
@@ -507,7 +514,7 @@ cat > /dev/null
 
         let meta = store.load(&draft.id).unwrap().meta;
         assert_eq!(meta.source.as_ref().unwrap().kind, SourceKind::Claude);
-        let file = meta.pi_session_file.unwrap();
+        let file = meta.pi().unwrap().session_file.clone().unwrap();
         assert_eq!(file.parent().unwrap(), draft.session_dir());
 
         let entries = session_entries(&file);
@@ -547,7 +554,7 @@ cat > /dev/null
         let meta = store.load(&draft.id).unwrap().meta;
         assert!(!meta.first_draft_pending);
         assert!(meta.source.is_some());
-        assert!(meta.pi_session_file.is_some());
+        assert!(meta.pi().unwrap().session_file.is_some());
     }
 
     #[test]
@@ -581,7 +588,7 @@ cat > /dev/null
         fs::write(profile.join("settings.json"), "{\"defaultModel\":").unwrap();
         let (_, draft) = claude_draft(tmp.path(), &profile);
 
-        let entries = session_entries(&draft.meta.pi_session_file.unwrap());
+        let entries = session_entries(&draft.meta.pi().unwrap().session_file.clone().unwrap());
         assert_eq!(entries.last().unwrap()["type"], "message");
     }
 
@@ -649,7 +656,7 @@ cat > /dev/null
         )
         .unwrap();
         let meta = store.load(&draft.id).unwrap().meta;
-        assert_eq!(meta.pi_agent_dir, profile);
+        assert_eq!(meta.pi().unwrap().agent_dir, profile);
         assert_eq!(meta.target, Target::Slack);
         assert_eq!(
             meta.settings,
@@ -673,7 +680,7 @@ cat > /dev/null
             "github",
         ]);
         let other = create(&flagged, &store, &no_pi, &settings).unwrap().meta;
-        assert_eq!(other.pi_agent_dir, tmp.path());
+        assert_eq!(other.pi().unwrap().agent_dir, tmp.path());
         assert_eq!(other.target, Target::Github);
 
         // Later changes leave existing drafts alone.
@@ -708,7 +715,13 @@ cat > /dev/null
         });
         let draft = create(&parse(&[session.to_str().unwrap()]), &store, &pi, &settings).unwrap();
         assert_eq!(
-            store.load(&draft.id).unwrap().meta.pi_session_file,
+            store
+                .load(&draft.id)
+                .unwrap()
+                .meta
+                .pi()
+                .unwrap()
+                .session_file,
             Some(draft.session_dir().join("fork.jsonl"))
         );
     }
@@ -739,7 +752,7 @@ cat > /dev/null
             .map_or_else(|| home.join(".pi/agent"), PathBuf::from);
         let tmp = tempfile::tempdir().unwrap();
         let (_, draft) = claude_draft(tmp.path(), &profile);
-        let file = draft.meta.pi_session_file.unwrap();
+        let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
         let tail = session_entries(&file)
             .into_iter()
             .find(|e| e["type"] == "model_change")
@@ -818,7 +831,7 @@ cat > /dev/null
         };
         let draft = create(&args, &store, &no_pi, &drafting_on(model)).unwrap();
 
-        let entries = session_entries(&draft.meta.pi_session_file.unwrap());
+        let entries = session_entries(&draft.meta.pi().unwrap().session_file.clone().unwrap());
         let tail = &entries[entries.len() - 2..];
         assert_eq!(tail[0]["provider"], "anthropic");
         assert_eq!(tail[0]["modelId"], "claude-opus-5-5");
@@ -928,7 +941,7 @@ cat > /dev/null
         let draft = create(&args, &store, &pi, &Settings::default()).unwrap();
         eprintln!("fork took {} ms", started.elapsed().as_millis());
         assert_eq!(fs::read_to_string(&source).unwrap(), original + "\n");
-        let file = draft.meta.pi_session_file.clone().unwrap();
+        let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
         assert_eq!(file.parent(), Some(draft.session_dir().as_path()));
         let entries = session_entries(&file);
         assert_eq!(entries[0]["version"], 3);
@@ -960,7 +973,7 @@ cat > /dev/null
             thinking,
         };
         let draft = create(&args, &store, &pi, &drafting_on(model)).unwrap();
-        let file = draft.meta.pi_session_file.unwrap();
+        let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
         let (state, _) = real_pi_state(&env, &profile, &file, &cwd);
         let model = state.model.unwrap();
         assert_eq!((model.provider, model.id), (default.provider, default.id));

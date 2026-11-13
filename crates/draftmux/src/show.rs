@@ -176,7 +176,7 @@ mod tests {
                     path: source.into(),
                 }),
                 cwd: "/tmp/repo".into(),
-                pi_agent_dir: "/tmp/.pi/agent".into(),
+                backend: draftmux_storage::Backend::pi("/tmp/.pi/agent"),
                 note: None,
                 settings: Default::default(),
                 text: String::new(),

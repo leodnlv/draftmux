@@ -398,10 +398,13 @@ impl Chat {
         let session = self.sessions.get_mut(id)?;
         let draft = &session.draft;
         let spec = (|| {
-            let pi = env.pi().map_err(|err| err.to_string())?.to_path_buf();
-            let session_file = draft
+            let pi_session = draft
                 .meta
-                .pi_session_file
+                .pi()
+                .ok_or("This draft runs on Claude Code, which this version can't start.")?;
+            let pi = env.pi().map_err(|err| err.to_string())?.to_path_buf();
+            let session_file = pi_session
+                .session_file
                 .clone()
                 .ok_or("This draft has no pi session yet.")?;
             let extension = crate::resources::pi_extension().map_err(|err| format!("{err:#}"))?;
@@ -411,7 +414,7 @@ impl Chat {
                 session_file,
                 extension,
                 cwd: draft.meta.cwd.clone(),
-                agent_dir: draft.meta.pi_agent_dir.clone(),
+                agent_dir: pi_session.agent_dir.clone(),
                 draft_path: draft.draft_path(),
                 instructions: draft.meta.settings.instructions.clone(),
                 context_files: draft.meta.settings.context_files,
@@ -424,8 +427,9 @@ impl Chat {
             }
             Err(err) => (Err(err), None),
         };
-        session.model = agent.as_ref().ok().map(|agent| {
-            let dir = &session.draft.meta.pi_agent_dir;
+        let pi = session.draft.meta.pi();
+        session.model = agent.as_ref().ok().zip(pi).map(|(agent, pi)| {
+            let dir = &pi.agent_dir;
             let profile_name = ProfileCatalog::global(cx)
                 .read(cx)
                 .entry(dir)
@@ -1191,7 +1195,7 @@ impl Chat {
 
     fn header(&self, palette: &Palette) -> impl IntoElement {
         let profile = self.session().and_then(|session| {
-            let dir = &session.draft.meta.pi_agent_dir;
+            let dir = &session.draft.meta.pi()?.agent_dir;
             profile_label(dir, std::env::home_dir().as_deref())
                 .map(|label| (label, dir.display().to_string()))
         });

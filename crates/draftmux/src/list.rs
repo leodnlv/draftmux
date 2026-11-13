@@ -172,7 +172,7 @@ mod tests {
                     path: "/s/a.jsonl".into(),
                 }),
                 cwd: cwd.into(),
-                pi_agent_dir: "/tmp/.pi/agent".into(),
+                backend: draftmux_storage::Backend::pi("/tmp/.pi/agent"),
                 note: None,
                 settings: Default::default(),
                 text: String::new(),

@@ -54,7 +54,7 @@ mod tests {
                     path: "/tmp/s.jsonl".into(),
                 }),
                 cwd: "/tmp".into(),
-                pi_agent_dir: "/tmp/.pi/agent".into(),
+                backend: draftmux_storage::Backend::pi("/tmp/.pi/agent"),
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
@@ -91,7 +91,9 @@ mod tests {
         assert_eq!(sample.meta.target, Target::Github);
         assert_eq!(sample.meta.cwd, home);
         assert_eq!(store.read_text(&id).unwrap(), sample::TEXT);
-        let session = std::fs::read_to_string(sample.meta.pi_session_file.unwrap()).unwrap();
+        let session =
+            std::fs::read_to_string(sample.meta.pi().unwrap().session_file.clone().unwrap())
+                .unwrap();
         assert_eq!(session.lines().count(), 1);
         assert!(session.contains(r#""type":"session""#) && session.contains(r#""version":3"#));
         assert_eq!(order(&drafts), [id.as_str()]);
@@ -156,7 +158,15 @@ mod tests {
         let mut drafts = Drafts::new(store.clone());
         let id = create_sample(&mut drafts, &settings, root.path()).unwrap();
 
-        let file = store.load(&id).unwrap().meta.pi_session_file.unwrap();
+        let file = store
+            .load(&id)
+            .unwrap()
+            .meta
+            .pi()
+            .unwrap()
+            .session_file
+            .clone()
+            .unwrap();
         let session = std::fs::read_to_string(file).unwrap();
         assert!(
             session.contains(r#""modelId":"claude-sonnet-5-5""#),
