@@ -17,7 +17,16 @@ fn shown(source: &str, range: Range<usize>) -> Vec<(Vec<usize>, String)> {
     maps::shown(Target::Github, source, range)
 }
 
-const SYNTAX_EDITS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/review");
+const REVIEW: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../draftmux/fixtures/review");
+
+/// Review fixtures whose change is in syntax that renders no text of its
+/// own.
+const SYNTAX_EDITS: [&str; 4] = [
+    "autolink-edited",
+    "hard-break-removed",
+    "reference-definition",
+    "setext-underline",
+];
 
 #[test]
 fn every_text_piece_reproduces_its_literal() {
@@ -254,17 +263,10 @@ fn change(before: &str, after: &str) -> (Range<usize>, Range<usize>) {
 /// reference definition and a setext underline.
 #[test]
 fn syntax_edits_show_their_change_on_both_sides() {
-    let pairs = review_pairs(Path::new(SYNTAX_EDITS));
+    let mut pairs = review_pairs(Path::new(REVIEW));
+    pairs.retain(|(name, ..)| SYNTAX_EDITS.contains(&name.as_str()));
     let names: Vec<_> = pairs.iter().map(|(name, ..)| name.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "autolink-edited",
-            "hard-break-removed",
-            "reference-definition",
-            "setext-underline"
-        ]
-    );
+    assert_eq!(names, SYNTAX_EDITS);
     let mut seen = Vec::new();
     for (name, before, after) in &pairs {
         let (from, to) = change(before, after);
@@ -310,7 +312,7 @@ fn syntax_edits_show_their_change_on_both_sides() {
 
 #[test]
 fn syntax_only_hunk_anchors_to_its_block() {
-    let dir = Path::new(SYNTAX_EDITS);
+    let dir = Path::new(REVIEW);
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
     // The underline is in the heading's source; its point ends the heading.
     let setext = read("setext-underline.before.md");

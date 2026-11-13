@@ -84,8 +84,7 @@ fn review_pairs(dir: &Path) -> Vec<(String, String, String)> {
 #[test]
 fn decorations_cover_every_hunk_on_both_sides() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut pairs = review_pairs(&root.join("../draftmux/fixtures/review"));
-    pairs.extend(review_pairs(&root.join("../markup/tests/fixtures/review")));
+    let pairs = review_pairs(&root.join("../draftmux/fixtures/review"));
     assert!(pairs.len() > 40, "{} pairs", pairs.len());
     let mut failures = Vec::new();
     for (name, before, after) in &pairs {
