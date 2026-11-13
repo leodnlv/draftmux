@@ -1,5 +1,6 @@
 //! The editing session: which draft is selected, the text the editor holds,
-//! when its pending edit is saved, and how a failed save is reported.
+//! when its pending edit is saved, how a failed save is reported, and how
+//! changes to the draft's file from outside the editor reach it.
 //!
 //! The app reports what happens (a selection, an edit, its autosave timer
 //! firing, a prompt) and carries out the returned [`Outcome`]: the effects in
@@ -8,10 +9,12 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use draftmux_storage::{Conflict, Store};
 
 use crate::drafts::Drafts;
-use crate::history::Turns;
+use crate::history::{EditLog, Recorded, Turns};
+use crate::outside::{Choice, Question};
 
 /// Identifies one stay on a selection. A new one starts on every select and
 /// deselect, so a load or timer meant for an earlier one is told apart even
@@ -33,6 +36,13 @@ pub enum Effect {
     /// Show `text` in the editor, then report what it holds with
     /// [`Session::loaded`].
     LoadText { epoch: Epoch, text: String },
+    /// Replace the editor's text with `text` as one edit the user can undo,
+    /// then report what it holds with [`Session::loaded`]. The file already
+    /// holds `text`.
+    ReplaceText { epoch: Epoch, text: String },
+    /// Ask the user which version to keep, and report the answer with
+    /// [`Session::answer`].
+    AskOutsideEdit(Question),
     /// Send `text` to the agent. `saved` is the draft text the agent
     /// starts from, or why it couldn't be saved first.
     Prompt {
@@ -46,11 +56,15 @@ pub struct Session {
     /// Each draft's latest agent turn, until its first write is recorded as
     /// an edit.
     turns: Turns,
+    /// The selected draft's edit history.
+    log: EditLog,
     /// Why the selected draft's last save failed; cleared by the next save.
     save_error: Option<String>,
     epoch: Epoch,
     /// The text the editor holds, as last reported.
     text: String,
+    /// A [`Question`] is open. Only one is asked at a time.
+    asking: bool,
 }
 
 impl Session {
@@ -58,9 +72,11 @@ impl Session {
         Self {
             drafts: Drafts::new(store),
             turns: Turns::default(),
+            log: EditLog::default(),
             save_error: None,
             epoch: Epoch::default(),
             text: String::new(),
+            asking: false,
         }
     }
 
@@ -78,6 +94,15 @@ impl Session {
 
     pub fn turns_mut(&mut self) -> &mut Turns {
         &mut self.turns
+    }
+
+    /// The selected draft's edit history, loaded when it was selected.
+    pub fn log(&self) -> &EditLog {
+        &self.log
+    }
+
+    pub fn log_mut(&mut self) -> &mut EditLog {
+        &mut self.log
     }
 
     pub fn epoch(&self) -> Epoch {
@@ -103,12 +128,14 @@ impl Session {
         let text = self.drafts.select(id)?;
         self.save_error = None;
         self.epoch.0 += 1;
+        self.log = EditLog::load(self.drafts.store(), id);
         Ok(self.load(text))
     }
 
     /// Empties the editor after the selected draft left the list.
     pub fn deselect(&mut self) -> Outcome {
         self.epoch.0 += 1;
+        self.log = EditLog::default();
         self.load(String::new())
     }
 
@@ -203,6 +230,116 @@ impl Session {
     /// first and stays selected if that fails.
     pub fn archive(&mut self, id: &str) -> Result<Option<String>> {
         self.drafts.archive(id)
+    }
+
+    /// Picks up a change to the selected draft's file made outside the
+    /// editor, counting it as activity. With no edit pending, the editor
+    /// takes the new text; otherwise the user is asked which version to
+    /// keep. Nothing is checked while a question is open.
+    pub fn check_outside(&mut self) -> Outcome {
+        if self.asking {
+            return Outcome::default();
+        }
+        let Some(disk) = self.changed_outside() else {
+            return Outcome::default();
+        };
+        if self.drafts.deadline().is_none() {
+            return self.replace(disk);
+        }
+        let Some(id) = self.drafts.current_id() else {
+            return Outcome::default();
+        };
+        self.asking = true;
+        Outcome {
+            effects: vec![Effect::AskOutsideEdit(Question {
+                epoch: self.epoch,
+                id: id.to_owned(),
+                disk,
+            })],
+            deadline: None,
+        }
+    }
+
+    /// The user answered `question`. The answer is about the pending edit
+    /// to the draft as it was, and the file's text when asked: it is
+    /// ignored if the draft was left, the edit was saved meanwhile, or the
+    /// file changed again, and the next check starts over.
+    pub fn answer(&mut self, question: Question, choice: Choice) -> Outcome {
+        self.asking = false;
+        if question.epoch != self.epoch
+            || self.drafts.current_id() != Some(question.id.as_str())
+            || self.drafts.deadline().is_none()
+            || self.drafts.changed_on_disk().ok().flatten().as_ref() != Some(&question.disk)
+        {
+            return Outcome::default();
+        }
+        match choice {
+            Choice::UseNew => self.replace(question.disk),
+            Choice::KeepMine => {
+                self.drafts.adopt(question.disk);
+                self.flush().ok();
+                Outcome::default()
+            }
+            Choice::Dismissed => Outcome::default(),
+        }
+    }
+
+    /// An agent wrote `text` to draft `id`'s file at `at`. Records the edit
+    /// its turn made, then shows the text if `id` is selected and has no
+    /// pending edit, else counts the write as the draft's activity.
+    ///
+    /// Returns whether the turn was recorded, which a failure to save the
+    /// history leaves for the turn's next write.
+    pub fn agent_wrote(
+        &mut self,
+        id: &str,
+        text: &str,
+        at: DateTime<Utc>,
+    ) -> (Result<Recorded>, Outcome) {
+        let current = self.drafts.current_id() == Some(id);
+        let recorded = self.turns.agent_wrote(
+            self.drafts.store(),
+            id,
+            text,
+            at,
+            current.then_some(&mut self.log),
+        );
+        if !current {
+            if let Err(err) = self.drafts.touched(id, text) {
+                eprintln!("draftmux: recording the agent's edit: {err:#}");
+            }
+            return (recorded, Outcome::default());
+        }
+        // A pending edit is asked about by the next check.
+        let outcome = match self.changed_outside() {
+            Some(disk) if self.drafts.deadline().is_none() => self.replace(disk),
+            _ => Outcome::default(),
+        };
+        (recorded, outcome)
+    }
+
+    /// The selected draft's file text when it changed outside the editor,
+    /// counted as the draft's activity. A file that can't be read is
+    /// reported by the next save.
+    fn changed_outside(&mut self) -> Option<String> {
+        let id = self.drafts.current_id()?.to_owned();
+        let disk = self.drafts.changed_on_disk().ok().flatten()?;
+        if let Err(err) = self.drafts.touched(&id, &disk) {
+            eprintln!("draftmux: recording the outside edit: {err:#}");
+        }
+        Some(disk)
+    }
+
+    /// Takes `disk`, which the file holds, as the editor's text.
+    fn replace(&mut self, disk: String) -> Outcome {
+        self.drafts.adopt(disk.clone());
+        Outcome {
+            effects: vec![Effect::ReplaceText {
+                epoch: self.epoch,
+                text: disk,
+            }],
+            deadline: None,
+        }
     }
 
     fn due(&self) -> Outcome {

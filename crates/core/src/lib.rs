@@ -6,5 +6,6 @@
 
 pub mod drafts;
 pub mod history;
+pub mod outside;
 pub mod session;
 pub mod text;

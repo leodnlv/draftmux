@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
 use draftmux_core::history::{EditLog, Recorded};
+use draftmux_core::outside::{Choice, Question};
 use draftmux_core::session::{Effect, Epoch, Outcome, Session};
 use draftmux_core::text::normalize_line_endings;
 use draftmux_storage::{History, NewDraft, Store, Target};
@@ -17,14 +18,14 @@ pub struct Script {
     root: TempDir,
     pub store: Store,
     pub session: Session,
-    /// The selected draft's loaded log.
-    pub log: EditLog,
     pub editor: FakeEditor,
     /// The armed autosave timer: the selection it was armed in, and when it
     /// fires.
     pub timer: Option<(Epoch, Instant)>,
     /// Prompts sent to the agent.
     pub prompts: Vec<(String, Result<String, String>)>,
+    /// Questions asked about outside edits, oldest first.
+    pub questions: Vec<Question>,
     /// `meta.json` as it was before [`Script::break_meta`].
     saved_meta: Option<Vec<u8>>,
     t0: DateTime<Utc>,
@@ -52,10 +53,10 @@ impl Script {
             root,
             session: Session::new(store.clone()),
             store,
-            log: EditLog::default(),
             editor: FakeEditor::default(),
             timer: None,
             prompts: Vec::new(),
+            questions: Vec::new(),
             saved_meta: None,
             t0: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
             i0: Instant::now(),
@@ -92,16 +93,22 @@ impl Script {
     pub fn apply(&mut self, outcome: Outcome) {
         for effect in outcome.effects {
             match effect {
-                Effect::LoadText { epoch, text } => {
+                Effect::LoadText { epoch, text } | Effect::ReplaceText { epoch, text } => {
                     self.editor.load(&text);
                     self.session.loaded(epoch, &self.editor.text);
                 }
                 Effect::Prompt { text, saved } => self.prompts.push((text, saved)),
+                Effect::AskOutsideEdit(question) => self.questions.push(question),
             }
         }
         if let Some(deadline) = outcome.deadline {
             self.timer = Some((self.session.epoch(), deadline));
         }
+    }
+
+    /// The selected draft's loaded log.
+    pub fn log(&self) -> &EditLog {
+        self.session.log()
     }
 
     /// The selected draft's id.
@@ -142,7 +149,7 @@ impl Script {
         id
     }
 
-    /// Selects draft `id`: loads its text into the editor and its log.
+    /// Selects draft `id`: loads its text into the editor.
     pub fn select(&mut self, id: &str) {
         self.try_select(id).unwrap();
     }
@@ -152,7 +159,6 @@ impl Script {
         let outcome = self.session.select(id)?;
         self.timer = None;
         self.apply(outcome);
-        self.log = EditLog::load(&self.store, id);
         Ok(())
     }
 
@@ -160,7 +166,6 @@ impl Script {
         let outcome = self.session.deselect();
         self.timer = None;
         self.apply(outcome);
-        self.log = EditLog::default();
     }
 
     /// The user sends `message` to the selected draft's agent, which starts
@@ -177,24 +182,11 @@ impl Script {
     }
 
     /// The app sees the agent's write to draft `id`: it reads the file and
-    /// records the turn, then shows the text if the draft is selected.
+    /// reports it to the session.
     pub fn observe_write(&mut self, id: &str) -> anyhow::Result<Recorded> {
         let text = std::fs::read_to_string(self.draft_path(id)).unwrap();
-        let current = self.selected().as_deref() == Some(id);
-        let at = self.at();
-        let recorded = self.session.turns_mut().agent_wrote(
-            &self.store,
-            id,
-            &text,
-            at,
-            current.then_some(&mut self.log),
-        );
-        if current {
-            self.session.drafts_mut().adopt(text.clone());
-            self.editor.load(&text);
-            let epoch = self.session.epoch();
-            self.session.loaded(epoch, &self.editor.text);
-        }
+        let (recorded, outcome) = self.session.agent_wrote(id, &text, self.at());
+        self.apply(outcome);
         recorded
     }
 
@@ -223,6 +215,24 @@ impl Script {
     /// Changes draft `id`'s file the way a program outside the app would.
     pub fn write_outside(&self, id: &str, text: &str) {
         std::fs::write(self.draft_path(id), text).unwrap();
+    }
+
+    /// The app's periodic look at the selected draft's file.
+    pub fn check_outside(&mut self) {
+        let outcome = self.session.check_outside();
+        self.apply(outcome);
+    }
+
+    /// The user answers the oldest open question with `choice`.
+    pub fn answer(&mut self, choice: Choice) {
+        let question = self.questions.remove(0);
+        self.answer_with(question, choice);
+    }
+
+    /// The user answers `question` with `choice`.
+    pub fn answer_with(&mut self, question: Question, choice: Choice) {
+        let outcome = self.session.answer(question, choice);
+        self.apply(outcome);
     }
 
     /// Makes saving draft `id` fail after its text is written, by making
@@ -262,8 +272,8 @@ impl Script {
         self.store = Store::new(self.root.path());
         self.session = Session::new(self.store.clone());
         self.editor = FakeEditor::default();
-        self.log = EditLog::default();
         self.timer = None;
+        self.questions.clear();
     }
 
     pub fn text(&self, id: &str) -> String {

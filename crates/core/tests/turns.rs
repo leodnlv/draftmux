@@ -27,8 +27,8 @@ fn first_write_records_one_edit_and_later_writes_join_it() {
     assert_eq!(history.edits[0].before, "Hello world\n");
     assert_eq!(history.edits[0].prompt, "Make it friendlier");
     assert_eq!(history.edits[0].at, at);
-    assert_eq!(s.log.edits(), history.edits);
-    assert_eq!(s.log.since(), 0);
+    assert_eq!(s.log().edits(), history.edits);
+    assert_eq!(s.log().since(), 0);
     assert_eq!(s.text(&id), "Hi there, world\n");
 
     // The next turn adds an edit, and the comparison starts before it.
@@ -37,7 +37,7 @@ fn first_write_records_one_edit_and_later_writes_join_it() {
     let history = s.history(&id);
     assert_eq!(history.edits.len(), 2);
     assert_eq!(history.edits[1].before, "Hi there, world\n");
-    assert_eq!(s.log.since(), 1);
+    assert_eq!(s.log().since(), 1);
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn the_first_draft_of_an_empty_draft_is_not_an_edit() {
         Recorded::Ignored
     );
     assert_eq!(s.history_bytes(&id), None);
-    assert!(s.log.edits().is_empty());
+    assert!(s.log().edits().is_empty());
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn a_failed_history_save_records_the_turn_on_its_next_write() {
     s.break_history_save(&id);
 
     assert!(s.agent_writes(&id, "Two\n").is_err());
-    assert!(s.log.edits().is_empty());
+    assert!(s.log().edits().is_empty());
     assert_eq!(s.text(&id), "Two\n");
 
     s.fix_history_save(&id);
@@ -97,7 +97,7 @@ fn a_failed_history_save_records_the_turn_on_its_next_write() {
     let history = s.history(&id);
     assert_eq!(history.edits.len(), 1);
     assert_eq!(history.edits[0].before, "One\n");
-    assert_eq!(s.log.edits(), history.edits);
+    assert_eq!(s.log().edits(), history.edits);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn a_write_to_an_unselected_draft_extends_its_saved_history() {
         .map(|edit| edit.before.as_str())
         .collect();
     assert_eq!(befores, ["A one\n", "A two\n"]);
-    assert!(s.log.edits().is_empty());
+    assert!(s.log().edits().is_empty());
     assert_eq!(s.history_bytes(&b), None);
 }
 
@@ -151,8 +151,8 @@ fn a_write_while_the_history_is_unreadable_leaves_the_file_alone() {
     assert_eq!(history.edits.len(), 2);
     assert_eq!(history.edits[1].before, "One\n");
     assert_eq!(history.kept, ["k"]);
-    assert_eq!(s.log.history(), &history);
-    assert_eq!(s.log.since(), 1);
+    assert_eq!(s.log().history(), &history);
+    assert_eq!(s.log().since(), 1);
 }
 
 #[test]

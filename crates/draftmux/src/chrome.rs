@@ -21,6 +21,9 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::Utc;
+use draftmux_core::history::Recorded;
+use draftmux_core::outside::{Choice, Question};
 use draftmux_core::session::{Effect, Outcome, Session};
 use draftmux_storage::{Store, Target};
 use editor::{Editor, EditorEvent, Redo, Undo};
@@ -170,9 +173,6 @@ pub struct Chrome {
     scrollbars: [ScrollbarState; 3],
     /// Wakes up when the pending edit is due to be saved.
     autosave: Task<()>,
-    /// The user is being asked whether to keep their edits over a change
-    /// made to the draft's file outside the editor.
-    asking_outside_edit: bool,
     _clock: Task<()>,
     _watch_draft: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -579,7 +579,6 @@ impl Chrome {
             preview_scroll,
             scrollbars: Default::default(),
             autosave: Task::ready(()),
-            asking_outside_edit: false,
             _clock: clock,
             _watch_draft: watch_draft,
             _subscriptions: subscriptions,
@@ -711,7 +710,7 @@ impl Chrome {
             self.set_target_markup(target, cx);
         }
         self.sync_selection_draft(cx);
-        self.apply(outcome, cx);
+        self.apply(outcome, None, cx);
         self.load_changes(cx);
         let draft = self.session.drafts().current().cloned();
         self.chat
@@ -842,7 +841,7 @@ impl Chrome {
         self.autosave = Task::ready(());
         self.set_preview(None, cx);
         let outcome = self.session.deselect();
-        self.apply(outcome, cx);
+        self.apply(outcome, None, cx);
         self.load_changes(cx);
         self.chat.update(cx, |chat, cx| chat.set_draft(None, cx));
         self.sync_selection_draft(cx);
@@ -853,7 +852,7 @@ impl Chrome {
             ChatEvent::Send(text) => {
                 debug_assert_eq!(self.session.text(), self.editor.read(cx).text());
                 let outcome = self.session.send(text.clone(), crate::chat::message(text));
-                self.apply(outcome, cx);
+                self.apply(outcome, None, cx);
             }
             ChatEvent::FirstDraft(text) => {
                 let Some(id) = self.session.drafts().current_id().map(str::to_owned) else {
@@ -879,14 +878,16 @@ impl Chrome {
                 }
             }
             ChatEvent::DraftWritten { id, text } => {
-                self.record_edit(id, text, cx);
-                if self.session.drafts().current_id() == Some(id.as_str()) {
-                    // Shown now rather than on the next poll. Nothing is
-                    // pending while the agent runs, so there's no conflict.
-                    self.reload_outside_edit(cx);
-                } else if let Err(err) = self.session.drafts_mut().touched(id, text) {
-                    eprintln!("draftmux: recording the agent's edit: {err:#}");
+                let current = self.session.drafts().current_id() == Some(id.as_str());
+                // Shown now rather than on the next poll. Nothing is pending
+                // while the agent runs, so there's no conflict.
+                let (recorded, outcome) = self.session.agent_wrote(id, text, Utc::now());
+                match recorded {
+                    Ok(Recorded::Added) if current => self.edit_recorded(cx),
+                    Ok(_) => {}
+                    Err(err) => eprintln!("draftmux: saving the edit history: {err:#}"),
                 }
+                self.apply(outcome, None, cx);
             }
             ChatEvent::Running(running) => {
                 let running = *running;
@@ -928,7 +929,7 @@ impl Chrome {
             return;
         };
         let outcome = self.session.edited(text.clone(), Instant::now());
-        self.apply(outcome, cx);
+        self.apply(outcome, None, cx);
         self.sync_review(cx);
         self.preview_selection
             .update(cx, |selection, cx| selection.clear(cx));
@@ -1111,47 +1112,22 @@ impl Chrome {
         });
     }
 
-    /// Counts a change made to the selected draft's file outside the editor
-    /// as activity, and loads it into the editor when no edit is pending.
-    /// Returns the file's text when an edit is pending instead.
-    fn reload_outside_edit(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let id = self.session.drafts().current_id()?.to_owned();
-        // A file that can't be read is reported by the next save.
-        let disk = self.session.drafts().changed_on_disk().ok().flatten()?;
-        if let Err(err) = self.session.drafts_mut().touched(&id, &disk) {
-            eprintln!("draftmux: recording the outside edit: {err:#}");
-        }
-        if self.session.drafts().deadline().is_some() {
-            return Some(disk);
-        }
-        self.load_outside_edit(disk, cx);
-        cx.notify();
-        None
-    }
-
-    fn load_outside_edit(&mut self, disk: String, cx: &mut Context<Self>) {
-        self.session.drafts_mut().adopt(disk.clone());
-        self.editor.update(cx, |editor, cx| {
-            crate::changes::replace_all(editor, &disk, cx)
-        });
-        // The file already holds the text, so loading isn't an edit to save.
-        let epoch = self.session.epoch();
-        self.session.loaded(epoch, self.editor.read(cx).text());
-    }
-
     /// Reloads an outside change to the selected draft, or asks which
     /// version to keep when the user has unsaved edits.
     fn check_outside_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.asking_outside_edit {
-            return;
+        let outcome = self.session.check_outside();
+        if !outcome.effects.is_empty() {
+            self.apply(outcome, Some(window), cx);
+            cx.notify();
         }
-        let Some(disk) = self.reload_outside_edit(cx) else {
-            return;
-        };
-        let Some(id) = self.session.drafts().current_id().map(str::to_owned) else {
-            return;
-        };
-        self.asking_outside_edit = true;
+    }
+
+    fn ask_outside_edit(
+        &mut self,
+        question: Question,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let answer = window.prompt(
             PromptLevel::Warning,
             "This draft was changed outside Draftmux",
@@ -1166,38 +1142,25 @@ impl Chrome {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            let answer = answer.await.ok();
+            let choice = match answer.await.ok() {
+                Some(0) => Choice::UseNew,
+                Some(1) => Choice::KeepMine,
+                _ => Choice::Dismissed,
+            };
             this.update(cx, |this, cx| {
-                this.asking_outside_edit = false;
-                // The answer is about these edits to this draft and this
-                // version of it. If a retried save wrote the edits meanwhile,
-                // or the file changed again, the next poll starts over.
-                let drafts = this.session.drafts();
-                if drafts.current_id() != Some(id.as_str())
-                    || drafts.deadline().is_none()
-                    || drafts.changed_on_disk().ok().flatten().as_ref() != Some(&disk)
-                {
-                    return;
-                }
-                match answer {
-                    Some(0) => this.load_outside_edit(disk, cx),
-                    Some(1) => {
-                        this.session.drafts_mut().adopt(disk);
-                        this.session.flush().ok();
-                    }
-                    _ => {}
-                }
+                let outcome = this.session.answer(question, choice);
+                this.apply(outcome, None, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
-        cx.notify();
     }
 
     /// Carries out `outcome`'s effects in order, then arms the autosave
-    /// timer for its deadline.
-    fn apply(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
+    /// timer for its deadline. Only [`Session::check_outside`] asks a
+    /// question, which needs the `window`.
+    fn apply(&mut self, outcome: Outcome, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
         for effect in outcome.effects {
             match effect {
                 Effect::LoadText { epoch, text } => {
@@ -1205,9 +1168,21 @@ impl Chrome {
                         .update(cx, |editor, cx| editor.set_text(&text, cx));
                     self.session.loaded(epoch, self.editor.read(cx).text());
                 }
+                Effect::ReplaceText { epoch, text } => {
+                    self.editor.update(cx, |editor, cx| {
+                        crate::changes::replace_all(editor, &text, cx)
+                    });
+                    self.session.loaded(epoch, self.editor.read(cx).text());
+                }
                 Effect::Prompt { text, saved } => {
                     self.chat
                         .update(cx, |chat, cx| chat.prompt(text, saved, cx));
+                }
+                Effect::AskOutsideEdit(question) => {
+                    let window = window
+                        .as_deref_mut()
+                        .expect("a question is asked only with the window");
+                    self.ask_outside_edit(question, window, cx);
                 }
             }
         }
@@ -1221,7 +1196,7 @@ impl Chrome {
                 .await;
             this.update(cx, |this, cx| {
                 let outcome = this.session.wake(epoch, Instant::now());
-                this.apply(outcome, cx);
+                this.apply(outcome, None, cx);
                 cx.notify();
             })
             .ok();

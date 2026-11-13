@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
-use draftmux_core::history::{ChangeKey, EditLog, Recorded};
+use draftmux_core::history::{ChangeKey, EditLog};
 use draftmux_storage::Target;
 use gpui::{
     AnimationExt, AnyElement, App, Context, Entity, Focusable, FontWeight, KeyBinding, MouseButton,
@@ -64,10 +64,9 @@ pub(super) fn init(cx: &mut App) {
     ]);
 }
 
-/// The selected draft's edit history and the part of it being compared.
+/// The comparison of the selected draft with its edit history.
 #[derive(Default)]
 pub(super) struct Changes {
-    log: EditLog,
     compared: Option<Rc<Compared>>,
     /// Changes in the comparison that aren't kept.
     unreviewed: usize,
@@ -81,10 +80,11 @@ pub(super) struct Compared {
 }
 
 impl Changes {
-    /// `text` compared with the text before edit [`EditLog::since`],
-    /// reusing the last comparison while neither changed.
-    fn compare(&mut self, text: &str) -> Option<Rc<Compared>> {
-        let base = &self.log.edits().get(self.log.since())?.before;
+    /// `text` compared with the text before `log`'s edit
+    /// [`EditLog::since`], reusing the last comparison while neither
+    /// changed.
+    fn compare(&mut self, log: &EditLog, text: &str) -> Option<Rc<Compared>> {
+        let base = &log.edits().get(log.since())?.before;
         if let Some(compared) = &self.compared
             && compared.base == *base
             && compared.text == text
@@ -99,24 +99,25 @@ impl Changes {
         self.compared = Some(compared.clone());
         Some(compared)
     }
+}
 
-    fn key<'a>(&self, hunk: &'a Hunk) -> ChangeKey<'a> {
-        ChangeKey {
-            since: self.log.since(),
-            old_start: hunk.old.start,
-            removed: &hunk.removed,
-            added: &hunk.added,
-        }
+/// `hunk`'s key in `log`, for the comparison from edit [`EditLog::since`].
+fn key<'a>(log: &EditLog, hunk: &'a Hunk) -> ChangeKey<'a> {
+    ChangeKey {
+        since: log.since(),
+        old_start: hunk.old.start,
+        removed: &hunk.removed,
+        added: &hunk.added,
     }
+}
 
-    fn is_kept(&self, hunk: &Hunk) -> bool {
-        self.log.is_kept(&self.key(hunk))
-    }
+fn is_kept(log: &EditLog, hunk: &Hunk) -> bool {
+    log.is_kept(&key(log, hunk))
+}
 
-    fn keep(&mut self, hunk: &Hunk, kept: bool) {
-        let key = self.key(hunk);
-        self.log.keep(&key, kept);
-    }
+fn keep(log: &mut EditLog, hunk: &Hunk, kept: bool) {
+    let key = key(log, hunk);
+    log.keep(&key, kept);
 }
 
 /// Review, while it is open.
@@ -155,50 +156,29 @@ struct Marks {
 }
 
 impl Chrome {
-    /// Loads the selected draft's history and leaves review.
+    /// Compares the newly selected draft with its history and leaves
+    /// review.
     pub(super) fn load_changes(&mut self, cx: &mut Context<Self>) {
-        self.changes = Changes {
-            log: match self.session.drafts().current_id() {
-                Some(id) => EditLog::load(&self.store, id),
-                None => EditLog::default(),
-            },
-            ..Changes::default()
-        };
+        self.changes = Changes::default();
         self.review = None;
         self.sync_review(cx);
     }
 
-    /// Records the edit an agent turn made with its first write to draft
-    /// `id`, which now reads `text`.
-    pub(super) fn record_edit(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
-        let current = self.session.drafts().current_id() == Some(id);
-        let log = current.then_some(&mut self.changes.log);
-        match self
-            .session
-            .turns_mut()
-            .agent_wrote(&self.store, id, text, Utc::now(), log)
-        {
-            Ok(Recorded::Added) => {}
-            Ok(Recorded::Ignored) => return,
-            Err(err) => {
-                eprintln!("draftmux: saving the edit history: {err:#}");
-                return;
-            }
+    /// An agent turn added an edit to the selected draft's history, which
+    /// the comparison now starts from.
+    pub(super) fn edit_recorded(&mut self, cx: &mut Context<Self>) {
+        if let Some(review) = &mut self.review {
+            review.selected = None;
+            review.menu_open = false;
         }
-        if current {
-            if let Some(review) = &mut self.review {
-                review.selected = None;
-                review.menu_open = false;
-            }
-            self.sync_review(cx);
-        }
+        self.sync_review(cx);
     }
 
     fn save_kept(&self) {
         let Some(id) = self.session.drafts().current_id() else {
             return;
         };
-        if let Err(err) = self.changes.log.save(&self.store, id) {
+        if let Err(err) = self.session.log().save(&self.store, id) {
             eprintln!("draftmux: saving the reviewed changes: {err:#}");
         }
     }
@@ -207,13 +187,13 @@ impl Chrome {
     /// with the draft and the review.
     pub(super) fn sync_review(&mut self, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).text().to_owned();
-        let compared = self.changes.compare(&text);
+        let compared = self.changes.compare(self.session.log(), &text);
         self.changes.unreviewed = compared.as_ref().map_or(0, |compared| {
             compared
                 .comparison
                 .hunks
                 .iter()
-                .filter(|hunk| !self.changes.is_kept(hunk))
+                .filter(|hunk| !is_kept(self.session.log(), hunk))
                 .count()
         });
         let target = self
@@ -253,7 +233,7 @@ impl Chrome {
                     .comparison
                     .hunks
                     .iter()
-                    .map(|hunk| self.changes.is_kept(hunk))
+                    .map(|hunk| is_kept(self.session.log(), hunk))
                     .collect();
                 let marks = Marks {
                     selected: review.selected,
@@ -340,7 +320,7 @@ impl Chrome {
     }
 
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changes.log.edits().is_empty() || self.session.drafts().current().is_none() {
+        if self.session.log().edits().is_empty() || self.session.drafts().current().is_none() {
             return;
         }
         self.show_preview = true;
@@ -449,8 +429,8 @@ impl Chrome {
         }
         // Reverting rejects this change, so it is asked about again if it
         // comes back.
-        if self.changes.is_kept(&hunk) {
-            self.changes.keep(&hunk, false);
+        if is_kept(self.session.log(), &hunk) {
+            keep(self.session.log_mut(), &hunk, false);
             self.save_kept();
         }
         // One undoable edit, as if typed.
@@ -476,13 +456,8 @@ impl Chrome {
     /// Replaces the draft with the before column, dropping every edit
     /// since, the agent's and the user's.
     fn restore_before(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(base) = self
-            .changes
-            .log
-            .edits()
-            .get(self.changes.log.since())
-            .map(|edit| edit.before.clone())
-        else {
+        let log = self.session.log();
+        let Some(base) = log.edits().get(log.since()).map(|edit| edit.before.clone()) else {
             return;
         };
         if self.editor.read(cx).is_read_only() {
@@ -503,16 +478,16 @@ impl Chrome {
         let Some(hunk) = self.selected_hunk().cloned() else {
             return;
         };
-        let keep = !self.changes.is_kept(&hunk);
-        self.changes.keep(&hunk, keep);
+        let kept = !is_kept(self.session.log(), &hunk);
+        keep(self.session.log_mut(), &hunk, kept);
         self.save_kept();
-        let next = keep
+        let next = kept
             .then(|| {
                 let hunks = &self.comparison()?.hunks;
                 let at = self.review.as_ref()?.selected?;
                 (1..hunks.len())
                     .map(|step| (at + step) % hunks.len())
-                    .find(|&ix| !self.changes.is_kept(&hunks[ix]))
+                    .find(|&ix| !is_kept(self.session.log(), &hunks[ix]))
             })
             .flatten();
         match next {
@@ -531,7 +506,7 @@ impl Chrome {
             .map(|comparison| comparison.hunks.clone())
             .unwrap_or_default();
         for hunk in &hunks {
-            self.changes.keep(hunk, true);
+            keep(self.session.log_mut(), hunk, true);
         }
         self.save_kept();
         self.close_review(window, cx);
@@ -546,7 +521,7 @@ impl Chrome {
     }
 
     fn compare_since(&mut self, since: usize, cx: &mut Context<Self>) {
-        self.changes.log.set_since(since);
+        self.session.log_mut().set_since(since);
         if let Some(review) = &mut self.review {
             review.menu_open = false;
         }
@@ -586,7 +561,7 @@ impl Chrome {
     /// comparison with a change of its own in it.
     fn change_origin(&self, hunk: usize, cx: &App) -> Option<String> {
         let hunk = self.comparison()?.hunks.get(hunk)?;
-        let edits = self.changes.log.edits();
+        let edits = self.session.log().edits();
         let text = self.editor.read(cx).text();
         let made = |edit: &Hunk| {
             let (added, removed) = (edit.added.trim(), edit.removed.trim());
@@ -596,7 +571,7 @@ impl Chrome {
         for (ix, edit) in edits
             .iter()
             .enumerate()
-            .skip(self.changes.log.since())
+            .skip(self.session.log().since())
             .rev()
         {
             let after = edits.get(ix + 1).map_or(text, |next| next.before.as_str());
@@ -618,7 +593,7 @@ impl Chrome {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let edits = self.changes.log.edits().len();
+        let edits = self.session.log().edits().len();
         if edits == 0 {
             return None;
         }
@@ -700,8 +675,8 @@ impl Chrome {
     /// The before column's version, in a sentence: the text before the
     /// compared edits.
     fn before_name(&self) -> String {
-        let edits = self.changes.log.edits();
-        let since = self.changes.log.since();
+        let edits = self.session.log().edits();
+        let since = self.session.log().since();
         if since + 1 >= edits.len() {
             let prompt = edits.get(since).map_or("", |edit| edit.prompt.as_str());
             format!("before “{}”", clip(prompt, 30))
@@ -805,7 +780,7 @@ impl Chrome {
         let selected = review.and_then(|review| review.selected);
         let kept = self
             .selected_hunk()
-            .is_some_and(|hunk| self.changes.is_kept(hunk));
+            .is_some_and(|hunk| is_kept(self.session.log(), hunk));
         let menu_open = review.is_some_and(|review| review.menu_open);
         let range = div()
             .id("review-range")
@@ -828,7 +803,7 @@ impl Chrome {
                     cx.notify();
                 }
             }))
-            .child(self.changes.log.range_name())
+            .child(self.session.log().range_name())
             .child(
                 svg()
                     .path(CHEVRON_ICON)
@@ -995,7 +970,7 @@ impl Chrome {
     /// to the before column.
     fn range_menu(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let now = Utc::now();
-        let edits = self.changes.log.edits();
+        let edits = self.session.log().edits();
         let mut items = vec![MenuItem {
             label: "Show Changes Since".into(),
             checked: false,
@@ -1006,7 +981,7 @@ impl Chrome {
         }];
         items.extend(edits.iter().enumerate().rev().map(|(ix, edit)| MenuItem {
             label: format!("“{}”", clip(&edit.prompt, 34)).into(),
-            checked: ix == self.changes.log.since(),
+            checked: ix == self.session.log().since(),
             enabled: true,
             action: Some(Some(ix)),
             detail: Some(relative_time(edit.at, now).into()),
@@ -1166,15 +1141,15 @@ mod tests {
 
     #[test]
     fn keeping_records_the_change_once_and_unkeeping_forgets_it() {
-        let mut changes = Changes::default();
+        let mut log = EditLog::default();
         let hunk = compare::compare("a\n", "b\n").hunks[0].clone();
-        changes.keep(&hunk, true);
-        changes.keep(&hunk, true);
-        assert!(changes.is_kept(&hunk));
-        assert_eq!(changes.log.history().kept.len(), 1);
-        changes.keep(&hunk, false);
-        assert!(!changes.is_kept(&hunk));
-        assert!(changes.log.history().kept.is_empty());
+        keep(&mut log, &hunk, true);
+        keep(&mut log, &hunk, true);
+        assert!(is_kept(&log, &hunk));
+        assert_eq!(log.history().kept.len(), 1);
+        keep(&mut log, &hunk, false);
+        assert!(!is_kept(&log, &hunk));
+        assert!(log.history().kept.is_empty());
     }
 
     const BEFORE: &str = include_str!("../../fixtures/review/word-replaced-twice.before.md");
@@ -1182,52 +1157,52 @@ mod tests {
 
     #[test]
     fn keeping_a_change_leaves_identical_ones_elsewhere_unkept() {
-        let mut changes = Changes::default();
+        let mut log = EditLog::default();
         let hunks = compare::compare(BEFORE, AFTER).hunks;
         assert_eq!(hunks.len(), 2);
         assert_eq!(
             (&hunks[0].removed, &hunks[0].added),
             (&hunks[1].removed, &hunks[1].added)
         );
-        changes.keep(&hunks[1], true);
-        assert!(!changes.is_kept(&hunks[0]));
-        assert!(changes.is_kept(&hunks[1]));
+        keep(&mut log, &hunks[1], true);
+        assert!(!is_kept(&log, &hunks[0]));
+        assert!(is_kept(&log, &hunks[1]));
     }
 
     #[test]
     fn a_kept_change_stays_kept_through_edits_elsewhere() {
-        let mut changes = Changes::default();
-        changes.keep(&compare::compare(BEFORE, AFTER).hunks[1], true);
+        let mut log = EditLog::default();
+        keep(&mut log, &compare::compare(BEFORE, AFTER).hunks[1], true);
         // Typed between the two changes, moving the kept one in the draft.
         let edited = AFTER.replace("Unrelated text", "Some unrelated text");
         let swaps: Vec<bool> = compare::compare(BEFORE, &edited)
             .hunks
             .iter()
             .filter(|hunk| hunk.added == "a")
-            .map(|hunk| changes.is_kept(hunk))
+            .map(|hunk| is_kept(&log, hunk))
             .collect();
         assert_eq!(swaps, [false, true]);
     }
 
     #[test]
     fn reverting_a_kept_change_does_not_pass_the_keep_to_its_twin() {
-        let mut changes = Changes::default();
-        changes.keep(&compare::compare(BEFORE, AFTER).hunks[0], true);
+        let mut log = EditLog::default();
+        keep(&mut log, &compare::compare(BEFORE, AFTER).hunks[0], true);
         let reverted = AFTER.replacen("a cache", "the cache", 1);
         let hunks = compare::compare(BEFORE, &reverted).hunks;
         assert_eq!(hunks.len(), 1);
-        assert!(!changes.is_kept(&hunks[0]));
+        assert!(!is_kept(&log, &hunks[0]));
     }
 
     #[test]
     fn keeps_belong_to_the_edit_they_were_compared_from() {
-        let mut changes = Changes::default();
+        let mut log = EditLog::default();
         let hunk = compare::compare(BEFORE, AFTER).hunks[0].clone();
-        changes.log.set_since(1);
-        changes.keep(&hunk, true);
-        changes.log.set_since(0);
-        assert!(!changes.is_kept(&hunk));
-        changes.log.set_since(1);
-        assert!(changes.is_kept(&hunk));
+        log.set_since(1);
+        keep(&mut log, &hunk, true);
+        log.set_since(0);
+        assert!(!is_kept(&log, &hunk));
+        log.set_since(1);
+        assert!(is_kept(&log, &hunk));
     }
 }
