@@ -1,12 +1,13 @@
 //! A cached rendering boundary for the preview's fixed-size viewport.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use draftmux_storage::Target;
 use gpui::{
     AnyElement, App, Bounds, Context, DispatchPhase, Entity, IntoElement, MouseMoveEvent, Pixels,
-    Point, Render, ScrollHandle, Window, canvas, div, prelude::*, px,
+    Point, Render, ScrollHandle, WeakEntity, Window, canvas, div, point, prelude::*, px,
 };
 use markup::Document;
 
@@ -32,24 +33,49 @@ pub(super) struct Preview {
     pub writing: bool,
     /// While reviewing, the redline shown instead of the document.
     pub redline: Option<PreviewRedline>,
+    /// Scrolls along with this one, to the same fraction of its height.
+    pub partner: Option<WeakEntity<Preview>>,
+    pub marks: MarkState,
     pub _selection: gpui::Subscription,
 }
 
-/// A redline of the draft ([`crate::compare::redline`]) parsed for the
+/// What the redline's marks reported in the last frame, and the scrolling
+/// that follows from it.
+#[derive(Default)]
+pub(super) struct MarkState {
+    /// The change under the pointer during the current mouse move.
+    hit: Rc<Cell<Option<(usize, Point<Pixels>)>>>,
+    /// Where each change's first mark was laid out.
+    placed: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    /// The last reveal request handled, and how many frames it has taken.
+    revealed: Option<(u64, u8)>,
+    /// The scroll offset this preview last drew at.
+    offset: Point<Pixels>,
+    pointer_inside: Rc<Cell<bool>>,
+}
+
+/// A redline of the draft ([`crate::compare::marked`]) parsed for the
 /// target, and how its changes are drawn.
 pub(super) struct PreviewRedline {
     pub document: Rc<Document>,
     pub selected: Option<usize>,
+    pub hovered: Option<usize>,
     /// Whether each change is kept.
     pub kept: Vec<bool>,
-    pub handlers: Rc<MarkHandlers>,
-    /// The change under the pointer during the current mouse move, set by
-    /// the marks' hover handlers.
-    pub hit: Rc<Cell<Option<(usize, Point<Pixels>)>>>,
+    /// A change to scroll into view, with a serial that differs for each
+    /// request.
+    pub reveal: Option<(usize, u64)>,
+    pub on_click: Rc<dyn Fn(usize, &mut Window, &mut App)>,
     /// Told after every mouse move which change, if any, is under the
     /// pointer, and where the pointer is.
     pub on_hover: Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut Window, &mut App)>,
 }
+
+/// Frames a reveal may take: one to bring the change's block on screen,
+/// then one to place the change itself.
+const REVEAL_FRAMES: u8 = 3;
+/// Space kept between a revealed change and the viewport's edge.
+const REVEAL_MARGIN: Pixels = px(48.);
 
 pub(super) struct FieldCopied(pub String);
 impl gpui::EventEmitter<FieldCopied> for Preview {}
@@ -57,11 +83,19 @@ impl gpui::EventEmitter<FieldCopied> for Preview {}
 impl Render for Preview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let hover = self.redline.as_ref().map(|redline| {
+            (
+                self.marks.hit.clone(),
+                redline.on_hover.clone(),
+                self.marks.pointer_inside.clone(),
+            )
+        });
         canvas(
             move |bounds, window, cx| {
                 let mut body = entity.update(cx, |this, cx| this.body(bounds, window, cx));
                 body.layout_as_root(bounds.size.into(), window, cx);
                 body.prepaint_at(bounds.origin, window, cx);
+                entity.update(cx, |this, cx| this.scrolled(bounds, cx));
                 entity.update(cx, |this, cx| {
                     let texts = this.cache.texts();
                     this.selection
@@ -69,13 +103,109 @@ impl Render for Preview {
                 });
                 body
             },
-            |_, mut body: AnyElement, window, cx| body.paint(window, cx),
+            move |viewport, mut body: AnyElement, window, cx| {
+                // Registered before the body paints, so it hears each mouse
+                // move after the marks have reported the change under the
+                // pointer. Another preview may share the window, so it
+                // speaks for the pointer only inside this one, and as it
+                // leaves.
+                if let Some((hit, on_hover, inside)) = hover.clone() {
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let now = viewport.contains(&event.position);
+                        let hit = hit.take();
+                        if now || inside.get() {
+                            on_hover(hit.map(|(hunk, _)| (hunk, event.position)), window, cx);
+                        }
+                        inside.set(now);
+                    });
+                }
+                body.paint(window, cx)
+            },
         )
         .size_full()
     }
 }
 
 impl Preview {
+    /// After each layout: scrolls a change asked for into view, and the
+    /// partner along with any other scrolling.
+    fn scrolled(&mut self, viewport: Bounds<Pixels>, cx: &mut Context<Self>) {
+        if let Some((hunk, serial)) = self.redline.as_ref().and_then(|redline| redline.reveal) {
+            self.reveal(hunk, serial, viewport, cx);
+        }
+        let offset = self.scroll.offset();
+        if offset == self.marks.offset {
+            return;
+        }
+        self.marks.offset = offset;
+        let Some(partner) = self.partner.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        let max = self.scroll.max_offset().y;
+        let fraction = if max > px(0.) { -offset.y / max } else { 0. };
+        partner.update(cx, |partner, cx| {
+            let offset = point(
+                partner.scroll.offset().x,
+                -(partner.scroll.max_offset().y * fraction),
+            );
+            if offset != partner.marks.offset {
+                partner.scroll.set_offset(offset);
+                partner.marks.offset = offset;
+                cx.notify();
+            }
+        });
+    }
+
+    /// Scrolls change `hunk` into view: to its block first if the block is
+    /// off screen and unlaid, then to the change itself.
+    fn reveal(
+        &mut self,
+        hunk: usize,
+        serial: u64,
+        viewport: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let frames = match self.marks.revealed {
+            Some((done, frames)) if done == serial => frames,
+            _ => 0,
+        };
+        if frames >= REVEAL_FRAMES {
+            return;
+        }
+        let (top, bottom) = (
+            viewport.top() + REVEAL_MARGIN,
+            viewport.bottom() - REVEAL_MARGIN,
+        );
+        let placed = self.marks.placed.borrow().get(&hunk).copied();
+        let shift = match placed {
+            Some(mark) if mark.top() < top => top - mark.top(),
+            Some(mark) if mark.bottom() > bottom => (bottom - mark.bottom()).max(top - mark.top()),
+            Some(_) => px(0.),
+            None => match self
+                .cache
+                .top_of(|block| crate::compare::block_has_hunk(block, hunk))
+            {
+                Some(block) => top - block,
+                // Not in this version at all.
+                None => px(0.),
+            },
+        };
+        let done = placed.is_some() || shift == px(0.);
+        self.marks.revealed = Some((serial, if done { REVEAL_FRAMES } else { frames + 1 }));
+        if shift != px(0.) {
+            let offset = self.scroll.offset();
+            let y = (offset.y + shift).clamp(-self.scroll.max_offset().y, px(0.));
+            let offset = point(offset.x, y);
+            self.scroll.set_offset(offset);
+            // Its own scrolling, which the partner doesn't follow.
+            self.marks.offset = offset;
+            cx.notify();
+        }
+    }
+
     fn copy_field(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(value) = self.fields.get(key) else {
             return;
@@ -218,13 +348,17 @@ impl Preview {
         }
         // px_6 is 1.5 rem on each side of the scrolling viewport.
         let width = (bounds.size.width - window.rem_size() * 3.).max(px(0.));
+        self.marks.placed.borrow_mut().clear();
         let (body, background) = match (document, self.target) {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
                 let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
                 style.redline = self.redline.as_ref().map(|redline| {
                     let palette = &theme.palette;
+                    let hit = self.marks.hit.clone();
+                    let placed = self.marks.placed.clone();
                     Rc::new(Redline {
                         selected: redline.selected,
+                        hovered: redline.hovered,
                         kept: redline.kept.clone(),
                         colors: RedlineColors {
                             added: palette.diff_added,
@@ -232,8 +366,16 @@ impl Preview {
                             removed: palette.diff_removed,
                             removed_background: palette.removed_bg,
                             selected: palette.accent,
+                            added_point: palette.added,
+                            removed_point: palette.removed,
                         },
-                        handlers: redline.handlers.clone(),
+                        handlers: Rc::new(MarkHandlers {
+                            click: redline.on_click.clone(),
+                            hover: Rc::new(move |hunk, position| hit.set(Some((hunk, position)))),
+                            placed: Rc::new(move |hunk, bounds| {
+                                placed.borrow_mut().entry(hunk).or_insert(bounds);
+                            }),
+                        }),
                     })
                 });
                 let style = Rc::new(style);
@@ -282,23 +424,6 @@ impl Preview {
             ),
         };
 
-        let hover = self.redline.as_ref().map(|redline| {
-            let (hit, on_hover) = (redline.hit.clone(), redline.on_hover.clone());
-            // Painted before the body, so it hears each mouse move after the
-            // marks have reported the change under the pointer.
-            canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                        if phase == DispatchPhase::Bubble {
-                            let hit = hit.take();
-                            on_hover(hit.map(|(hunk, _)| (hunk, event.position)), window, cx);
-                        }
-                    });
-                },
-            )
-            .absolute()
-        });
         selectable::area(&self.selection, cx)
             .id("preview")
             .size_full()
@@ -308,7 +433,6 @@ impl Preview {
             .px_6()
             .pt_5()
             .pb_10()
-            .children(hover)
             .children(self.fields_card(cx))
             .child(body)
             .child(canvas(|_, _, _| (), move |_, _, _, _| drop(frame)).absolute())

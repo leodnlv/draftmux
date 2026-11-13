@@ -7,7 +7,6 @@
 //! the latest by default. Reviewing never rewrites the history: keeping a
 //! change only records its key, and reverting edits the draft.
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -15,20 +14,20 @@ use std::time::Duration;
 use chrono::Utc;
 use draftmux_storage::{Edit, History, Store, Target};
 use gpui::{
-    AnimationExt, AnyElement, App, Context, Focusable, FontWeight, KeyBinding, MouseButton, Pixels,
-    Point, SharedString, Task, Transformation, Window, actions, anchored, deferred, div,
-    linear_color_stop, linear_gradient, percentage, point, prelude::*, px, svg,
+    AnimationExt, AnyElement, App, Context, Entity, Focusable, FontWeight, KeyBinding, MouseButton,
+    Pixels, Point, SharedString, StyleRefinement, Task, Transformation, Window, actions, anchored,
+    deferred, div, linear_color_stop, linear_gradient, percentage, point, prelude::*, px, svg,
 };
 use markup::Document;
 
-use super::preview::PreviewRedline;
+use super::preview::{Preview, PreviewRedline};
 use super::{Chrome, shadow};
 use crate::assets::CHEVRON_ICON;
-use crate::compare::{self, Comparison, Hunk};
+use crate::compare::{self, Comparison, Hunk, Side};
 use crate::drafts::relative_time;
-use crate::inline_text::MarkHandlers;
 use crate::markup_view;
 use crate::menu::{MenuItem, menu_panel};
+use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::theme::Palette;
 
 actions!(
@@ -46,6 +45,8 @@ actions!(
 const KEY_CONTEXT: &str = "Review";
 /// The bar of review controls over the redline.
 pub(super) const BAR_HEIGHT: Pixels = px(40.);
+/// The name over each column.
+pub(super) const COLUMN_HEAD_HEIGHT: Pixels = px(28.);
 /// How long the pointer rests on a change before it is said where it came
 /// from.
 const ORIGIN_DELAY: Duration = Duration::from_millis(500);
@@ -180,8 +181,28 @@ pub(super) struct Review {
     /// it, and where the pointer was.
     origin: Option<(SharedString, Point<Pixels>)>,
     show_origin: Option<Task<()>>,
-    /// The redline and what it was made from.
-    document: Option<(Rc<Compared>, Target, Rc<Document>)>,
+    /// A change to scroll into view in both columns, with a serial for each
+    /// request.
+    reveal: Option<(usize, u64)>,
+    /// Both columns' documents and what they were made from.
+    documents: Option<Documents>,
+}
+
+/// The two columns: the text before the compared edits, and now.
+#[derive(Clone)]
+pub(super) struct Documents {
+    before: Rc<Document>,
+    after: Rc<Document>,
+    compared: Rc<Compared>,
+    target: Target,
+}
+
+/// How both columns draw the changes.
+struct Marks {
+    selected: Option<usize>,
+    hovered: Option<usize>,
+    reveal: Option<(usize, u64)>,
+    kept: Vec<bool>,
 }
 
 impl Chrome {
@@ -261,65 +282,84 @@ impl Chrome {
                 .count()
         });
         let target = self.drafts.current().map(|draft| draft.meta.target);
-        let redline = match (&mut self.review, compared, target) {
+        let sides = match (&mut self.review, compared, target) {
             (Some(review), Some(compared), Some(target)) => {
                 let count = compared.comparison.hunks.len();
                 review.selected = review
                     .selected
                     .map(|selected| selected.min(count.saturating_sub(1)))
                     .filter(|_| count > 0);
-                let document = match &review.document {
-                    Some((made_from, made_for, document))
-                        if Rc::ptr_eq(made_from, &compared) && *made_for == target =>
+                let documents = match &review.documents {
+                    Some(documents)
+                        if Rc::ptr_eq(&documents.compared, &compared)
+                            && documents.target == target =>
                     {
-                        document.clone()
+                        documents.clone()
                     }
                     _ => {
-                        let redline = compare::redline(&compared.comparison);
-                        let document = Rc::new(markup_view::preview(target, &redline));
-                        review.document = Some((compared.clone(), target, document.clone()));
-                        document
+                        let side = |side| {
+                            let text = compare::marked(&compared.comparison, side);
+                            Rc::new(markup_view::preview(target, &text))
+                        };
+                        let documents = Documents {
+                            before: side(Side::Before),
+                            after: side(Side::After),
+                            compared: compared.clone(),
+                            target,
+                        };
+                        review.documents = Some(documents.clone());
+                        documents
                     }
                 };
-                let kept = compared
+                let kept: Vec<bool> = compared
                     .comparison
                     .hunks
                     .iter()
                     .map(|hunk| self.changes.is_kept(hunk))
                     .collect();
-                Some((document, review.selected, kept))
+                let marks = Marks {
+                    selected: review.selected,
+                    hovered: review.hovered,
+                    reveal: review.reveal,
+                    kept,
+                };
+                Some((documents, marks))
             }
             _ => None,
         };
-        let redline = redline
-            .map(|(document, selected, kept)| self.preview_redline(document, selected, kept, cx));
-        self.preview.update(cx, |preview, cx| {
-            if preview.redline.is_some() || redline.is_some() {
-                preview.redline = redline;
-                cx.notify();
-            }
-        });
+        let (before, after) = match sides {
+            Some((documents, marks)) => (
+                Some(self.preview_redline(documents.before, &marks, cx)),
+                Some(self.preview_redline(documents.after, &marks, cx)),
+            ),
+            None => (None, None),
+        };
+        for (preview, redline) in [(&self.before_preview, before), (&self.preview, after)] {
+            preview.update(cx, |preview, cx| {
+                if redline.is_some() {
+                    preview.target = target;
+                }
+                if preview.redline.is_some() || redline.is_some() {
+                    preview.redline = redline;
+                    cx.notify();
+                }
+            });
+        }
         cx.notify();
     }
 
     fn preview_redline(
         &self,
         document: Rc<Document>,
-        selected: Option<usize>,
-        kept: Vec<bool>,
+        marks: &Marks,
         cx: &mut Context<Self>,
     ) -> PreviewRedline {
-        let hit = Rc::new(Cell::new(None));
-        let click = {
+        let on_click = {
             let this = cx.weak_entity();
             Rc::new(move |hunk, window: &mut Window, cx: &mut App| {
                 this.update(cx, |this, cx| this.click_change(hunk, window, cx))
                     .ok();
             })
-        };
-        let hover = {
-            let hit = hit.clone();
-            Rc::new(move |hunk, position| hit.set(Some((hunk, position))))
         };
         let on_hover = {
             let this = cx.weak_entity();
@@ -332,10 +372,11 @@ impl Chrome {
         };
         PreviewRedline {
             document,
-            selected,
-            kept,
-            handlers: Rc::new(MarkHandlers { click, hover }),
-            hit,
+            selected: marks.selected,
+            hovered: marks.hovered,
+            kept: marks.kept.clone(),
+            reveal: marks.reveal,
+            on_click,
             on_hover,
         }
     }
@@ -448,7 +489,16 @@ impl Chrome {
             (Some(at), true) => (at + 1) % count,
             (Some(at), false) => (at + count - 1) % count,
         };
+        self.reveal_change(selected);
         self.select_change(Some(selected), cx);
+    }
+
+    /// Scrolls change `hunk` into view in both columns on the next frame.
+    fn reveal_change(&mut self, hunk: usize) {
+        if let Some(review) = &mut self.review {
+            let serial = review.reveal.map_or(0, |(_, serial)| serial + 1);
+            review.reveal = Some((hunk, serial));
+        }
     }
 
     fn revert_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -519,7 +569,10 @@ impl Chrome {
             })
             .flatten();
         match next {
-            Some(next) => self.select_change(Some(next), cx),
+            Some(next) => {
+                self.reveal_change(next);
+                self.select_change(Some(next), cx);
+            }
             None => self.sync_review(cx),
         }
     }
@@ -578,7 +631,8 @@ impl Chrome {
                 .ok();
             })
         });
-        cx.notify();
+        // Both columns outline the change under the pointer.
+        self.sync_review(cx);
     }
 
     /// Which agent edit made change `hunk`: the newest edit in the
@@ -689,6 +743,97 @@ impl Chrome {
             .on_action(cx.listener(|this, _: &KeepChange, _, cx| this.keep_change(cx)))
             .on_action(cx.listener(|this, _: &EndReview, window, cx| this.end_review(window, cx)))
             .child(self.review_bar(palette, cx))
+    }
+
+    /// A column's name over its preview: the text before the compared
+    /// edits, or now.
+    pub(super) fn column_head(&self, before: bool, palette: &Palette) -> impl IntoElement {
+        let name = if !before {
+            "Now".to_owned()
+        } else if self.changes.since + 1 >= self.changes.history.edits.len() {
+            let prompt = self
+                .changes
+                .history
+                .edits
+                .get(self.changes.since)
+                .map_or("", |edit| edit.prompt.as_str());
+            format!("Before “{}”", clip(prompt, 30))
+        } else {
+            format!("Before {}", self.changes.range_name().to_lowercase())
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(COLUMN_HEAD_HEIGHT)
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .px(px(16.))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(palette.muted)
+            .bg(palette.toolbar)
+            .border_b_1()
+            .border_color(palette.hairline)
+            .child(div().flex_none().size(px(7.)).rounded_full().bg(if before {
+                palette.removed
+            } else {
+                palette.added
+            }))
+            .child(div().min_w_0().truncate().child(name))
+    }
+
+    /// Review's view, in place of the editor and preview: the bar, over the
+    /// text before the compared edits and now, side by side.
+    pub(super) fn review_columns(&self, palette: &Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let column = |preview: &Entity<Preview>, bar: &ScrollbarState, before: bool| {
+            let scroll = preview.read(cx).scroll.clone();
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .when(!before, |column| {
+                    column.border_l_1().border_color(palette.hairline)
+                })
+                .child(self.column_head(before, palette))
+                .child(
+                    div()
+                        .absolute()
+                        .top(COLUMN_HEAD_HEIGHT)
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(
+                            preview.clone().cached(
+                                StyleRefinement::default()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            ),
+                        )
+                        .child(scrollbar(Source::Handle(scroll), bar)),
+                )
+        };
+        let columns = div()
+            .absolute()
+            .top(BAR_HEIGHT)
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .flex()
+            .child(column(&self.before_preview, &self.before_scrollbar, true))
+            .child(column(&self.preview, &self.scrollbars[2], false));
+        self.review_pane(
+            super::pane(palette.pane, palette)
+                .flex_1()
+                .relative()
+                .child(columns),
+            palette,
+            cx,
+        )
     }
 
     fn review_bar(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement {

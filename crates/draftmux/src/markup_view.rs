@@ -119,7 +119,7 @@ pub struct MarkupStyle {
     /// Colors of the footnotes [`render_preview`] puts on blocks Slack posts
     /// differently; `None` hides them.
     pub notes: Option<NoteColors>,
-    /// Draws the changes marked in a redline ([`compare::redline`]); `None`
+    /// Draws the changes marked in a redline ([`compare::marked`]); `None`
     /// for text without marks.
     pub redline: Option<Rc<Redline>>,
 }
@@ -127,9 +127,12 @@ pub struct MarkupStyle {
 /// How a redline's changes are drawn and what the pointer does to them:
 /// insertions on a green tint, deletions struck through on a red one. Kept
 /// changes lose the tint, insertions underlined and deletions faded; the
-/// selected change is outlined.
+/// selected change is outlined, and the hovered one more faintly. Where
+/// a change has no text on this side ([`compare::POINT`]) a bar stands in
+/// for it.
 pub struct Redline {
     pub selected: Option<usize>,
+    pub hovered: Option<usize>,
     /// Whether each hunk is kept.
     pub kept: Vec<bool>,
     pub colors: RedlineColors,
@@ -143,6 +146,9 @@ pub struct RedlineColors {
     pub removed: Hsla,
     pub removed_background: Hsla,
     pub selected: Hsla,
+    /// The bars where text was added or removed.
+    pub added_point: Hsla,
+    pub removed_point: Hsla,
 }
 
 impl Redline {
@@ -159,12 +165,25 @@ impl Redline {
         } else {
             color
         });
-        segment.strike |= mark.deleted;
+        let point = segment.text.as_ref() == compare::POINT;
+        segment.strike |= mark.deleted && !point;
+        let ring = if self.selected == Some(mark.hunk) {
+            Some(colors.selected)
+        } else {
+            (self.hovered == Some(mark.hunk)).then(|| colors.selected.opacity(0.5))
+        };
         segment.mark = Some(SegmentMark {
             hunk: mark.hunk,
-            background: (!kept).then_some(background),
-            ring: (self.selected == Some(mark.hunk)).then_some(colors.selected),
+            background: (!kept && !point).then_some(background),
+            ring,
             underline: (kept && !mark.deleted).then(|| color.opacity(0.45)),
+            bar: point.then(|| {
+                let bar = match mark.deleted {
+                    true => colors.removed_point,
+                    false => colors.added_point,
+                };
+                bar.opacity(if kept { 0.6 } else { 1. })
+            }),
         });
     }
 }

@@ -62,6 +62,9 @@ pub struct SegmentMark {
     pub ring: Option<Hsla>,
     /// An underline in this color.
     pub underline: Option<Hsla>,
+    /// A bar in this color in place of the text, for where text was
+    /// removed.
+    pub bar: Option<Hsla>,
 }
 
 /// What clicking and hovering a [`SegmentMark`] do, given its hunk.
@@ -69,6 +72,8 @@ pub struct MarkHandlers {
     pub click: Rc<dyn Fn(usize, &mut Window, &mut App)>,
     /// Called on each pointer move over a mark, with the pointer's position.
     pub hover: Rc<dyn Fn(usize, Point<Pixels>)>,
+    /// Told where each mark is laid out, every frame it is.
+    pub placed: Rc<dyn Fn(usize, Bounds<Pixels>)>,
 }
 
 /// A box around a segment, like a CSS inline element's background, border
@@ -285,16 +290,21 @@ impl Element for InlineText {
             for frag in &line.frags {
                 let piece = &laid.shaped.pieces[frag.piece];
                 let segment = &self.segments[piece.segment];
-                if self.marks.is_some()
+                if let Some(handlers) = &self.marks
                     && let Some(mark) = &segment.mark
                 {
                     let (lead, trail) = frag.edges(piece);
                     let width = piece.line.x_for_index(frag.range.end)
                         - piece.line.x_for_index(frag.range.start);
-                    let bounds = Bounds::new(
+                    let mut bounds = Bounds::new(
                         point(left + frag.x - lead, top),
                         size(lead + width + trail, laid.shaped.line_height),
                     );
+                    // A bar is too thin to aim at.
+                    if mark.bar.is_some() {
+                        bounds = bounds.dilate(px(3.));
+                    }
+                    (handlers.placed)(mark.hunk, bounds);
                     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
                     hitboxes.marks.push((hitbox, mark.hunk));
                 }
@@ -574,6 +584,20 @@ fn paint_mark(
         top_right: if closes { radius } else { px(0.) },
         bottom_right: if closes { radius } else { px(0.) },
     };
+    if let Some(bar) = mark.bar {
+        let center = bounds.center().x;
+        window.paint_quad(quad(
+            Bounds::from_corners(
+                point(center - px(1.), bounds.top()),
+                point(center + px(1.), bounds.bottom()),
+            ),
+            Corners::all(px(1.)),
+            bar,
+            Edges::default(),
+            Hsla::transparent_black(),
+            BorderStyle::Solid,
+        ));
+    }
     if let Some(background) = mark.background {
         window.paint_quad(quad(
             bounds,

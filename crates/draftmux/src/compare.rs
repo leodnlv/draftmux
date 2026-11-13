@@ -17,6 +17,9 @@ const INS_CLOSE: char = '\u{E001}';
 /// Opens deleted text, like [`INS_OPEN`].
 const DEL_OPEN: char = '\u{E002}';
 const DEL_CLOSE: char = '\u{E003}';
+/// Where one version has text the other lacks, shown in the other: a hair
+/// space marked as that change, drawn as a bar.
+pub const POINT: &str = "\u{200A}";
 /// The hunk tags take the rest of the private use area.
 const TAG_BASE: u32 = 0xE100;
 const TAG_LAST: u32 = 0xF8FF;
@@ -277,21 +280,108 @@ fn normalize(ops: Vec<(Kind, String)>) -> Vec<(Kind, String)> {
     out
 }
 
-/// The new text with the deleted text put back, each change marked for
+/// Which version [`marked`] shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The old text with its deletions marked, and a [`POINT`] where text
+    /// was only added.
+    Before,
+    /// The new text with its insertions marked, and a [`POINT`] where text
+    /// was only removed.
+    After,
+}
+
+/// One version of the comparison with each change marked for
 /// [`split_marks`]. Marks open after any list, heading or quote marker so
 /// the block still parses, and close before the end of each line; fences,
 /// rules, table separators and blank lines stay bare.
-pub fn redline(comparison: &Comparison) -> String {
+pub fn marked(comparison: &Comparison, side: Side) -> String {
+    let insert = (INS_OPEN, INS_CLOSE);
+    let delete = (DEL_OPEN, DEL_CLOSE);
+    // A point is marked as the change it stands in for.
+    let (shown, hidden, marks, point_marks) = match side {
+        Side::Before => (Kind::Delete, Kind::Insert, delete, insert),
+        Side::After => (Kind::Insert, Kind::Delete, insert, delete),
+    };
+    // A change hidden on this side leaves a point only when nothing of it
+    // shows here; a replacement shows its other text instead.
+    let points = |hunk: &Hunk| match side {
+        Side::Before => hunk.is_addition(),
+        Side::After => hunk.is_removal(),
+    };
     let mut out = String::new();
+    // A point before any text waits for the first line's block marker.
+    let mut leading_point = None;
     for op in &comparison.ops {
         let hunk = op.hunk.unwrap_or_default();
-        match op.kind {
-            Kind::Equal => out.push_str(&op.text),
-            Kind::Insert => wrap(&mut out, &op.text, (INS_OPEN, INS_CLOSE), hunk),
-            Kind::Delete => wrap(&mut out, &op.text, (DEL_OPEN, DEL_CLOSE), hunk),
+        if op.kind == Kind::Equal {
+            match leading_point.take() {
+                Some(hunk) if !op.text.is_empty() => {
+                    let prefix = block_prefix(&op.text);
+                    out.push_str(&op.text[..prefix]);
+                    point(&mut out, hunk, point_marks);
+                    out.push_str(&op.text[prefix..]);
+                }
+                pending => {
+                    leading_point = pending;
+                    out.push_str(&op.text);
+                }
+            }
+        } else if op.kind == shown {
+            let mut text = op.text.as_str();
+            if let Some(other) = leading_point.take() {
+                let prefix = block_prefix(text);
+                out.push_str(&text[..prefix]);
+                point(&mut out, other, point_marks);
+                text = &text[prefix..];
+            }
+            wrap(&mut out, text, marks, hunk);
+        } else if op.kind == hidden && comparison.hunks.get(hunk).is_some_and(points) {
+            match out.is_empty() {
+                true => leading_point = Some(hunk),
+                false => point(&mut out, hunk, point_marks),
+            }
         }
     }
+    if let Some(hunk) = leading_point {
+        point(&mut out, hunk, point_marks);
+    }
     out
+}
+
+/// Marks where the other side's text is. A point at the start of a line
+/// would open a block of its own, so it goes at the end of the line before.
+fn point(out: &mut String, hunk: usize, (open, close): (char, char)) {
+    let newline = out.ends_with('\n');
+    if newline {
+        out.pop();
+    }
+    out.push(open);
+    out.push(tag(hunk));
+    out.push_str(POINT);
+    out.push(close);
+    if newline {
+        out.push('\n');
+    }
+}
+
+/// Whether `block` shows any of hunk `hunk`'s marks.
+pub fn block_has_hunk(block: &markup::Block, hunk: usize) -> bool {
+    use markup::Block;
+    let tag = tag(hunk);
+    let spans = |spans: &[markup::Span]| spans.iter().any(|span| span.text.contains(tag));
+    let blocks = |blocks: &[Block]| blocks.iter().any(|block| block_has_hunk(block, hunk));
+    match block {
+        Block::Paragraph(text) | Block::Heading { spans: text, .. } => spans(text),
+        Block::List(list) => list.items.iter().any(|item| blocks(&item.blocks)),
+        Block::Quote(inner) | Block::Alert { blocks: inner, .. } => blocks(inner),
+        Block::Code { text, .. } | Block::Html(text) => text.contains(tag),
+        Block::Table(table) => {
+            table.header.iter().any(|cell| spans(cell))
+                || table.rows.iter().flatten().any(|cell| spans(cell))
+        }
+        Block::Rule => false,
+    }
 }
 
 fn tag(hunk: usize) -> char {
@@ -548,9 +638,10 @@ mod tests {
             .collect()
     }
 
-    /// The redline with marks written as `{+…+}` and `[-…-]`.
-    fn readable(old: &str, new: &str) -> String {
-        let marked = redline(&compare(old, new));
+    /// One side with marks written as `{+…+}` and `[-…-]`, and a point as
+    /// `|`.
+    fn readable_side(old: &str, new: &str, side: Side) -> String {
+        let marked = marked(&compare(old, new), side).replace(POINT, "|");
         let mut open = None;
         let mut out = String::new();
         let mut last: Option<Mark> = None;
@@ -672,72 +763,130 @@ mod tests {
     }
 
     #[test]
-    fn redline_shows_both_versions() {
+    fn sides_show_one_version_each() {
+        let (old, new) = ("Ship it on Monday.\n", "Ship it on Friday.\n");
         assert_eq!(
-            readable("Say hello now.\n", "Say goodbye now.\n"),
-            "Say [-hello-]{+goodbye+} now.\n"
+            readable_side(old, new, Side::Before),
+            "Ship it on [-Monday.-]\n"
+        );
+        assert_eq!(
+            readable_side(old, new, Side::After),
+            "Ship it on {+Friday.+}\n"
         );
     }
 
     #[test]
-    fn redline_marks_open_after_block_markers() {
-        assert_eq!(readable("- one\n", "- one\n- two\n"), "- one\n- {+two+}\n");
+    fn after_side_points_to_removed_text() {
+        assert_eq!(
+            readable_side("Keep this short one.\n", "Keep this one.\n", Side::After),
+            "Keep this [-|-]one.\n"
+        );
+        // Removed lines leave the point at the end of the line before.
+        assert_eq!(
+            readable_side("- one\n- two\n- three\n", "- one\n- three\n", Side::After),
+            "- one[-|-]\n- three\n"
+        );
+    }
+
+    #[test]
+    fn before_side_points_to_added_text() {
+        assert_eq!(
+            readable_side("Keep this one.\n", "Keep this short one.\n", Side::Before),
+            "Keep this {+|+}one.\n"
+        );
+        // A replacement shows its old text instead.
+        assert_eq!(
+            readable_side("Keep this one.\n", "Keep that one.\n", Side::Before),
+            "Keep [-this-] one.\n"
+        );
+    }
+
+    #[test]
+    fn a_point_at_the_start_follows_the_block_marker() {
+        assert_eq!(
+            readable_side("# Draft\n\n# Title\n", "# Title\n", Side::After),
+            "# [-|-]Title\n"
+        );
+    }
+
+    #[test]
+    fn finds_the_blocks_a_hunk_is_in() {
+        let comparison = compare("# Title\n\nOld body.\n", "# Title\n\nNew body.\n");
+        let doc = markup::github::parse(&marked(&comparison, Side::After));
+        let found: Vec<bool> = doc
+            .blocks
+            .iter()
+            .map(|block| block_has_hunk(block, 0))
+            .collect();
+        assert_eq!(found, [false, true]);
+    }
+
+    /// Both sides, as `before / after`.
+    fn readable(old: &str, new: &str) -> String {
+        format!(
+            "{}/ {}",
+            readable_side(old, new, Side::Before),
+            readable_side(old, new, Side::After)
+        )
+    }
+
+    #[test]
+    fn marks_open_after_block_markers() {
+        assert_eq!(
+            readable("- one\n", "- one\n- two\n"),
+            "- one{+|+}\n/ - one\n- {+two+}\n"
+        );
         assert_eq!(
             readable("# Title\n", "## Better title\n"),
-            "# [-Title-]\n## {+Better title+}\n"
+            "# [-Title-]{+|+}\n/ ## [-|-]{+Better title+}\n"
         );
         assert_eq!(
             readable("> [!NOTE]\n> Old\n", "> [!NOTE]\n> New\n"),
-            "> [!NOTE]\n> [-Old-]{+New+}\n"
+            "> [!NOTE]\n> [-Old-]\n/ > [!NOTE]\n> {+New+}\n"
         );
         assert_eq!(
             readable("1. [ ] task\n", "1. [x] done\n"),
-            "1. [ ] [-task-]\n1. [x] {+done+}\n"
+            "1. [ ] [-task-]{+|+}\n/ 1. [x] [-|-]{+done+}\n"
         );
     }
 
     #[test]
-    fn redline_leaves_fences_rules_and_blank_lines_bare() {
+    fn leaves_fences_rules_and_blank_lines_bare() {
         assert_eq!(
-            readable("Intro\n", "Intro\n\n```\ncode\n```\n\n---\n"),
+            readable_side("Intro\n", "Intro\n\n```\ncode\n```\n\n---\n", Side::After),
             "Intro\n\n```\n{+code+}\n```\n\n---\n"
         );
         assert_eq!(
-            readable("| a |\n", "| a |\n|---|\n| b |\n"),
+            readable_side("| a |\n", "| a |\n|---|\n| b |\n", Side::After),
             "| a |\n|---|\n| {+b+} |\n"
         );
     }
 
     #[test]
-    fn redline_keeps_frontmatter_keys() {
+    fn keeps_frontmatter_keys() {
         assert_eq!(
             readable(
                 "---\ntitle: Old\n---\nBody\n",
                 "---\ntitle: New\n---\nBody\n"
             ),
-            "---\ntitle: [-Old-]{+New+}\n---\nBody\n"
+            "---\ntitle: [-Old-]\n---\nBody\n/ ---\ntitle: {+New+}\n---\nBody\n"
         );
     }
 
     #[test]
     fn split_marks_carries_the_open_mark_across_calls() {
-        let marked = redline(&compare("a b\n", "a c\n"));
-        let cut = marked.find('c').unwrap();
+        let marked = marked(&compare("a b\n", "a cd\n"), Side::After);
+        let cut = marked.find('d').unwrap();
         let mut open = None;
         let first = split_marks(&marked[..cut], &mut open);
         let second = split_marks(&marked[cut..], &mut open);
-        assert_eq!(first.last().unwrap().1, "b");
-        assert_eq!(
-            second.first().unwrap(),
-            &(
-                Some(Mark {
-                    hunk: 0,
-                    deleted: false
-                }),
-                "c"
-            )
-        );
-        assert_eq!(strip_marks(&marked), "a bc\n");
+        let mark = Some(Mark {
+            hunk: 0,
+            deleted: false,
+        });
+        assert_eq!(first.last().unwrap(), &(mark, "c"));
+        assert_eq!(second.first().unwrap(), &(mark, "d"));
+        assert_eq!(strip_marks(&marked), "a cd\n");
     }
 
     #[test]

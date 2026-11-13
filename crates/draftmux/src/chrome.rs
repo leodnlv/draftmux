@@ -109,6 +109,10 @@ pub struct Chrome {
     selection: Entity<SelectionPopover>,
     /// The selected draft's text parsed for its target.
     preview: Entity<Preview>,
+    /// The text before the compared edits, beside the preview during
+    /// review.
+    before_preview: Entity<Preview>,
+    before_scrollbar: ScrollbarState,
     preview_work: preview_work::Work,
     preview_task: Task<()>,
     /// Source snapshot whose offsets the displayed preview uses.
@@ -206,12 +210,16 @@ impl Render for Chrome {
         let editor_width = (editor_open < 1.).then(|| open_width(&editor_slide, &preview_slide));
         let preview_width = (preview_open < 1.).then(|| open_width(&preview_slide, &editor_slide));
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
+        let reviewing = self.review.is_some();
         let content = if self.drafts.current().is_some() {
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
-                .when(editor_open > 0., |row| {
+                .when(reviewing, |row| {
+                    row.child(self.review_columns(&palette, cx))
+                })
+                .when(!reviewing && editor_open > 0., |row| {
                     row.child(
                         slot(editor_open, editor_width, false).child(
                             pane(palette.pane, &palette)
@@ -233,48 +241,34 @@ impl Render for Chrome {
                         ),
                     )
                 })
-                .when(preview_open > 0., |row| {
-                    let preview = div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .top(if self.review.is_some() {
-                            review::BAR_HEIGHT
-                        } else {
-                            px(0.)
-                        })
-                        .child({
-                            let body = self.preview.clone().cached(
-                                StyleRefinement::default()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .size_full(),
-                            );
-                            SelectionPopover::wrap_preview(&self.selection, body, cx)
-                        })
-                        .child(scrollbar(
-                            Source::Handle(self.preview_scroll.clone()),
-                            preview_bar,
-                        ));
-                    let pane = pane(palette.pane, &palette)
-                        .when_some(preview_width, |pane, width| pane.w(width).flex_none())
-                        .when(preview_width.is_none(), |pane| pane.flex_1())
-                        .relative()
-                        .when(editor_open > 0., |pane| pane.border_l_1())
-                        .child(preview);
-                    row.child(slot(preview_open, preview_width, true).child(
-                        if self.review.is_some() {
-                            self.review_pane(pane, &palette, cx)
-                        } else {
-                            pane
-                        },
-                    ))
+                .when(!reviewing && preview_open > 0., |row| {
+                    row.child(
+                        slot(preview_open, preview_width, true).child(
+                            pane(palette.pane, &palette)
+                                .when_some(preview_width, |pane, width| pane.w(width).flex_none())
+                                .when(preview_width.is_none(), |pane| pane.flex_1())
+                                .relative()
+                                .when(editor_open > 0., |pane| pane.border_l_1())
+                                .child({
+                                    let body = self.preview.clone().cached(
+                                        StyleRefinement::default()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full(),
+                                    );
+                                    SelectionPopover::wrap_preview(&self.selection, body, cx)
+                                })
+                                .child(scrollbar(
+                                    Source::Handle(self.preview_scroll.clone()),
+                                    preview_bar,
+                                )),
+                        ),
+                    )
                 })
                 // A press anywhere but on a change or the review bar
                 // clears the selected change.
-                .when(self.review.is_some(), |row| {
+                .when(reviewing, |row| {
                     row.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.pressed_outside_changes(cx)),
@@ -518,6 +512,21 @@ impl Chrome {
 
         let chat_width = store.chat_width().map_or(CHAT_WIDTH, px);
         let show_sidebar = !store.sidebar_hidden();
+        let preview = new_preview(preview_selection.clone(), preview_scroll.clone(), cx);
+        let before_preview = {
+            let scroll = ScrollHandle::new();
+            let selection = cx.new(|cx| {
+                let mut selection = TextSelection::new(cx);
+                selection.set_scroller(Some(Scroller::Handle(scroll.clone())));
+                selection
+            });
+            new_preview(selection, scroll, cx)
+        };
+        // The review columns scroll together.
+        preview.update(cx, |preview, _| {
+            preview.partner = Some(before_preview.downgrade())
+        });
+        before_preview.update(cx, |before, _| before.partner = Some(preview.downgrade()));
         let mut chrome = Self {
             should_move: false,
             drafts: Drafts::new(store.clone()),
@@ -528,20 +537,9 @@ impl Chrome {
             formatter,
             chat,
             selection,
-            preview: cx.new(|cx| Preview {
-                document: None,
-                fields: Default::default(),
-                copied_field: None,
-                copied_task: Task::ready(()),
-                target: None,
-                selection: preview_selection.clone(),
-                scroll: preview_scroll.clone(),
-                cache: Default::default(),
-                appearance: None,
-                writing: false,
-                redline: None,
-                _selection: cx.observe(&preview_selection, |_, _, cx| cx.notify()),
-            }),
+            preview,
+            before_preview,
+            before_scrollbar: Default::default(),
             preview_work: preview_work::Work::default(),
             preview_task: Task::ready(()),
             preview_source: String::new(),
@@ -1701,6 +1699,29 @@ fn slot(open: f32, width: Option<Pixels>, end: bool) -> gpui::Div {
         slot = slot.flex_1();
     }
     slot.when(end, |slot| slot.justify_end())
+}
+
+fn new_preview(
+    selection: Entity<TextSelection>,
+    scroll: ScrollHandle,
+    cx: &mut Context<Chrome>,
+) -> Entity<Preview> {
+    cx.new(|cx| Preview {
+        document: None,
+        fields: Default::default(),
+        copied_field: None,
+        copied_task: Task::ready(()),
+        target: None,
+        _selection: cx.observe(&selection, |_, _, cx| cx.notify()),
+        selection,
+        scroll,
+        cache: Default::default(),
+        appearance: None,
+        writing: false,
+        redline: None,
+        partner: None,
+        marks: Default::default(),
+    })
 }
 
 fn pane(bg: Hsla, palette: &Palette) -> gpui::Div {

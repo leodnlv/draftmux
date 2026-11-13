@@ -16,6 +16,8 @@ use markup::Block;
 pub struct CachedBlock {
     pub block: Block,
     height: Cell<Option<Pixels>>,
+    /// Where the block's top was in the window when last laid out.
+    top: Cell<Option<Pixels>>,
     pub texts: crate::selectable::TextRegistry,
     pub scrolls: Rc<RefCell<BTreeMap<u64, ScrollHandle>>>,
 }
@@ -25,6 +27,7 @@ impl CachedBlock {
         Self {
             block,
             height: Cell::new(None),
+            top: Cell::new(None),
             texts: Default::default(),
             scrolls: Default::default(),
         }
@@ -86,6 +89,15 @@ impl BlockCache {
             }
         }
         self.width = Some(width);
+    }
+
+    /// Where the first block matching `find` was in the window when last
+    /// laid out, on screen or not.
+    pub fn top_of(&self, find: impl Fn(&Block) -> bool) -> Option<Pixels> {
+        self.blocks
+            .iter()
+            .find(|block| find(&block.block))
+            .and_then(|block| block.top.get())
     }
 
     /// Reindexes cached paragraphs after block insertion or deletion.
@@ -184,6 +196,7 @@ impl Element for MeasuredBlock {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
+        self.block.top.set(Some(bounds.top()));
         let visible = bounds.intersects(&window.content_mask().bounds);
         if visible {
             self.child()
