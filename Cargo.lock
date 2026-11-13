@@ -1461,6 +1461,7 @@ dependencies = [
  "clap",
  "claude-convert",
  "comrak",
+ "draftmux-core",
  "draftmux-pi-profiles",
  "draftmux-pi-rpc",
  "draftmux-settings",
@@ -1482,6 +1483,16 @@ dependencies = [
  "sha2",
  "shell-env",
  "similar",
+ "tempfile",
+]
+
+[[package]]
+name = "draftmux-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "draftmux-storage",
  "tempfile",
 ]
 

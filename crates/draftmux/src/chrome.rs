@@ -21,6 +21,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use draftmux_core::history::Turns;
 use draftmux_storage::{Conflict, Store, Target};
 use editor::{Editor, EditorEvent, Redo, Undo};
 use gpui::{
@@ -152,7 +153,7 @@ pub struct Chrome {
     review_focus: FocusHandle,
     /// Each draft's latest agent turn, until its first write is recorded
     /// as an edit.
-    turns: review::Turns,
+    turns: Turns,
     /// The Copy button shows a checkmark while this is set, with a serial
     /// so each copy replays it; the task clears it.
     copied: Option<(usize, Task<()>)>,
@@ -851,7 +852,7 @@ impl Chrome {
                     .map_err(|err| format!("{err:#}"));
                 if let (Ok(before), Some(id)) = (&saved, self.drafts.current_id()) {
                     self.turns
-                        .insert(id.to_owned(), review::Turn::new(before.clone(), text));
+                        .started(id, before.clone(), crate::chat::message(text));
                 }
                 let text = text.clone();
                 self.chat

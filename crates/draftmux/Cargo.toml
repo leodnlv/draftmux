@@ -11,6 +11,7 @@ async-channel = "2.5.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 claude-convert = { path = "../claude-convert" }
 clap = { version = "4.6.7", features = ["derive"] }
+draftmux-core = { path = "../core" }
 draftmux-pi-profiles = { path = "../pi-profiles" }
 draftmux-pi-rpc = { path = "../pi-rpc" }
 draftmux-settings = { path = "../settings" }

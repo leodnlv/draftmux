@@ -2,18 +2,17 @@
 //! toolbar's Changes button, a redline in place of the preview under a bar
 //! of controls, and single keys that step through, revert and keep changes.
 //!
-//! Each draft keeps its history of agent edits ([`History`]). Review
-//! compares the draft as it is with the text before one of those edits,
-//! the latest by default. Reviewing never rewrites the history: keeping a
+//! Each draft keeps its history of agent edits
+//! ([`History`](draftmux_storage::History)). Review compares the draft as it
+//! is with the text before one of those edits, the latest by default. Reviewing never rewrites the history: keeping a
 //! change only records its key, and reverting edits the draft.
 
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
 use chrono::Utc;
-use draftmux_storage::{Edit, History, Store, Target};
+use draftmux_core::history::{ChangeKey, EditLog, Recorded};
+use draftmux_storage::Target;
 use gpui::{
     AnimationExt, AnyElement, App, Context, Entity, Focusable, FontWeight, KeyBinding, MouseButton,
     Pixels, Point, SharedString, StyleRefinement, Task, Transformation, Window, actions, anchored,
@@ -65,44 +64,13 @@ pub(super) fn init(cx: &mut App) {
     ]);
 }
 
-/// The agent turn a draft's next edit belongs to: what the draft was when
-/// the user asked for it, and what they asked.
-pub(super) struct Turn {
-    before: String,
-    prompt: String,
-    /// The turn's first write was recorded; later ones belong to the same
-    /// edit.
-    recorded: bool,
-}
-
-impl Turn {
-    pub(super) fn new(before: String, prompt: &str) -> Self {
-        Self {
-            before,
-            prompt: crate::chat::message(prompt)
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-            recorded: false,
-        }
-    }
-}
-
 /// The selected draft's edit history and the part of it being compared.
 #[derive(Default)]
 pub(super) struct Changes {
-    history: History,
-    kept: HashSet<String>,
-    /// The edit the comparison starts before.
-    since: usize,
+    log: EditLog,
     compared: Option<Rc<Compared>>,
     /// Changes in the comparison that aren't kept.
     unreviewed: usize,
-    /// The saved history couldn't be read, so `history` is empty and must
-    /// not be saved over it.
-    unreadable: bool,
 }
 
 /// The draft compared with the text before an edit.
@@ -113,41 +81,10 @@ pub(super) struct Compared {
 }
 
 impl Changes {
-    fn load(store: &Store, id: &str) -> Self {
-        match store.history(id) {
-            Ok(history) => Self::new(history),
-            Err(err) => {
-                eprintln!("draftmux: reading the edit history: {err:#}");
-                Self {
-                    unreadable: true,
-                    ..Self::default()
-                }
-            }
-        }
-    }
-
-    fn new(history: History) -> Self {
-        Self {
-            kept: history.kept.iter().cloned().collect(),
-            since: history.edits.len().saturating_sub(1),
-            history,
-            ..Self::default()
-        }
-    }
-
-    /// Saves the history as draft `id`'s, unless the saved one couldn't be
-    /// read.
-    fn save(&self, store: &Store, id: &str) -> Result<()> {
-        if self.unreadable {
-            bail!("the saved edit history couldn't be read");
-        }
-        store.save_history(id, &self.history)
-    }
-
-    /// `text` compared with the text before edit [`Self::since`], reusing
-    /// the last comparison while neither changed.
+    /// `text` compared with the text before edit [`EditLog::since`],
+    /// reusing the last comparison while neither changed.
     fn compare(&mut self, text: &str) -> Option<Rc<Compared>> {
-        let base = &self.history.edits.get(self.since)?.before;
+        let base = &self.log.edits().get(self.log.since())?.before;
         if let Some(compared) = &self.compared
             && compared.base == *base
             && compared.text == text
@@ -163,57 +100,23 @@ impl Changes {
         Some(compared)
     }
 
-    /// Names a change in the comparison by where it starts in the text
-    /// before edit [`Self::since`], which never changes, so typing elsewhere
-    /// leaves the name alone while identical changes elsewhere get their
-    /// own.
-    fn key(&self, hunk: &Hunk) -> String {
-        format!(
-            "{}\0{}\0{}\0{}",
-            self.since, hunk.old.start, hunk.removed, hunk.added
-        )
+    fn key<'a>(&self, hunk: &'a Hunk) -> ChangeKey<'a> {
+        ChangeKey {
+            since: self.log.since(),
+            old_start: hunk.old.start,
+            removed: &hunk.removed,
+            added: &hunk.added,
+        }
     }
 
     fn is_kept(&self, hunk: &Hunk) -> bool {
-        self.kept.contains(&self.key(hunk))
+        self.log.is_kept(&self.key(hunk))
     }
 
     fn keep(&mut self, hunk: &Hunk, kept: bool) {
         let key = self.key(hunk);
-        if kept {
-            if self.kept.insert(key.clone()) {
-                self.history.kept.push(key);
-            }
-        } else if self.kept.remove(&key) {
-            self.history.kept.retain(|other| *other != key);
-        }
+        self.log.keep(&key, kept);
     }
-
-    /// The range menu's name for the comparison, counted from the newest
-    /// edit back.
-    fn range_name(&self) -> String {
-        let count = self.history.edits.len();
-        if self.since + 1 >= count {
-            "Last edit".to_owned()
-        } else if self.since == 0 {
-            format!("All {count} edits")
-        } else {
-            format!("Last {} edits", count - self.since)
-        }
-    }
-}
-
-/// Adds `edit` to draft `id`'s saved history and returns the history.
-/// `changes` is the draft's loaded history while it is selected; if that
-/// couldn't be read, the saved history is read again rather than replaced.
-fn save_edit(store: &Store, id: &str, changes: Option<&Changes>, edit: Edit) -> Result<History> {
-    let mut history = match changes {
-        Some(changes) if !changes.unreadable => changes.history.clone(),
-        _ => store.history(id)?,
-    };
-    history.edits.push(edit);
-    store.save_history(id, &history)?;
-    Ok(history)
 }
 
 /// Review, while it is open.
@@ -254,9 +157,12 @@ struct Marks {
 impl Chrome {
     /// Loads the selected draft's history and leaves review.
     pub(super) fn load_changes(&mut self, cx: &mut Context<Self>) {
-        self.changes = match self.drafts.current_id() {
-            Some(id) => Changes::load(&self.store, id),
-            None => Changes::default(),
+        self.changes = Changes {
+            log: match self.drafts.current_id() {
+                Some(id) => EditLog::load(&self.store, id),
+                None => EditLog::default(),
+            },
+            ..Changes::default()
         };
         self.review = None;
         self.sync_review(cx);
@@ -265,36 +171,20 @@ impl Chrome {
     /// Records the edit an agent turn made with its first write to draft
     /// `id`, which now reads `text`.
     pub(super) fn record_edit(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
-        let Some(turn) = self.turns.get_mut(id) else {
-            return;
-        };
-        // An empty draft's first draft isn't an edit to compare with.
-        if turn.recorded || turn.before == text || turn.before.trim().is_empty() {
-            return;
-        }
-        let edit = Edit {
-            before: turn.before.clone(),
-            at: Utc::now(),
-            prompt: turn.prompt.clone(),
-        };
         let current = self.drafts.current_id() == Some(id);
-        // Until it is saved, the edit is recorded again with the turn's
-        // next write.
-        let history = match save_edit(&self.store, id, current.then_some(&self.changes), edit) {
-            Ok(history) => history,
+        let log = current.then_some(&mut self.changes.log);
+        match self
+            .turns
+            .agent_wrote(&self.store, id, text, Utc::now(), log)
+        {
+            Ok(Recorded::Added) => {}
+            Ok(Recorded::Ignored) => return,
             Err(err) => {
                 eprintln!("draftmux: saving the edit history: {err:#}");
                 return;
             }
-        };
-        turn.recorded = true;
+        }
         if current {
-            if self.changes.unreadable {
-                self.changes = Changes::new(history);
-            } else {
-                self.changes.since = history.edits.len() - 1;
-                self.changes.history = history;
-            }
             if let Some(review) = &mut self.review {
                 review.selected = None;
                 review.menu_open = false;
@@ -307,7 +197,7 @@ impl Chrome {
         let Some(id) = self.drafts.current_id() else {
             return;
         };
-        if let Err(err) = self.changes.save(&self.store, id) {
+        if let Err(err) = self.changes.log.save(&self.store, id) {
             eprintln!("draftmux: saving the reviewed changes: {err:#}");
         }
     }
@@ -445,7 +335,7 @@ impl Chrome {
     }
 
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changes.history.edits.is_empty() || self.drafts.current().is_none() {
+        if self.changes.log.edits().is_empty() || self.drafts.current().is_none() {
             return;
         }
         self.show_preview = true;
@@ -583,9 +473,9 @@ impl Chrome {
     fn restore_before(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(base) = self
             .changes
-            .history
-            .edits
-            .get(self.changes.since)
+            .log
+            .edits()
+            .get(self.changes.log.since())
             .map(|edit| edit.before.clone())
         else {
             return;
@@ -651,7 +541,7 @@ impl Chrome {
     }
 
     fn compare_since(&mut self, since: usize, cx: &mut Context<Self>) {
-        self.changes.since = since;
+        self.changes.log.set_since(since);
         if let Some(review) = &mut self.review {
             review.menu_open = false;
         }
@@ -691,14 +581,19 @@ impl Chrome {
     /// comparison with a change of its own in it.
     fn change_origin(&self, hunk: usize, cx: &App) -> Option<String> {
         let hunk = self.comparison()?.hunks.get(hunk)?;
-        let edits = &self.changes.history.edits;
+        let edits = self.changes.log.edits();
         let text = self.editor.read(cx).text();
         let made = |edit: &Hunk| {
             let (added, removed) = (edit.added.trim(), edit.removed.trim());
             (!added.is_empty() && hunk.added.contains(added))
                 || (!removed.is_empty() && hunk.removed.contains(removed))
         };
-        for (ix, edit) in edits.iter().enumerate().skip(self.changes.since).rev() {
+        for (ix, edit) in edits
+            .iter()
+            .enumerate()
+            .skip(self.changes.log.since())
+            .rev()
+        {
             let after = edits.get(ix + 1).map_or(text, |next| next.before.as_str());
             if compare::compare(&edit.before, after).hunks.iter().any(made) {
                 return Some(format!(
@@ -718,7 +613,7 @@ impl Chrome {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let edits = self.changes.history.edits.len();
+        let edits = self.changes.log.edits().len();
         if edits == 0 {
             return None;
         }
@@ -800,8 +695,8 @@ impl Chrome {
     /// The before column's version, in a sentence: the text before the
     /// compared edits.
     fn before_name(&self) -> String {
-        let edits = &self.changes.history.edits;
-        let since = self.changes.since;
+        let edits = self.changes.log.edits();
+        let since = self.changes.log.since();
         if since + 1 >= edits.len() {
             let prompt = edits.get(since).map_or("", |edit| edit.prompt.as_str());
             format!("before “{}”", clip(prompt, 30))
@@ -928,7 +823,7 @@ impl Chrome {
                     cx.notify();
                 }
             }))
-            .child(self.changes.range_name())
+            .child(self.changes.log.range_name())
             .child(
                 svg()
                     .path(CHEVRON_ICON)
@@ -1097,7 +992,7 @@ impl Chrome {
     /// to the before column.
     fn range_menu(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let now = Utc::now();
-        let edits = &self.changes.history.edits;
+        let edits = self.changes.log.edits();
         let mut items = vec![MenuItem {
             label: "Show Changes Since".into(),
             checked: false,
@@ -1108,7 +1003,7 @@ impl Chrome {
         }];
         items.extend(edits.iter().enumerate().rev().map(|(ix, edit)| MenuItem {
             label: format!("“{}”", clip(&edit.prompt, 34)).into(),
-            checked: ix == self.changes.since,
+            checked: ix == self.changes.log.since(),
             enabled: true,
             action: Some(Some(ix)),
             detail: Some(relative_time(edit.at, now).into()),
@@ -1242,9 +1137,6 @@ fn clip(text: &str, max: usize) -> String {
     clipped
 }
 
-/// Turns of every draft whose agent may write next.
-pub(super) type Turns = HashMap<String, Turn>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,87 +1148,16 @@ mod tests {
     }
 
     #[test]
-    fn turn_prompts_are_the_users_first_line() {
-        let turn = Turn::new("before".into(), "\nTighten the summary\nand more");
-        assert_eq!(turn.prompt, "Tighten the summary");
-    }
-
-    fn edit() -> Edit {
-        Edit {
-            before: String::new(),
-            at: Utc::now(),
-            prompt: String::new(),
-        }
-    }
-
-    fn draft(store: &Store) -> String {
-        store
-            .create(draftmux_storage::NewDraft {
-                target: Target::Slack,
-                title: String::new(),
-                source: None,
-                cwd: "/home/u/code/app".into(),
-                pi_agent_dir: "/tmp/.pi/agent".into(),
-                note: None,
-                settings: Default::default(),
-                text: String::new(),
-            })
-            .unwrap()
-            .id
-    }
-
-    #[test]
-    fn unreadable_history_is_never_saved_over() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Store::new(root.path());
-        let id = draft(&store);
-        let path = root.path().join(&id).join("history.json");
-        std::fs::write(&path, "{not json").unwrap();
-
-        let mut changes = Changes::load(&store, &id);
-        assert!(changes.unreadable);
-        changes.history.kept.push("key".into());
-        assert!(changes.save(&store, &id).is_err());
-        assert!(save_edit(&store, &id, Some(&changes), edit()).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
-
-        // Once the file reads again, the edit is added to what it holds.
-        let mut saved = History::default();
-        saved.edits.push(edit());
-        store.save_history(&id, &saved).unwrap();
-        let history = save_edit(&store, &id, Some(&changes), edit()).unwrap();
-        assert_eq!(history.edits.len(), 2);
-        assert_eq!(store.history(&id).unwrap().edits.len(), 2);
-    }
-
-    #[test]
-    fn range_names_count_back_from_the_newest_edit() {
-        let mut changes = Changes {
-            history: History {
-                edits: vec![edit(), edit(), edit()],
-                kept: Vec::new(),
-            },
-            ..Changes::default()
-        };
-        changes.since = 2;
-        assert_eq!(changes.range_name(), "Last edit");
-        changes.since = 1;
-        assert_eq!(changes.range_name(), "Last 2 edits");
-        changes.since = 0;
-        assert_eq!(changes.range_name(), "All 3 edits");
-    }
-
-    #[test]
     fn keeping_records_the_change_once_and_unkeeping_forgets_it() {
         let mut changes = Changes::default();
         let hunk = compare::compare("a\n", "b\n").hunks[0].clone();
         changes.keep(&hunk, true);
         changes.keep(&hunk, true);
         assert!(changes.is_kept(&hunk));
-        assert_eq!(changes.history.kept.len(), 1);
+        assert_eq!(changes.log.history().kept.len(), 1);
         changes.keep(&hunk, false);
         assert!(!changes.is_kept(&hunk));
-        assert!(changes.history.kept.is_empty());
+        assert!(changes.log.history().kept.is_empty());
     }
 
     const BEFORE: &str = include_str!("../../fixtures/review/word-replaced-twice.before.md");
@@ -1385,11 +1206,11 @@ mod tests {
     fn keeps_belong_to_the_edit_they_were_compared_from() {
         let mut changes = Changes::default();
         let hunk = compare::compare(BEFORE, AFTER).hunks[0].clone();
-        changes.since = 1;
+        changes.log.set_since(1);
         changes.keep(&hunk, true);
-        changes.since = 0;
+        changes.log.set_since(0);
         assert!(!changes.is_kept(&hunk));
-        changes.since = 1;
+        changes.log.set_since(1);
         assert!(changes.is_kept(&hunk));
     }
 }

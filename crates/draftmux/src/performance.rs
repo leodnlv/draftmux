@@ -13,6 +13,8 @@ use std::hint::black_box;
 use std::rc::Rc;
 use std::time::Instant;
 
+use draftmux_core::history::ChangeKey;
+
 use crate::compare::{self, Side};
 
 fn measure(name: &str, mut work: impl FnMut()) -> (f64, f64) {
@@ -237,9 +239,13 @@ fn sync_closed(
         .hunks
         .iter()
         .filter(|hunk| {
-            // `Changes::key` for the first edit.
-            let key = format!("0\0{}\0{}\0{}", hunk.old.start, hunk.removed, hunk.added);
-            !kept.contains(&key)
+            let key = ChangeKey {
+                since: 0,
+                old_start: hunk.old.start,
+                removed: &hunk.removed,
+                added: &hunk.added,
+            };
+            !kept.contains(&key.to_string())
         })
         .count();
     *cached = Some(compared);
