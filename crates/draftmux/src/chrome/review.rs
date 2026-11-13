@@ -528,7 +528,9 @@ impl Chrome {
         );
     }
 
-    fn revert_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Replaces the draft with the before column, dropping every edit
+    /// since, the agent's and the user's.
+    fn restore_before(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(base) = self
             .changes
             .history
@@ -542,11 +544,12 @@ impl Chrome {
             self.show_error("Wait for the agent to finish before reverting.", cx);
             return;
         }
+        let restored = format!("Restored the draft {}", self.before_name());
         self.editor
             .update(cx, |editor, cx| editor.replace_all(&base, cx));
         window.focus(&self.review_focus, cx);
         self.select_change(None, cx);
-        self.show_undoable_edit("Reverted all changes", cx);
+        self.show_undoable_edit(restored, cx);
     }
 
     /// Keeps the selected change and moves on to the next one not kept, or
@@ -744,21 +747,29 @@ impl Chrome {
             .child(self.review_bar(palette, cx))
     }
 
+    /// The before column's version, in a sentence: the text before the
+    /// compared edits.
+    fn before_name(&self) -> String {
+        let edits = &self.changes.history.edits;
+        let since = self.changes.since;
+        if since + 1 >= edits.len() {
+            let prompt = edits.get(since).map_or("", |edit| edit.prompt.as_str());
+            format!("before “{}”", clip(prompt, 30))
+        } else if since == 0 {
+            format!("before all {} edits", edits.len())
+        } else {
+            format!("before the last {} edits", edits.len() - since)
+        }
+    }
+
     /// A column's name over its preview: the text before the compared
     /// edits, or now.
     pub(super) fn column_head(&self, before: bool, palette: &Palette) -> impl IntoElement {
-        let name = if !before {
-            "Now".to_owned()
-        } else if self.changes.since + 1 >= self.changes.history.edits.len() {
-            let prompt = self
-                .changes
-                .history
-                .edits
-                .get(self.changes.since)
-                .map_or("", |edit| edit.prompt.as_str());
-            format!("Before “{}”", clip(prompt, 30))
+        let name = if before {
+            let name = self.before_name();
+            format!("B{}", &name[1..])
         } else {
-            format!("Before {}", self.changes.range_name().to_lowercase())
+            "Now".to_owned()
         };
         div()
             .absolute()
@@ -930,16 +941,18 @@ impl Chrome {
                             cx.listener(|this, _, _, cx| this.step(true, cx)),
                         )),
                 )
-                // With no change selected it restores the whole before column.
+                // With no change selected it restores the before column.
                 .child(match selected {
                     Some(_) => bar_button("review-revert", "Revert", &palette)
                         .tooltip(crate::tooltip::text("Revert This Change (R)"))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.revert_change(window, cx)),
                         ),
-                    None => bar_button("review-revert", "Revert All", &palette)
-                        .tooltip(crate::tooltip::text("Revert to the Before Column"))
-                        .on_click(cx.listener(|this, _, window, cx| this.revert_all(window, cx))),
+                    None => bar_button("review-revert", "Restore", &palette)
+                        .tooltip(crate::tooltip::text("Go Back to the Before Column"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.restore_before(window, cx)),
+                        ),
                 })
                 .child(
                     bar_button("review-keep", if kept { "Kept" } else { "Keep" }, &palette)
@@ -1030,7 +1043,8 @@ impl Chrome {
             )
     }
 
-    /// "Show Changes Since" each agent edit, newest first, and Revert All.
+    /// "Show Changes Since" each agent edit, newest first, and a way back
+    /// to the before column.
     fn range_menu(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let now = Utc::now();
         let edits = &self.changes.history.edits;
@@ -1059,7 +1073,7 @@ impl Chrome {
             heading: false,
         });
         items.push(MenuItem {
-            label: "Revert All Changes".into(),
+            label: "Restore the Before Column".into(),
             checked: false,
             enabled: self
                 .comparison()
@@ -1080,7 +1094,7 @@ impl Chrome {
                         if let Some(review) = &mut this.review {
                             review.menu_open = false;
                         }
-                        this.revert_all(window, cx);
+                        this.restore_before(window, cx);
                     }
                 })
                 .ok();
