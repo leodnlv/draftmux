@@ -1,10 +1,11 @@
 //! AppKit-style pop-up and context menus, drawn in the window.
 
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, FocusHandle, IntoElement, RenderOnce, ScrollHandle, SharedString, Window, anchored, div,
-    point, prelude::*, px,
+    ease_out_quint, point, prelude::*, px,
 };
 
 use crate::chrome::shadow;
@@ -38,6 +39,7 @@ struct MenuState {
     selected: Option<usize>,
     scroll: ScrollHandle,
     closed: bool,
+    opened: Instant,
 }
 
 impl MenuState {
@@ -78,6 +80,9 @@ fn popup_geometry(checked_top: f32, window_height: f32) -> (f32, f32, f32) {
     let visible_top = checked_top.min(height - 30.);
     (height, visible_top, checked_top - visible_top)
 }
+
+/// How long a menu takes to fade in. As in AppKit, it closes at once.
+const FADE_IN: Duration = Duration::from_millis(100);
 
 type Pick<A> = Rc<dyn Fn(A, &mut Window, &mut App)>;
 type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -146,6 +151,7 @@ impl<A: Clone + 'static> RenderOnce for MenuPanel<A> {
                 selected: checked,
                 scroll,
                 closed: false,
+                opened: Instant::now(),
             }
         };
         let state = window.use_keyed_state("menu-panel", cx, initialize);
@@ -291,6 +297,11 @@ impl<A: Clone + 'static> RenderOnce for MenuPanel<A> {
                         .into_any_element()
                 }
             });
+        }
+        let fade = state.read(cx).opened.elapsed().as_secs_f32() / FADE_IN.as_secs_f32();
+        if fade < 1. {
+            panel = panel.opacity(ease_out_quint()(fade));
+            window.request_animation_frame();
         }
         if self.popup {
             anchored()
