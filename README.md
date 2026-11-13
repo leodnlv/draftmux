@@ -25,7 +25,7 @@ Status: early release; expect rough edges.
   your pi profile, so your skills are available.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
   text or plain text.
-- **Selection actions.** Select text for alternatives, Shorter or Tighten, or
+- **Selection actions.** Select text for alternatives, Shorten or Tighten, or
   your own actions. Options appear as previews while pi generates the rest;
   choose one when the request finishes. With text selected, a chat message
   changes only that part. Hold `⌘` while dragging to select more passages; a

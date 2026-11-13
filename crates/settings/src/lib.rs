@@ -43,7 +43,7 @@ pub struct Settings {
     pub directories: Vec<Rule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alternatives: Option<usize>,
-    /// Unset uses Shorter and Tighten; an empty list hides all custom actions.
+    /// Unset uses Shorten and Tighten; an empty list hides all custom actions.
     #[serde(
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_actions"
@@ -69,7 +69,7 @@ impl SelectionAction {
 pub fn default_selection_actions() -> Vec<SelectionAction> {
     [
         (
-            "Shorter",
+            "Shorten",
             "Make it shorter while keeping the important meaning.",
         ),
         (
