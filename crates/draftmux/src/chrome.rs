@@ -81,6 +81,7 @@ const CLOCK_TICK: Duration = Duration::from_secs(30);
 pub fn init(cx: &mut App) {
     sidebar::init(cx);
     review::init(cx);
+    update_offer::init(cx);
     cx.bind_keys([
         KeyBinding::new(editor::secondary!("\\"), ToggleSidebar, None),
         KeyBinding::new(editor::secondary!("alt-e"), ToggleEditor, None),

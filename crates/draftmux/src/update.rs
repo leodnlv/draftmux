@@ -108,7 +108,7 @@ impl EventEmitter<Notice> for Updater {}
 
 pub fn init(cx: &mut App) {
     let entity = cx.new(|cx| Updater {
-        status: Status::Idle,
+        status: dev_offer().unwrap_or(Status::Idle),
         _poll: cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FIRST_CHECK_DELAY).await;
             loop {
@@ -267,6 +267,37 @@ fn eligibility() -> Result<Installation, Ineligible> {
     return install::installation();
     #[cfg(not(target_os = "macos"))]
     Err(Ineligible::Unsupported)
+}
+
+/// Debug builds only: an offer of the next minor version, for looking at
+/// the update card without a newer release. `DRAFTMUX_DEV_UPDATE_OFFER` is
+/// `ready` or `blocked`; the notes are selected from the changelog file at
+/// `DRAFTMUX_DEV_UPDATE_CHANGELOG`, and fail to load without one.
+fn dev_offer() -> Option<Status> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let kind = std::env::var("DRAFTMUX_DEV_UPDATE_OFFER").ok()?;
+    let installed = current_version();
+    let version = Version::new(installed.major, installed.minor + 1, 0);
+    let notes = std::env::var_os("DRAFTMUX_DEV_UPDATE_CHANGELOG")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|changelog| notes::select(&changelog, &installed, &version));
+    let release = Release {
+        page: format!("https://github.com/raine/draftmux/releases/tag/v{version}"),
+        archive_url: String::new(),
+        checksum_url: String::new(),
+        notes,
+        version: version.clone(),
+    };
+    match kind.as_str() {
+        "ready" => Some(Status::Ready(release)),
+        "blocked" => Some(Status::Blocked {
+            reason: Ineligible::Development.guidance(&version),
+            release,
+        }),
+        _ => None,
+    }
 }
 
 fn automatic_checks(cx: &App) -> bool {

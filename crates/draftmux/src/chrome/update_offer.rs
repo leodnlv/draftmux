@@ -2,8 +2,9 @@
 //! the offered release and a way to take it.
 
 use gpui::{
-    Anchor, Context, FontWeight, IntoElement, MouseButton, ScrollHandle, SharedString, anchored,
-    deferred, div, linear_color_stop, linear_gradient, prelude::*, px,
+    Anchor, App, Context, FocusHandle, FontWeight, IntoElement, KeyBinding, MouseButton,
+    ScrollHandle, SharedString, Window, anchored, deferred, div, linear_color_stop,
+    linear_gradient, prelude::*, px,
 };
 use markup::Document;
 use semver::Version;
@@ -13,14 +14,40 @@ use crate::markup_view::{self, MarkupStyle};
 use crate::theme::{self, Palette, hex};
 use crate::update::{self, CURRENT_VERSION, Release, Updater};
 
-/// The open card, with the offered release's notes parsed once.
+gpui::actions!(update_card, [CloseUpdateCard]);
+
+pub(super) fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        CloseUpdateCard,
+        Some("UpdateCard"),
+    )]);
+}
+
+/// The open card, with the offered release's notes parsed once. It holds
+/// the focus so Escape closes it, and hands it back when it closes.
 pub(super) struct UpdateCard {
     version: Version,
     notes: Option<Document>,
     scroll: ScrollHandle,
+    focus: FocusHandle,
+    previous: Option<FocusHandle>,
 }
 
 impl Chrome {
+    fn close_update_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.update_card.take() else {
+            return;
+        };
+        if card.focus.is_focused(window) {
+            match &card.previous {
+                Some(previous) => previous.focus(window, cx),
+                None => window.blur(cx),
+            }
+        }
+        cx.notify();
+    }
+
     /// Opens the card of an installed update or of one this copy can't
     /// install itself.
     pub(super) fn update_button(
@@ -65,12 +92,17 @@ impl Chrome {
                     .tooltip(crate::tooltip::text(tooltip))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     // Only opens: the mouse-down already closed an open card.
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
+                        let focus = cx.focus_handle();
+                        let previous = window.focused(cx);
+                        focus.focus(window, cx);
                         this.update_card = Some(UpdateCard {
                             version: release.version.clone(),
                             notes: release.notes.as_deref().map(markup::github::parse),
                             scroll: ScrollHandle::new(),
+                            focus,
+                            previous,
                         });
                         cx.notify();
                     }))
@@ -119,6 +151,8 @@ fn update_card(
     };
     div()
         .id("update-card")
+        .track_focus(&card.focus)
+        .key_context("UpdateCard")
         .occlude()
         .w(px(380.))
         .flex()
@@ -133,10 +167,10 @@ fn update_card(
             shadow(hex(0x00000029), 6., 18., 0.),
         ])
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-            this.update_card = None;
-            cx.notify();
-        }))
+        .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_update_card(window, cx)))
+        .on_action(
+            cx.listener(|this, _: &CloseUpdateCard, window, cx| this.close_update_card(window, cx)),
+        )
         .child(
             div()
                 .px(px(16.))
@@ -196,10 +230,9 @@ fn update_card(
                         ])
                         .hover(|style| style.bg(palette.control_hover))
                         .active(|style| style.opacity(0.8))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_card = None;
-                            cx.notify();
-                        }))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.close_update_card(window, cx)),
+                        )
                         .child("Later"),
                 )
                 .child(
@@ -228,8 +261,8 @@ fn update_card(
                             shadow(palette.primary_drop, 1., 1.5, 0.),
                         ])
                         .active(|style| style.opacity(0.8))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.update_card = None;
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_update_card(window, cx);
                             match &page {
                                 Some(page) => cx.open_url(page),
                                 None => {
@@ -238,17 +271,18 @@ fn update_card(
                                     }
                                 }
                             }
-                            cx.notify();
                         }))
                         .child(action),
                 ),
         )
 }
 
-/// GitHub's Markdown at the card's text size.
+/// GitHub's Markdown at the card's text size. The version headings are no
+/// larger than the text, so they stay below the card's title.
 fn notes_style(cx: &Context<Chrome>) -> MarkupStyle {
     let mut style = MarkupStyle::github(theme::get(cx).dark);
     style.text_size = px(13.);
+    style.heading_scale[2] = 1.;
     style.block_gap = px(8.);
     style.heading_gap = px(12.);
     style
