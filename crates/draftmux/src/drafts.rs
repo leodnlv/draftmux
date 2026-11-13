@@ -4,6 +4,7 @@
 //! draft's pending edits are flushed before it is left, archived or the app
 //! quits, and a switch is refused while they can't be saved.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -62,6 +63,8 @@ pub struct Drafts {
     store: Store,
     /// Active drafts, most recently active first.
     rows: Vec<Row>,
+    /// Archived drafts, most recently active first.
+    archived: Vec<Row>,
     current: Option<Current>,
 }
 
@@ -75,6 +78,7 @@ impl Drafts {
         let mut drafts = Self {
             store,
             rows: Vec::new(),
+            archived: Vec::new(),
             current: None,
         };
         drafts.refresh();
@@ -83,6 +87,10 @@ impl Drafts {
 
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    pub fn archived(&self) -> &[Row] {
+        &self.archived
     }
 
     pub fn current(&self) -> Option<&Draft> {
@@ -103,12 +111,33 @@ impl Drafts {
             }
         };
         scan.report_errors(&mut std::io::stderr()).ok();
+        let title = |draft: &Draft| {
+            display_title(&draft.meta.title, || {
+                self.store.read_text(&draft.id).unwrap_or_default()
+            })
+        };
         self.rows = scan
             .active()
             .map(|draft| Row {
-                title: display_title(&draft.meta.title, || {
-                    self.store.read_text(&draft.id).unwrap_or_default()
-                }),
+                title: title(draft),
+                draft: draft.clone(),
+            })
+            .collect();
+        // Archived drafts accumulate, so an unchanged one keeps its title
+        // rather than having its text read again.
+        let mut titled: HashMap<String, Row> = std::mem::take(&mut self.archived)
+            .into_iter()
+            .map(|row| (row.draft.id.clone(), row))
+            .collect();
+        self.archived = scan
+            .drafts
+            .iter()
+            .filter(|draft| draft.meta.status == Status::Archived)
+            .map(|draft| Row {
+                title: match titled.remove(&draft.id) {
+                    Some(row) if row.draft.meta == draft.meta => row.title,
+                    _ => title(draft),
+                },
                 draft: draft.clone(),
             })
             .collect();
@@ -492,6 +521,46 @@ mod tests {
         let drafts = Drafts::new(store);
         assert_eq!(order(&drafts), [new.as_str(), old.as_str()]);
         assert_eq!(drafts.rows()[0].title, "new");
+    }
+
+    fn archived_order(drafts: &Drafts) -> Vec<&str> {
+        drafts
+            .archived()
+            .iter()
+            .map(|row| row.draft.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn archived_drafts_are_listed_newest_first_and_follow_restores() {
+        let (_root, store) = store();
+        let active = create(&store, "active", TimeDelta::zero());
+        let old = create(&store, "old", TimeDelta::hours(2));
+        let new = create(&store, "new", TimeDelta::hours(1));
+        store.archive(&old).unwrap();
+
+        let mut drafts = Drafts::new(store.clone());
+        drafts.archive(&new).unwrap();
+        assert_eq!(order(&drafts), [active.as_str()]);
+        assert_eq!(archived_order(&drafts), [new.as_str(), old.as_str()]);
+        assert_eq!(drafts.archived()[0].title, "new");
+
+        drafts.unarchive(&new).unwrap();
+        assert_eq!(order(&drafts), [active.as_str(), new.as_str()]);
+        assert_eq!(archived_order(&drafts), [old.as_str()]);
+    }
+
+    #[test]
+    fn archived_titles_follow_changes_on_disk() {
+        let (_root, store) = store();
+        let id = create(&store, "before", TimeDelta::hours(1));
+        store.archive(&id).unwrap();
+        let mut drafts = Drafts::new(store.clone());
+        assert_eq!(drafts.archived()[0].title, "before");
+
+        store.save_text(&id, "after").unwrap();
+        drafts.refresh();
+        assert_eq!(drafts.archived()[0].title, "after");
     }
 
     #[test]

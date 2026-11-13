@@ -161,6 +161,8 @@ pub struct Chrome {
     /// The drafts the sidebar listed when it last rendered.
     seen_rows: RefCell<Option<HashSet<String>>>,
     leaving_rows: Vec<sidebar::LeavingRow>,
+    /// The sidebar's Archived section, collapsed until opened.
+    archived_section: sidebar::ArchivedSection,
     sidebar_scroll: ScrollHandle,
     sidebar_focus: FocusHandle,
     content_focus: FocusHandle,
@@ -185,6 +187,9 @@ impl Render for Chrome {
         let palette = *theme::palette(cx);
         self.fit_to_width(window, cx);
         self.leaving_rows.retain(sidebar::LeavingRow::folding);
+        self.archived_section
+            .leaving
+            .retain(sidebar::LeavingRow::folding);
         self.mirror_flash(window, cx);
         let shown = [self.show_sidebar, self.show_editor, self.show_preview];
         let panes = self.panes.get_or_insert_with(|| shown.map(Slide::new));
@@ -570,6 +575,7 @@ impl Chrome {
             row_menu: None,
             seen_rows: RefCell::default(),
             leaving_rows: Vec::new(),
+            archived_section: Default::default(),
             sidebar_scroll: ScrollHandle::new(),
             sidebar_focus: cx.focus_handle(),
             content_focus: cx.focus_handle(),

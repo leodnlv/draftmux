@@ -48,6 +48,9 @@
   leaving the draft to be found by hand.
 - `draftmux restore <id>` unarchives a draft. If the app is running, the draft
   reappears in the sidebar and is selected.
+- The sidebar has an Archived section at the bottom, collapsed by default. It
+  lists the 20 most recently active archived drafts, with Show All for the
+  rest, and each can be restored from its row or its right-click menu.
 
 ## v0.1.0 (2026-11-12)
 

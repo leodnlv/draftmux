@@ -1,7 +1,8 @@
-//! The drafts list and the toast.
+//! The drafts list, its Archived section and the toast.
 
 use std::time::Duration;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
@@ -9,12 +10,12 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, FontWeight, KeyBinding,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Task, actions, anchored, deferred,
-    div, ease_out_quint, prelude::*, px, svg,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Task, Transformation, actions,
+    anchored, deferred, div, ease_out_quint, percentage, prelude::*, px, svg,
 };
 
 use super::{Chrome, shadow, sidebar_column};
-use crate::assets::{ARCHIVE_ICON, TOAST_DONE_ICON, TOAST_ERROR_ICON};
+use crate::assets::{ARCHIVE_ICON, CHEVRON_ICON, RESET_ICON, TOAST_DONE_ICON, TOAST_ERROR_ICON};
 use crate::drafts::{Row, relative_time, tilde};
 use crate::menu::{MenuItem, menu_panel};
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
@@ -28,6 +29,8 @@ const TOAST_FADE_OUT: Duration = Duration::from_millis(150);
 /// How far a toast rises as it fades in.
 const TOAST_RISE: f32 = 6.;
 const KEY_CONTEXT: &str = "DraftSidebar";
+/// How many archived drafts the Archived section lists until asked for all.
+const ARCHIVED_SHOWN: usize = 20;
 
 actions!(sidebar, [PreviousDraft, NextDraft, ArchiveDraft]);
 
@@ -87,6 +90,30 @@ impl LeavingRow {
     }
 }
 
+/// The Archived section at the bottom of the drafts list, listing the most
+/// recently active archived drafts.
+#[derive(Default)]
+pub(super) struct ArchivedSection {
+    open: bool,
+    /// Lists every archived draft, not just the first [`ARCHIVED_SHOWN`].
+    all: bool,
+    /// The drafts the section listed when it last rendered.
+    seen: RefCell<Option<HashSet<String>>>,
+    /// Restored drafts' rows, folding shut where they were.
+    pub(super) leaving: Vec<LeavingRow>,
+}
+
+impl ArchivedSection {
+    /// How many of `len` archived drafts are listed.
+    fn shown(&self, len: usize) -> usize {
+        if self.all {
+            len
+        } else {
+            len.min(ARCHIVED_SHOWN)
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum ToastUndo {
     /// Unarchives the draft.
@@ -107,6 +134,7 @@ enum RowAction {
     CopyId,
     Reveal,
     Archive,
+    Restore,
 }
 
 impl Chrome {
@@ -161,50 +189,19 @@ impl Chrome {
         let palette = *theme::palette(cx);
         let now = Utc::now();
         let home = std::env::home_dir();
-        let ids: HashSet<String> = self
-            .drafts
-            .rows()
-            .iter()
-            .map(|row| row.draft.id.clone())
-            .collect();
-        // Rows that weren't there last time unfold, except on the first
-        // render, which shows the list as it is.
-        let seen = self.seen_rows.replace(Some(ids.clone()));
-        let mut rows: Vec<AnyElement> = self
-            .drafts
-            .rows()
-            .iter()
-            .map(|row| {
-                let entering = seen
-                    .as_ref()
-                    .is_some_and(|seen| !seen.contains(&row.draft.id));
-                let element = self.draft_row(row, now, home.as_deref(), &palette, cx);
-                crate::fold::fold(
-                    SharedString::from(format!("draft-fold-{}", row.draft.id)),
-                    true,
-                    entering,
-                    move || div().pb(px(1.)).child(element).into_any_element(),
-                    window,
-                    cx,
-                )
-            })
-            .collect();
-        // Archived rows fold shut where they were.
-        for leaving in &self.leaving_rows {
-            if ids.contains(&leaving.row.draft.id) {
-                continue;
-            }
-            let element = self.draft_row(&leaving.row, now, home.as_deref(), &palette, cx);
-            let folded = crate::fold::fold(
-                SharedString::from(format!("draft-fold-{}", leaving.row.draft.id)),
-                false,
-                false,
-                move || div().pb(px(1.)).child(element).into_any_element(),
-                window,
-                cx,
-            );
-            rows.insert(leaving.index.min(rows.len()), folded);
-        }
+        let rows = self.fold_rows(
+            self.drafts.rows(),
+            &self.seen_rows,
+            &self.leaving_rows,
+            false,
+            now,
+            home.as_deref(),
+            &palette,
+            window,
+            cx,
+        );
+        let archived = self.archived_section(now, home.as_deref(), &palette, window, cx);
+        let listed = !self.drafts.rows().is_empty() || archived.is_some();
 
         sidebar_column(&palette)
             .h_full()
@@ -248,21 +245,197 @@ impl Chrome {
                             .overflow_y_scroll()
                             .track_scroll(&self.sidebar_scroll)
                             .children(rows)
+                            // Keeps the Archived section at the bottom of a
+                            // short list.
+                            .when_some(archived, |list, archived| {
+                                list.child(div().flex_1().min_h(px(8.))).child(archived)
+                            })
                             // A spacer avoids making an empty list scrollable
                             // with vertical padding on the scroll container.
-                            .when(!self.drafts.rows().is_empty(), |list| {
-                                list.child(div().h(px(11.)).flex_none())
-                            }),
+                            .when(listed, |list| list.child(div().h(px(11.)).flex_none())),
                     )
                     .child(scrollbar(Source::Handle(self.sidebar_scroll.clone()), bar)),
             )
             .children(self.row_menu(&palette, cx))
     }
 
-    /// One row of the drafts list.
+    /// `rows` folded open. Rows that weren't listed last time unfold, except
+    /// on the first render, which shows the list as it is; `leaving` rows
+    /// fold shut where they were.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_rows(
+        &self,
+        rows: &[Row],
+        seen: &RefCell<Option<HashSet<String>>>,
+        leaving: &[LeavingRow],
+        archived: bool,
+        now: DateTime<Utc>,
+        home: Option<&Path>,
+        palette: &theme::Palette,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let prefix = if archived {
+            "archived-fold"
+        } else {
+            "draft-fold"
+        };
+        let ids: HashSet<String> = rows.iter().map(|row| row.draft.id.clone()).collect();
+        let seen = seen.replace(Some(ids.clone()));
+        let mut elements: Vec<AnyElement> = rows
+            .iter()
+            .map(|row| {
+                let entering = seen
+                    .as_ref()
+                    .is_some_and(|seen| !seen.contains(&row.draft.id));
+                let element = self.draft_row(row, archived, now, home, palette, cx);
+                crate::fold::fold(
+                    SharedString::from(format!("{prefix}-{}", row.draft.id)),
+                    true,
+                    entering,
+                    move || div().pb(px(1.)).child(element).into_any_element(),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+        for leaving in leaving {
+            if ids.contains(&leaving.row.draft.id) {
+                continue;
+            }
+            let element = self.draft_row(&leaving.row, archived, now, home, palette, cx);
+            let folded = crate::fold::fold(
+                SharedString::from(format!("{prefix}-{}", leaving.row.draft.id)),
+                false,
+                false,
+                move || div().pb(px(1.)).child(element).into_any_element(),
+                window,
+                cx,
+            );
+            elements.insert(leaving.index.min(elements.len()), folded);
+        }
+        elements
+    }
+
+    /// The collapsible Archived section, while there are archived drafts.
+    fn archived_section(
+        &self,
+        now: DateTime<Utc>,
+        home: Option<&Path>,
+        palette: &theme::Palette,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let section = &self.archived_section;
+        let archived = self.drafts.archived();
+        if archived.is_empty() && section.leaving.is_empty() {
+            return None;
+        }
+        let palette = *palette;
+        let shown = section.shown(archived.len());
+        let rows = self.fold_rows(
+            &archived[..shown],
+            &section.seen,
+            &section.leaving,
+            true,
+            now,
+            home,
+            &palette,
+            window,
+            cx,
+        );
+        let more = (archived.len() > ARCHIVED_SHOWN).then(|| {
+            div()
+                .id("archived-more")
+                .flex_none()
+                .mt(px(2.))
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(palette.muted)
+                .hover(|style| style.text_color(palette.text))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.archived_section.all = !this.archived_section.all;
+                    cx.notify();
+                }))
+                .child(if section.all {
+                    "Show fewer".to_owned()
+                } else {
+                    format!("Show all {}", archived.len())
+                })
+        });
+        let chevron = svg()
+            .flex_none()
+            .path(CHEVRON_ICON)
+            .size(px(10.))
+            .text_color(palette.faint);
+        let header = div()
+            .id("archived-header")
+            .flex_none()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(palette.faint)
+            .hover(|style| style.text_color(palette.muted))
+            .on_click(cx.listener(|this, _, _, cx| {
+                let section = &mut this.archived_section;
+                section.open = !section.open;
+                // Reopening starts from the most recent drafts again.
+                section.all = false;
+                cx.notify();
+            }))
+            .child("Archived")
+            .child(if section.open {
+                chevron
+                    .with_transformation(Transformation::rotate(percentage(0.25)))
+                    .into_any_element()
+            } else {
+                chevron.into_any_element()
+            })
+            .child(
+                div()
+                    .ml_auto()
+                    .font_weight(FontWeight::NORMAL)
+                    .child(archived.len().to_string()),
+            );
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(crate::fold::fold(
+                    "archived-section",
+                    section.open,
+                    false,
+                    move || {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .children(rows)
+                            .children(more)
+                            .into_any_element()
+                    },
+                    window,
+                    cx,
+                ))
+                .into_any_element(),
+        )
+    }
+
+    /// One row of the drafts list, or with `archived` of the Archived
+    /// section, which offers Restore in place of Archive and can't be
+    /// selected.
     fn draft_row(
         &self,
         row: &Row,
+        archived: bool,
         now: DateTime<Utc>,
         home: Option<&Path>,
         palette: &theme::Palette,
@@ -271,9 +444,19 @@ impl Chrome {
         let palette = *palette;
         let current = self.drafts.current_id();
         let id = row.draft.id.clone();
-        let selected = current == Some(id.as_str());
+        let selected = !archived && current == Some(id.as_str());
         let menu_open = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
-        let group: SharedString = format!("draft-row-{id}").into();
+        let group: SharedString = if archived {
+            format!("archived-row-{id}")
+        } else {
+            format!("draft-row-{id}")
+        }
+        .into();
+        let (icon, tooltip) = if archived {
+            (RESET_ICON, "Restore")
+        } else {
+            (ARCHIVE_ICON, "Archive")
+        };
         div()
             .id(group.clone())
             .group(group.clone())
@@ -312,13 +495,15 @@ impl Chrome {
                     }
                 }),
             )
-            .on_click(cx.listener({
-                let id = id.clone();
-                move |this, _, window, cx| {
-                    this.select(&id, window, cx).ok();
-                    this.focus_sidebar(window, cx);
-                }
-            }))
+            .when(!archived, |row| {
+                row.on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, window, cx| {
+                        this.select(&id, window, cx).ok();
+                        this.focus_sidebar(window, cx);
+                    }
+                }))
+            })
             .child(
                 div()
                     .flex_1()
@@ -342,7 +527,8 @@ impl Chrome {
                                     .child(markup::replace_shortcodes(&row.title)),
                             )
                             // Wide enough that the title stops short of the
-                            // archive button, which replaces the time on hover.
+                            // archive or restore button, which replaces the
+                            // time on hover.
                             .child(
                                 div()
                                     .flex_none()
@@ -383,7 +569,10 @@ impl Chrome {
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("archive-{id}")))
+                    .id(SharedString::from(format!(
+                        "{}-{id}",
+                        tooltip.to_lowercase()
+                    )))
                     .absolute()
                     .top(px(5.))
                     .right(px(6.))
@@ -397,15 +586,16 @@ impl Chrome {
                     // Translucent, so it darkens whatever the row shows.
                     .hover(|style| style.bg(palette.selected_row))
                     .active(|style| style.opacity(0.8))
-                    .tooltip(crate::tooltip::text("Archive"))
+                    .tooltip(crate::tooltip::text(tooltip))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| this.archive(&id, window, cx)))
-                    .child(
-                        svg()
-                            .path(ARCHIVE_ICON)
-                            .size(px(14.))
-                            .text_color(palette.muted),
-                    ),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if archived {
+                            this.restore(&id, window, cx);
+                        } else {
+                            this.archive(&id, window, cx);
+                        }
+                    }))
+                    .child(svg().path(icon).size(px(14.)).text_color(palette.muted)),
             )
     }
 
@@ -434,7 +624,16 @@ impl Chrome {
                 detail: None,
                 heading: false,
             },
-            item("Archive", RowAction::Archive),
+            if self
+                .drafts
+                .archived()
+                .iter()
+                .any(|row| row.draft.id == menu.id)
+            {
+                item("Restore", RowAction::Restore)
+            } else {
+                item("Archive", RowAction::Archive)
+            },
         ];
         let this = cx.entity().downgrade();
         let id = menu.id.clone();
@@ -480,11 +679,18 @@ impl Chrome {
                 self.show_toast("Draft ID copied", cx);
             }
             RowAction::Reveal => {
-                if let Some(row) = self.drafts.rows().iter().find(|row| row.draft.id == id) {
+                if let Some(row) = self
+                    .drafts
+                    .rows()
+                    .iter()
+                    .chain(self.drafts.archived())
+                    .find(|row| row.draft.id == id)
+                {
                     cx.reveal_path(&row.draft.dir);
                 }
             }
             RowAction::Archive => self.archive(id, window, cx),
+            RowAction::Restore => self.restore(id, window, cx),
         }
         cx.notify();
     }
@@ -532,14 +738,42 @@ impl Chrome {
 
     fn undo_archive(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.toast = None;
-        if let Err(err) = self.drafts.unarchive(id) {
-            self.show_error(format!("Couldn't restore the draft: {err:#}"), cx);
-            return;
-        }
-        if self.drafts.current().is_none() {
+        if self.unarchive(id, cx) && self.drafts.current().is_none() {
             self.select(id, window, cx).ok();
         }
         cx.notify();
+    }
+
+    /// Restores `id` from the Archived section and selects it.
+    fn restore(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.unarchive(id, cx) && self.select(id, window, cx).is_ok() {
+            self.focus_sidebar(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Unarchives `id`, folding its row in the Archived section shut. Shows
+    /// the error and returns false if that fails.
+    fn unarchive(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let archived = self.drafts.archived();
+        let leaving = archived
+            .iter()
+            .take(self.archived_section.shown(archived.len()))
+            .position(|row| row.draft.id == id)
+            .map(|index| LeavingRow {
+                index,
+                row: Row {
+                    draft: archived[index].draft.clone(),
+                    title: archived[index].title.clone(),
+                },
+                since: Instant::now(),
+            });
+        if let Err(err) = self.drafts.unarchive(id) {
+            self.show_error(format!("Couldn't restore the draft: {err:#}"), cx);
+            return false;
+        }
+        self.archived_section.leaving.extend(leaving);
+        true
     }
 
     fn undo_edit(&mut self, cx: &mut Context<Self>) {
