@@ -4,22 +4,38 @@
 //! literal. The whole text is one unstyled paragraph whose `\n`s are its line
 //! breaks, blank lines included, so it reads the way a mail client shows it.
 
+use crate::source_map::{Node, Pieces, SourceMap, restore_crlf};
 use crate::{Block, Document, Span, SpanStyle};
 
 pub fn parse(text: &str) -> Document {
-    let text = text.replace("\r\n", "\n");
+    parse_mapped(text).0
+}
+
+/// [`parse`], with where its text came from in `text`: all of it is the
+/// text itself.
+pub fn parse_mapped(text: &str) -> (Document, SourceMap) {
+    let normal = text.replace("\r\n", "\n");
     // Trailing line breaks show nothing in a sent email.
-    let text = text.trim_end_matches('\n');
-    if text.trim().is_empty() {
-        return Document::default();
+    let shown = normal.trim_end_matches('\n');
+    if shown.trim().is_empty() {
+        return (Document::default(), SourceMap::default());
     }
-    Document {
+    let mut pieces = Pieces::default();
+    pieces.push(shown.len(), 0..shown.len(), true);
+    let mut blocks = vec![Node {
+        source: 0..shown.len(),
+        pieces: pieces.pieces,
+        children: Vec::new(),
+    }];
+    restore_crlf(&mut blocks, text);
+    let doc = Document {
         blocks: vec![Block::Paragraph(vec![Span {
-            text: text.to_owned(),
+            text: shown.to_owned(),
             style: SpanStyle::default(),
             link: None,
         }])],
-    }
+    };
+    (doc, SourceMap { blocks })
 }
 
 #[cfg(test)]

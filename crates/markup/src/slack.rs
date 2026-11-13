@@ -31,6 +31,7 @@
 
 use std::ops::Range;
 
+use crate::source_map::{Lex, Node, Piece, Pieces, SourceMap, restore_crlf};
 use crate::{Alignment, Block, Document, List, ListItem, Span, SpanStyle, Table, push_span};
 
 mod mrkdwn;
@@ -39,6 +40,13 @@ pub use mrkdwn::from_mrkdwn;
 
 pub fn parse(text: &str) -> Document {
     parse_with(text, Grammar::Markdown).0
+}
+
+/// [`parse`], with where each block and run of text came from in `text`.
+pub fn parse_mapped(text: &str) -> (Document, SourceMap) {
+    let (doc, mut blocks, _) = read(text, Grammar::Markdown, true);
+    restore_crlf(&mut blocks, text);
+    (doc, SourceMap { blocks })
 }
 
 /// The inline syntax of a Slack draft. Block rules are the same in both.
@@ -60,12 +68,21 @@ struct InlineRange {
 /// The document `text` holds in `grammar`, and the ranges of `text`, with
 /// `\r\n` read as `\n`, whose inline syntax it parsed, in order.
 fn parse_with(text: &str, grammar: Grammar) -> (Document, Vec<InlineRange>) {
+    let (doc, _, ranges) = read(text, grammar, false);
+    (doc, ranges)
+}
+
+/// [`parse_with`], and a [`Node`] per block whose offsets are in `text` with
+/// `\r\n` read as `\n`. Only `mapped` nodes have pieces.
+fn read(text: &str, grammar: Grammar, mapped: bool) -> (Document, Vec<Node>, Vec<InlineRange>) {
     let text = text.replace("\r\n", "\n");
     let mut parser = Parser {
         text: &text,
         grammar,
+        mapped,
         pos: 0,
         blocks: Vec::new(),
+        nodes: Vec::new(),
         para: Vec::new(),
         inline_ranges: Vec::new(),
     };
@@ -76,7 +93,7 @@ fn parse_with(text: &str, grammar: Grammar) -> (Document, Vec<InlineRange>) {
     let doc = Document {
         blocks: parser.blocks,
     };
-    (doc, ranges)
+    (doc, parser.nodes, ranges)
 }
 
 /// The blocks Slack posts when `doc` is pasted into its composer as rich
@@ -89,6 +106,31 @@ fn parse_with(text: &str, grammar: Grammar) -> (Document, Vec<InlineRange>) {
 /// spans more than one line, or it is numbered and any numbered list in the
 /// paste starts at something other than 1.
 pub fn posted(doc: &Document) -> Vec<(Block, Option<&'static str>)> {
+    posting(doc, None)
+        .into_iter()
+        .map(|(block, note, _)| (block, note))
+        .collect()
+}
+
+/// [`posted`], with `map`, the map of `doc`, carried over to the posted
+/// blocks. The text posting adds, list markers and a table's padding and
+/// rules, has no pieces.
+pub fn posted_mapped(
+    doc: &Document,
+    map: &SourceMap,
+) -> (Vec<(Block, Option<&'static str>)>, SourceMap) {
+    let mut blocks = Vec::new();
+    let mut nodes = Vec::new();
+    for (block, note, node) in posting(doc, Some(map)) {
+        blocks.push((block, note));
+        nodes.push(node);
+    }
+    (blocks, SourceMap { blocks: nodes })
+}
+
+/// The posted blocks of `doc`, each with its note and, when `map` is
+/// given, its node.
+fn posting(doc: &Document, map: Option<&SourceMap>) -> Vec<(Block, Option<&'static str>, Node)> {
     let renumbered = doc.blocks.iter().any(|block| {
         let mut found = false;
         visit_lists(block, &mut |list| {
@@ -98,40 +140,84 @@ pub fn posted(doc: &Document) -> Vec<(Block, Option<&'static str>)> {
     });
     doc.blocks
         .iter()
-        .map(|block| match block {
-            Block::Heading { spans, .. } => {
-                let spans = spans
-                    .iter()
-                    .map(|span| Span {
-                        style: SpanStyle {
-                            strong: true,
-                            ..span.style
-                        },
-                        ..span.clone()
-                    })
-                    .collect();
-                (Block::Paragraph(spans), None)
+        .enumerate()
+        .map(|(ix, block)| {
+            let node = map.and_then(|map| map.blocks.get(ix));
+            // A list or table node posted as one run of text.
+            let flat = |pieces: Vec<Piece>| {
+                leaf(node.map_or(0..0, |node| node.source.clone()), pieces)
+            };
+            match block {
+                Block::Heading { spans, .. } => {
+                    let spans = spans
+                        .iter()
+                        .map(|span| Span {
+                            style: SpanStyle {
+                                strong: true,
+                                ..span.style
+                            },
+                            ..span.clone()
+                        })
+                        .collect();
+                    (Block::Paragraph(spans), None, node.cloned().unwrap_or_default())
+                }
+                Block::Table(table) => {
+                    let (text, cells) = table_text(table);
+                    let mut pieces = Vec::new();
+                    if let Some(node) = node {
+                        let nodes = node.children.iter().flat_map(|row| &row.children);
+                        for (cell, &(at, shown)) in nodes.zip(&cells) {
+                            pieces.extend(shifted(&cell.pieces, at, shown));
+                        }
+                    }
+                    (
+                        Block::Code { lang: None, text },
+                        Some("Slack has no tables, so this pastes as a code block."),
+                        flat(pieces),
+                    )
+                }
+                Block::List(list) if multi_line_item(list) => {
+                    let mut lines = Lines::default();
+                    lines.list(list, 0, node);
+                    (
+                        Block::Paragraph(lines.spans),
+                        Some(
+                            "Slack can't keep a list item on several lines, so this pastes as text lines.",
+                        ),
+                        flat(lines.pieces),
+                    )
+                }
+                Block::List(list) if renumbered && list.start.is_some() => {
+                    let mut lines = Lines::default();
+                    lines.list(list, 0, node);
+                    (
+                        Block::Paragraph(lines.spans),
+                        Some("Slack numbered lists always start at 1, so this pastes as text lines."),
+                        flat(lines.pieces),
+                    )
+                }
+                block => (block.clone(), None, node.cloned().unwrap_or_default()),
             }
-            Block::Table(table) => (
-                Block::Code {
-                    lang: None,
-                    text: table_text(table),
-                },
-                Some("Slack has no tables, so this pastes as a code block."),
-            ),
-            Block::List(list) if multi_line_item(list) => (
-                Block::Paragraph(list_lines(list, 0)),
-                Some(
-                    "Slack can't keep a list item on several lines, so this pastes as text lines.",
-                ),
-            ),
-            Block::List(list) if renumbered && list.start.is_some() => (
-                Block::Paragraph(list_lines(list, 0)),
-                Some("Slack numbered lists always start at 1, so this pastes as text lines."),
-            ),
-            block => (block.clone(), None),
         })
         .collect()
+}
+
+/// The first `shown` bytes of the text `pieces` cover, moved to `at`.
+fn shifted(pieces: &[Piece], at: usize, shown: usize) -> impl Iterator<Item = Piece> + '_ {
+    pieces
+        .iter()
+        .filter(move |piece| piece.text.start < shown)
+        .map(move |piece| {
+            let mut piece = piece.clone();
+            if piece.text.end > shown {
+                if piece.exact {
+                    piece.source.end -= piece.text.end - shown;
+                }
+                piece.text.end = shown;
+            }
+            piece.text = at + piece.text.start..at + piece.text.end;
+            piece
+        })
 }
 
 /// Calls `f` on every list in `block`, nested ones included.
@@ -164,46 +250,62 @@ pub(crate) fn text_marker(list: &List, ix: usize) -> String {
     }
 }
 
-/// `list` as text lines with a "•" or "N." marker, nested items indented by
-/// four spaces per level.
-fn list_lines(list: &List, depth: usize) -> Vec<Span> {
-    let mut out = Vec::new();
-    for (ix, item) in list.items.iter().enumerate() {
-        if ix > 0 {
-            push_span(&mut out, "\n", SpanStyle::default(), None);
-        }
-        let marker = text_marker(list, ix);
-        push_span(
-            &mut out,
-            &format!("{}{marker}", "    ".repeat(depth)),
-            SpanStyle::default(),
-            None,
-        );
-        for (bx, block) in item.blocks.iter().enumerate() {
-            match block {
-                Block::Paragraph(spans) => {
-                    if bx > 0 {
-                        push_span(&mut out, "\n", SpanStyle::default(), None);
+/// A list laid out as text lines, and the pieces of its items' text when
+/// their nodes are given.
+#[derive(Default)]
+struct Lines {
+    spans: Vec<Span>,
+    /// Length of the spans' text.
+    len: usize,
+    pieces: Vec<Piece>,
+}
+
+impl Lines {
+    fn push(&mut self, text: &str, style: SpanStyle, link: Option<&str>) {
+        push_span(&mut self.spans, text, style, link);
+        self.len += text.len();
+    }
+
+    /// `list`, whose node is `node`, as text lines with a "•" or "N."
+    /// marker, nested items indented by four spaces per level.
+    fn list(&mut self, list: &List, depth: usize, node: Option<&Node>) {
+        for (ix, item) in list.items.iter().enumerate() {
+            let item_node = node.and_then(|node| node.children.get(ix));
+            if ix > 0 {
+                self.push("\n", SpanStyle::default(), None);
+            }
+            let marker = text_marker(list, ix);
+            let indent = format!("{}{marker}", "    ".repeat(depth));
+            self.push(&indent, SpanStyle::default(), None);
+            for (bx, block) in item.blocks.iter().enumerate() {
+                let block_node = item_node.and_then(|node| node.children.get(bx));
+                match block {
+                    Block::Paragraph(spans) => {
+                        if bx > 0 {
+                            self.push("\n", SpanStyle::default(), None);
+                        }
+                        if let Some(node) = block_node {
+                            self.pieces
+                                .extend(shifted(&node.pieces, self.len, usize::MAX));
+                        }
+                        for span in spans {
+                            self.push(&span.text, span.style, span.link.as_deref());
+                        }
                     }
-                    for span in spans {
-                        push_span(&mut out, &span.text, span.style, span.link.as_deref());
+                    Block::List(nested) => {
+                        self.push("\n", SpanStyle::default(), None);
+                        self.list(nested, depth + 1, block_node);
                     }
+                    _ => {}
                 }
-                Block::List(nested) => {
-                    push_span(&mut out, "\n", SpanStyle::default(), None);
-                    for span in list_lines(nested, depth + 1) {
-                        push_span(&mut out, &span.text, span.style, span.link.as_deref());
-                    }
-                }
-                _ => {}
             }
         }
     }
-    out
 }
 
-/// Lays a table out as aligned plain-text columns.
-fn table_text(table: &Table) -> String {
+/// Lays a table out as aligned plain-text columns, with where each cell's
+/// text starts in it and how many of its bytes show, header first.
+fn table_text(table: &Table) -> (String, Vec<(usize, usize)>) {
     let plain = |cell: &Vec<Span>| {
         cell.iter()
             .map(|span| span.text.as_str())
@@ -221,39 +323,59 @@ fn table_text(table: &Table) -> String {
                 .unwrap_or(0)
         })
         .collect();
-    let line = |row: &Vec<String>| {
-        let cells: Vec<String> = row
-            .iter()
-            .zip(&widths)
-            .zip(&table.alignments)
-            .map(|((cell, &width), alignment)| {
-                let pad = width - cell.chars().count();
-                let left = match alignment {
-                    Alignment::Right => pad,
-                    Alignment::Center => pad / 2,
-                    _ => 0,
-                };
-                format!("{}{cell}{}", " ".repeat(left), " ".repeat(pad - left))
-            })
-            .collect();
-        cells.join(" | ").trim_end().to_owned()
+    let mut out = String::new();
+    let mut cells = Vec::new();
+    let mut line = |out: &mut String, row: &Vec<String>| {
+        let start = out.len();
+        let first = cells.len();
+        for (col, ((cell, &width), alignment)) in
+            row.iter().zip(&widths).zip(&table.alignments).enumerate()
+        {
+            if col > 0 {
+                out.push_str(" | ");
+            }
+            let pad = width - cell.chars().count();
+            let left = match alignment {
+                Alignment::Right => pad,
+                Alignment::Center => pad / 2,
+                _ => 0,
+            };
+            out.push_str(&" ".repeat(left));
+            cells.push((out.len(), cell.len()));
+            out.push_str(cell);
+            out.push_str(&" ".repeat(pad - left));
+        }
+        let end = start + out[start..].trim_end().len();
+        out.truncate(end);
+        for (at, shown) in &mut cells[first..] {
+            *shown = (*shown).min(end.saturating_sub(*at));
+        }
     };
+    line(&mut out, &rows[0]);
     let rule = widths
         .iter()
         .map(|&width| "-".repeat(width))
         .collect::<Vec<_>>()
         .join("-+-");
-    let mut lines = vec![line(&rows[0]), rule];
-    lines.extend(rows[1..].iter().map(line));
-    lines.join("\n")
+    out.push('\n');
+    out.push_str(&rule);
+    for row in &rows[1..] {
+        out.push('\n');
+        line(&mut out, row);
+    }
+    (out, cells)
 }
 
 struct Parser<'a> {
     text: &'a str,
     grammar: Grammar,
+    /// Whether nodes get the pieces of their text.
+    mapped: bool,
     /// Byte offset of the start of the next unread line.
     pos: usize,
     blocks: Vec<Block>,
+    /// Where each block came from, one per block.
+    nodes: Vec<Node>,
     /// Pending paragraph lines.
     para: Vec<&'a str>,
     /// Where each line handed to [`Parser::inline`] lies in `text`.
@@ -295,8 +417,9 @@ impl<'a> Parser<'a> {
                 self.code(offset, body_end);
             } else if let Some((level, content)) = heading(line) {
                 self.next_line();
-                let spans = self.inline(&[content]);
-                self.push_block(Block::Heading { level, spans });
+                let (spans, pieces) = self.inline(&[content]);
+                let node = leaf(self.range(line), pieces);
+                self.push_block(Block::Heading { level, spans }, node);
             } else if let Some((header, alignments)) = self.table_head(line) {
                 self.table(header, alignments);
             } else if list_marker(line).is_some() {
@@ -316,16 +439,40 @@ impl<'a> Parser<'a> {
     fn flush_para(&mut self) {
         if !self.para.is_empty() {
             let para = std::mem::take(&mut self.para);
-            let spans = self.inline(&para);
+            let (spans, pieces) = self.inline(&para);
             self.blocks.push(Block::Paragraph(spans));
+            self.nodes.push(leaf(self.lines_range(&para), pieces));
         }
     }
 
-    /// The spans of `lines`, slices of `text`, joined by newlines. Inline
-    /// syntax never spans a line, so they parse as one text.
-    fn inline(&mut self, lines: &[&'a str]) -> Vec<Span> {
+    /// The spans of `lines`, slices of `text`, joined by newlines, and the
+    /// pieces of their text when mapped. Inline syntax never spans a line,
+    /// so they parse as one text.
+    fn inline(&mut self, lines: &[&'a str]) -> (Vec<Span>, Vec<Piece>) {
         self.record(lines, false);
-        inline(&lines.join("\n"), self.grammar)
+        let joined = lines.join("\n");
+        let map = self.mapped.then(|| Joined::new(self.text, lines, &joined));
+        let mut out = Out {
+            spans: Vec::new(),
+            map: map.as_ref(),
+            pieces: Pieces::default(),
+        };
+        collect_spans(&joined, 0, SpanStyle::default(), self.grammar, &mut out);
+        (out.spans, out.pieces.pieces)
+    }
+
+    /// Where `slice`, a slice of `text`, lies in it.
+    fn range(&self, slice: &str) -> Range<usize> {
+        let start = slice.as_ptr() as usize - self.text.as_ptr() as usize;
+        start..start + slice.len()
+    }
+
+    /// From the first of `lines` to the end of the last.
+    fn lines_range(&self, lines: &[&str]) -> Range<usize> {
+        match (lines.first(), lines.last()) {
+            (Some(first), Some(last)) => self.range(first).start..self.range(last).end,
+            _ => self.pos..self.pos,
+        }
     }
 
     fn record(&mut self, lines: &[&'a str], cell: bool) {
@@ -339,14 +486,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push_block(&mut self, block: Block) {
+    fn push_block(&mut self, block: Block, node: Node) {
         self.flush_para();
         self.blocks.push(block);
+        self.nodes.push(node);
     }
 
     /// `>` lines up to the first unquoted line, or with `>>>` the rest of the
     /// message, as one quoted paragraph.
     fn quote(&mut self) {
+        let start = self.pos;
         let mut lines = Vec::new();
         if self.peek_line().starts_with(">>>") {
             let rest = &self.text[self.pos + 3..];
@@ -358,8 +507,14 @@ impl<'a> Parser<'a> {
                 lines.push(line.strip_prefix(' ').unwrap_or(line));
             }
         }
-        let spans = self.inline(&lines);
-        self.push_block(Block::Quote(vec![Block::Paragraph(spans)]));
+        let (spans, pieces) = self.inline(&lines);
+        let paragraph = leaf(self.lines_range(&lines), pieces);
+        let node = Node {
+            source: start..paragraph.source.end,
+            children: vec![paragraph],
+            ..Node::default()
+        };
+        self.push_block(Block::Quote(vec![Block::Paragraph(spans)]), node);
     }
 
     /// Offset of a ```` ``` ```` in `line` and the text position of the one
@@ -385,10 +540,13 @@ impl<'a> Parser<'a> {
             _ => (None, body.strip_prefix('\n').unwrap_or(body)),
         };
         let body = body.strip_suffix('\n').unwrap_or(body);
-        self.push_block(Block::Code {
-            lang,
-            text: decode(body),
-        });
+        let text = decode(body);
+        let mut pieces = Pieces::default();
+        if self.mapped {
+            pieces.lexed(&text, self.range(body), self.text, Lex::SLACK);
+        }
+        let node = leaf(self.pos + offset..body_end + 3, pieces.pieces);
+        self.push_block(Block::Code { lang, text }, node);
         // Text after the closing fence continues as its own line.
         self.pos = body_end + 3;
         if self.peek_line().trim().is_empty() {
@@ -407,39 +565,69 @@ impl<'a> Parser<'a> {
     }
 
     fn table(&mut self, header: Vec<&'a str>, alignments: Vec<Alignment>) {
-        self.next_line();
+        let start = self.pos;
+        let line = self.next_line();
         self.next_line();
         let columns = header.len();
-        let header = self.row(header, columns);
+        let (header, header_node) = self.row(header, columns, self.range(line));
         let mut rows = Vec::new();
+        let mut nodes = vec![header_node];
         while !self.done() {
             let line = self.peek_line();
             if line.trim().is_empty() || !line.contains('|') {
                 break;
             }
-            let cells = cells(self.next_line());
-            rows.push(self.row(cells, columns));
+            let line = self.next_line();
+            let (row, node) = self.row(cells(line), columns, self.range(line));
+            rows.push(row);
+            nodes.push(node);
         }
-        self.push_block(Block::Table(Table {
+        let end = nodes.last().map_or(start, |node| node.source.end);
+        let node = Node {
+            source: start..end,
+            children: nodes,
+            ..Node::default()
+        };
+        let table = Table {
             alignments,
             header,
             rows,
-        }));
+        };
+        self.push_block(Block::Table(table), node);
     }
 
     /// The spans of a table row's first `columns` cells, padded to
-    /// `columns`.
-    fn row(&mut self, cells: Vec<&'a str>, columns: usize) -> Vec<Vec<Span>> {
-        let mut row: Vec<Vec<Span>> = cells
+    /// `columns`, and the row's node from its `line`.
+    fn row(
+        &mut self,
+        cells: Vec<&'a str>,
+        columns: usize,
+        line: Range<usize>,
+    ) -> (Vec<Vec<Span>>, Node) {
+        let (mut row, mut nodes): (Vec<Vec<Span>>, Vec<Node>) = cells
             .into_iter()
             .take(columns)
             .map(|cell| {
                 self.record(&[cell], true);
-                inline(cell, self.grammar)
+                let mut out = Out {
+                    spans: Vec::new(),
+                    map: None,
+                    pieces: Pieces::default(),
+                };
+                let map = self.mapped.then(|| Joined::new(self.text, &[cell], cell));
+                out.map = map.as_ref();
+                collect_spans(cell, 0, SpanStyle::default(), self.grammar, &mut out);
+                (out.spans, leaf(self.range(cell), out.pieces.pieces))
             })
-            .collect();
+            .unzip();
         row.resize(columns, Vec::new());
-        row
+        nodes.resize(columns, leaf(line.end..line.end, Vec::new()));
+        let node = Node {
+            source: line,
+            children: nodes,
+            ..Node::default()
+        };
+        (row, node)
     }
 
     /// Consecutive list lines, plus indented continuation lines, as one or
@@ -448,13 +636,16 @@ impl<'a> Parser<'a> {
         let mut entries: Vec<Entry> = Vec::new();
         while !self.done() {
             let line = self.peek_line();
-            if let Some(entry) = list_marker(line) {
+            let range = self.range(line);
+            if let Some(mut entry) = list_marker(line) {
+                entry.source = range;
                 entries.push(entry);
             } else if line.starts_with([' ', '\t'])
                 && !line.trim().is_empty()
                 && let Some(last) = entries.last_mut()
             {
                 last.lines.push(line.trim());
+                last.source.end = range.end;
             } else {
                 break;
             }
@@ -462,46 +653,62 @@ impl<'a> Parser<'a> {
         }
         let mut ix = 0;
         while ix < entries.len() {
-            let list = self.build_list(&entries, &mut ix);
-            self.push_block(Block::List(list));
+            let (list, node) = self.build_list(&entries, &mut ix);
+            self.push_block(Block::List(list), node);
         }
     }
 
     /// Builds the list starting at `entries[*ix]`: following entries at the
     /// same indent and kind are its items, deeper ones nest under the
     /// previous item.
-    fn build_list(&mut self, entries: &[Entry<'a>], ix: &mut usize) -> List {
+    fn build_list(&mut self, entries: &[Entry<'a>], ix: &mut usize) -> (List, Node) {
         let first = &entries[*ix];
         let mut list = List {
             start: first.number,
             tight: true,
             items: Vec::new(),
         };
+        let mut node = leaf(first.source.start..first.source.end, Vec::new());
         while let Some(entry) = entries.get(*ix) {
             if entry.indent > first.indent && !list.items.is_empty() {
-                let nested = self.build_list(entries, ix);
+                let (nested, nested_node) = self.build_list(entries, ix);
                 list.items
                     .last_mut()
                     .unwrap()
                     .blocks
                     .push(Block::List(nested));
+                let item = node.children.last_mut().unwrap();
+                item.source.end = nested_node.source.end;
+                item.children.push(nested_node);
                 continue;
             }
             if entry.indent < first.indent || entry.number.is_some() != first.number.is_some() {
                 break;
             }
-            let spans = self.inline(&entry.lines);
+            let (spans, pieces) = self.inline(&entry.lines);
             list.items.push(ListItem {
                 task: None,
                 blocks: vec![Block::Paragraph(spans)],
             });
+            let paragraph = leaf(self.lines_range(&entry.lines), pieces);
+            node.children.push(Node {
+                source: entry.source.clone(),
+                children: vec![paragraph],
+                ..Node::default()
+            });
             *ix += 1;
         }
-        list
+        node.source.end = node
+            .children
+            .last()
+            .map_or(node.source.end, |item| item.source.end);
+        (list, node)
     }
 }
 
 struct Entry<'a> {
+    /// From the marker line's start to the end of its last line.
+    source: Range<usize>,
     indent: usize,
     /// Number of an ordered item; `None` for bullets.
     number: Option<u64>,
@@ -532,6 +739,7 @@ fn list_marker(line: &str) -> Option<Entry<'_>> {
     };
     let text = rest.strip_prefix([' ', '\t'])?.trim();
     (!text.is_empty()).then(|| Entry {
+        source: 0..line.len(),
         indent,
         number,
         lines: vec![text],
@@ -620,24 +828,120 @@ fn delimiter_row(line: &str, columns: usize) -> Option<Vec<Alignment>> {
 }
 
 fn inline(text: &str, grammar: Grammar) -> Vec<Span> {
-    let mut out = Vec::new();
-    collect_spans(text, SpanStyle::default(), grammar, &mut out);
-    out
+    let mut out = Out {
+        spans: Vec::new(),
+        map: None,
+        pieces: Pieces::default(),
+    };
+    collect_spans(text, 0, SpanStyle::default(), grammar, &mut out);
+    out.spans
 }
 
-/// Pushes the spans of `text`, which has `style` applied around it.
-fn collect_spans(text: &str, style: SpanStyle, grammar: Grammar, out: &mut Vec<Span>) {
+/// Spans being read, and the pieces of their text when mapped.
+struct Out<'m> {
+    spans: Vec<Span>,
+    map: Option<&'m Joined<'m>>,
+    pieces: Pieces,
+}
+
+impl Out<'_> {
+    /// Pushes `text` read from `range` of the joined text: a token that
+    /// stays on one line.
+    fn push(&mut self, text: &str, range: Range<usize>, style: SpanStyle, link: Option<&str>) {
+        push_span(&mut self.spans, text, style, link);
+        if let Some(map) = self.map {
+            self.pieces
+                .lexed(text, map.source(range), map.text, Lex::SLACK);
+        }
+    }
+
+    /// Pushes the decoded `text`, `range` of the joined text, which may
+    /// span lines.
+    fn plain(&mut self, text: &str, range: Range<usize>, style: SpanStyle) {
+        push_span(&mut self.spans, &decode(text), style, None);
+        if let Some(map) = self.map {
+            map.plain(&mut self.pieces, range);
+        }
+    }
+}
+
+/// Where the lines handed to [`Parser::inline`], joined by `\n`, lie in the
+/// parsed text.
+struct Joined<'t> {
+    text: &'t str,
+    joined: &'t str,
+    /// Each line's start in the joined text and in `text`, and its length.
+    lines: Vec<(usize, usize, usize)>,
+}
+
+impl<'t> Joined<'t> {
+    fn new(text: &'t str, lines: &[&str], joined: &'t str) -> Self {
+        let mut at = 0;
+        let lines = lines
+            .iter()
+            .map(|line| {
+                let start = line.as_ptr() as usize - text.as_ptr() as usize;
+                let entry = (at, start, line.len());
+                at += line.len() + 1;
+                entry
+            })
+            .collect();
+        Joined {
+            text,
+            joined,
+            lines,
+        }
+    }
+
+    /// The source of `range` of the joined text, within one line.
+    fn source(&self, range: Range<usize>) -> Range<usize> {
+        let ix = self
+            .lines
+            .partition_point(|&(at, ..)| at <= range.start)
+            .saturating_sub(1);
+        let (at, start, _) = self.lines[ix];
+        start + range.start - at..start + range.end - at
+    }
+
+    /// Pieces of the decoded text of `range` of the joined text, each line
+    /// read on its own and each `\n` between lines mapped to what separates
+    /// them in the source.
+    fn plain(&self, pieces: &mut Pieces, range: Range<usize>) {
+        for (ix, &(at, start, len)) in self.lines.iter().enumerate() {
+            let line = range.start.max(at)..range.end.min(at + len);
+            if !line.is_empty() {
+                let text = decode(&self.joined[line.clone()]);
+                pieces.lexed(&text, self.source(line), self.text, Lex::SLACK);
+            }
+            let join = at + len;
+            if (range.start..range.end).contains(&join)
+                && let Some(&(_, next, _)) = self.lines.get(ix + 1)
+            {
+                pieces.whole("\n", start + len..next, self.text);
+            }
+        }
+    }
+}
+
+/// Pushes the spans of `text`, at `base` in the joined text, which has
+/// `style` applied around it.
+fn collect_spans(text: &str, base: usize, style: SpanStyle, grammar: Grammar, out: &mut Out) {
+    // Where `slice`, a slice of `text`, lies in the joined text.
+    let at = |slice: &str| {
+        let start = base + (slice.as_ptr() as usize - text.as_ptr() as usize);
+        start..start + slice.len()
+    };
     let mut plain = 0;
     let mut ix = 0;
     while ix < text.len() {
         let rest = &text[ix..];
         let c = rest.chars().next().unwrap();
         // Ends the plain text before a token.
-        let flush = |out: &mut Vec<Span>| push_span(out, &decode(&text[plain..ix]), style, None);
+        let flush = |out: &mut Out| out.plain(&text[plain..ix], at(&text[plain..ix]), style);
         let token_len = match c {
             '\\' if grammar == Grammar::Markdown => escape(rest).inspect(|&len| {
                 flush(out);
-                push_span(out, &rest[1..len], style, None);
+                out.push(&rest[1..len], at(&rest[..len]), style, None);
             }),
             '`' => code_span(rest).map(|(len, code)| {
                 flush(out);
@@ -645,27 +949,27 @@ fn collect_spans(text: &str, style: SpanStyle, grammar: Grammar, out: &mut Vec<S
                     code: true,
                     ..style
                 };
-                push_span(out, &decode(code), style, None);
+                out.push(&decode(code), at(code), style, None);
                 len
             }),
             '<' => angle_link(rest).map(|(len, url, label)| {
                 flush(out);
-                push_span(out, &decode(label), style, Some(&decode(url)));
+                out.push(&decode(label), at(label), style, Some(&decode(url)));
                 len
             }),
             '[' => markdown_link(rest).map(|(len, url, label)| {
                 flush(out);
-                push_span(out, &decode(label), style, Some(&decode(url)));
+                out.push(&decode(label), at(label), style, Some(&decode(url)));
                 len
             }),
             'h' if !preceded_by_alnum(text, ix) => bare_url(rest).map(|url| {
                 flush(out);
-                push_span(out, url, style, Some(url));
+                out.push(url, at(url), style, Some(url));
                 url.len()
             }),
             ':' => crate::emoji::shortcode(rest).map(|(len, emoji)| {
                 flush(out);
-                push_span(out, emoji, style, None);
+                out.push(emoji, at(&rest[..len]), style, None);
                 len
             }),
             '*' | '_' | '~' => {
@@ -689,7 +993,7 @@ fn collect_spans(text: &str, style: SpanStyle, grammar: Grammar, out: &mut Vec<S
                             ..style
                         },
                     };
-                    collect_spans(&text[ix + run..end], style, grammar, out);
+                    collect_spans(&text[ix + run..end], base + ix + run, style, grammar, out);
                     end + run - ix
                 })
             }
@@ -704,7 +1008,7 @@ fn collect_spans(text: &str, style: SpanStyle, grammar: Grammar, out: &mut Vec<S
             None => ix += run(rest, c),
         }
     }
-    push_span(out, &decode(&text[plain..]), style, None);
+    out.plain(&text[plain..], at(&text[plain..]), style);
 }
 
 /// Length of the run of `c` at the start of `text`.
@@ -874,6 +1178,35 @@ fn emphasis(text: &str, ix: usize, delim: char) -> Option<(usize, usize)> {
         jx += skip.unwrap_or(c.len_utf8());
     }
     None
+}
+
+/// A node with text and no children.
+fn leaf(source: Range<usize>, pieces: Vec<Piece>) -> Node {
+    Node {
+        source,
+        pieces,
+        children: Vec::new(),
+    }
+}
+
+/// What one of the entities Slack escapes stands for.
+fn entity(reference: &str) -> Option<String> {
+    let decoded = match reference {
+        "&amp;" => "&",
+        "&lt;" => "<",
+        "&gt;" => ">",
+        _ => return None,
+    };
+    Some(decoded.to_owned())
+}
+
+impl Lex<'_> {
+    /// Slack text: its three entities, no escapes, which are tokens of
+    /// their own.
+    const SLACK: Lex<'static> = Lex {
+        entity: Some(&entity),
+        ..Lex::EXACT
+    };
 }
 
 /// Decodes the three entities Slack escapes: `&amp;`, `&lt;` and `&gt;`.

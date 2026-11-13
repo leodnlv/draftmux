@@ -62,10 +62,14 @@ impl SourceMap {
     /// one only in syntax that renders no text (markers, URLs, setext
     /// underlines, link reference definitions), gets a single anchor:
     ///
-    /// 1. at `source.start` in the innermost node that contains it: inside
-    ///    the exact piece there, or before the first piece after it;
+    /// 1. at `source.start` in the innermost node with text that contains
+    ///    it: inside the exact piece there, before the first piece after
+    ///    it, or else after that node's last piece;
     /// 2. otherwise after the last piece that starts before it;
     /// 3. otherwise before the document's first piece.
+    ///
+    /// Text a target adds that isn't in the source, such as a rich-text
+    /// alert's label, has no piece, so nothing here points at it.
     ///
     /// Only a document without text gets nothing.
     pub fn locate(&self, source: Range<usize>) -> Vec<Fragment> {
@@ -104,7 +108,8 @@ impl SourceMap {
             path: path.to_vec(),
             text: position..position,
         };
-        if let Some(path) = innermost(&self.blocks, offset, &mut Vec::new()) {
+        let mut path = innermost(&self.blocks, offset, &mut Vec::new()).unwrap_or_default();
+        while !path.is_empty() {
             let node = self.node(&path);
             let mut first = None;
             let mut last = None;
@@ -119,6 +124,7 @@ impl SourceMap {
             if let Some(anchor) = first.or(last) {
                 return Some(anchor);
             }
+            path.pop();
         }
         let mut before = None;
         let mut first = None;
@@ -159,6 +165,78 @@ fn walk(node: &Node, path: &mut Vec<usize>, visit: &mut impl FnMut(&[usize], &Pi
         path.push(ix);
         walk(child, path, visit);
         path.pop();
+    }
+}
+
+impl Node {
+    /// This node and its children with every piece's text moved `by` bytes
+    /// later, as when text is put before it.
+    pub(crate) fn shift_text(&mut self, by: usize) {
+        for piece in &mut self.pieces {
+            piece.text = piece.text.start + by..piece.text.end + by;
+        }
+    }
+}
+
+/// Moves a map of `text.replace("\r\n", "\n")` onto `text`: each `\n`
+/// that was `\r\n` maps from both bytes, as a piece of its own.
+pub(crate) fn restore_crlf(blocks: &mut [Node], text: &str) {
+    // Where each `\n` that was a `\r\n` is in the normalized text.
+    let crs: Vec<usize> = text
+        .match_indices("\r\n")
+        .enumerate()
+        .map(|(removed, (ix, _))| ix - removed)
+        .collect();
+    if !crs.is_empty() {
+        for node in blocks {
+            restore_node(node, &crs);
+        }
+    }
+}
+
+fn restore_node(node: &mut Node, crs: &[usize]) {
+    let at = |offset: usize| offset + crs.partition_point(|&cr| cr < offset);
+    node.source = at(node.source.start)..at(node.source.end);
+    let mut pieces = Vec::with_capacity(node.pieces.len());
+    for piece in std::mem::take(&mut node.pieces) {
+        let Piece {
+            mut text,
+            source,
+            exact,
+        } = piece;
+        let mut start = source.start;
+        if exact {
+            let first = crs.partition_point(|&cr| cr < source.start);
+            for &cr in crs[first..].iter().take_while(|&&cr| cr < source.end) {
+                let len = cr - start;
+                if len > 0 {
+                    pieces.push(Piece {
+                        text: text.start..text.start + len,
+                        source: at(start)..at(cr),
+                        exact: true,
+                    });
+                }
+                pieces.push(Piece {
+                    text: text.start + len..text.start + len + 1,
+                    source: at(cr)..at(cr + 1),
+                    exact: false,
+                });
+                text.start += len + 1;
+                start = cr + 1;
+            }
+            if start == source.end {
+                continue;
+            }
+        }
+        pieces.push(Piece {
+            text,
+            source: at(start)..at(source.end),
+            exact,
+        });
+    }
+    node.pieces = pieces;
+    for child in &mut node.children {
+        restore_node(child, crs);
     }
 }
 

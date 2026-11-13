@@ -9,44 +9,133 @@
 use std::fmt::Write;
 
 use crate::rich::{html_escape, lines, rtf_escape, rtf_spans};
+use crate::source_map::{Node, SourceMap};
 use crate::{Alignment, Block, Document, List, ListItem, Span, SpanStyle, Table};
 
 /// `doc` as it pastes: alerts become quotes led by their bold label, task
 /// list items lead with ☐ or ☑, and raw HTML is literal text.
 pub fn pasted(doc: &Document) -> Document {
     Document {
-        blocks: doc.blocks.iter().map(pasted_block).collect(),
+        blocks: doc
+            .blocks
+            .iter()
+            .map(|block| pasted_block(block, None).0)
+            .collect(),
     }
 }
 
-fn pasted_block(block: &Block) -> Block {
-    match block {
-        Block::List(list) => Block::List(List {
-            items: list.items.iter().map(pasted_item).collect(),
-            ..list.clone()
-        }),
-        Block::Quote(blocks) => Block::Quote(blocks.iter().map(pasted_block).collect()),
+/// [`pasted`], with `map`, the map of `doc`, carried over to it. The text
+/// pasting adds, an alert's label or a task's box, has no pieces.
+pub fn pasted_mapped(doc: &Document, map: &SourceMap) -> (Document, SourceMap) {
+    let (blocks, nodes) = doc
+        .blocks
+        .iter()
+        .zip(&map.blocks)
+        .map(|(block, node)| pasted_block(block, Some(node)))
+        .unzip();
+    (Document { blocks }, SourceMap { blocks: nodes })
+}
+
+/// A block's or item's node, when mapped.
+type Mapped<'a> = Option<&'a Node>;
+
+fn child(node: Mapped<'_>, ix: usize) -> Mapped<'_> {
+    node.and_then(|node| node.children.get(ix))
+}
+
+/// `node` without its children, which pasting replaces.
+fn shell(node: Mapped) -> Node {
+    node.map_or_else(Node::default, |node| Node {
+        source: node.source.clone(),
+        pieces: node.pieces.clone(),
+        children: Vec::new(),
+    })
+}
+
+fn pasted_block(block: &Block, node: Mapped) -> (Block, Node) {
+    let mut map = shell(node);
+    let block = match block {
+        Block::List(list) => {
+            let (items, nodes) = list
+                .items
+                .iter()
+                .enumerate()
+                .map(|(ix, item)| pasted_item(item, child(node, ix)))
+                .unzip();
+            map.children = nodes;
+            Block::List(List {
+                items,
+                ..list.clone()
+            })
+        }
+        Block::Quote(blocks) => {
+            let (blocks, nodes) = pasted_blocks(blocks, node);
+            map.children = nodes;
+            Block::Quote(blocks)
+        }
         Block::Alert { kind, blocks } => {
             let label = text_span(kind.label(), true);
+            // The label stands for the marker line before the alert's
+            // blocks.
+            let marker = map.source.start
+                ..map
+                    .children
+                    .first()
+                    .map_or(map.source.end, |first| first.source.start);
+            let (blocks, nodes) = pasted_blocks(blocks, node);
             let mut quoted = vec![Block::Paragraph(vec![label])];
-            quoted.extend(blocks.iter().map(pasted_block));
+            quoted.extend(blocks);
+            map.children = std::iter::once(Node {
+                source: marker,
+                ..Node::default()
+            })
+            .chain(nodes)
+            .collect();
             Block::Quote(quoted)
         }
         Block::Html(html) => Block::Paragraph(vec![text_span(html, false)]),
-        block => block.clone(),
-    }
+        block => {
+            map.children = node.map(|node| node.children.clone()).unwrap_or_default();
+            block.clone()
+        }
+    };
+    (block, map)
 }
 
-fn pasted_item(item: &ListItem) -> ListItem {
-    let mut blocks: Vec<Block> = item.blocks.iter().map(pasted_block).collect();
+/// `blocks`, the children of `node`, as they paste.
+fn pasted_blocks(blocks: &[Block], node: Mapped) -> (Vec<Block>, Vec<Node>) {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(ix, block)| pasted_block(block, child(node, ix)))
+        .unzip()
+}
+
+fn pasted_item(item: &ListItem, node: Mapped) -> (ListItem, Node) {
+    let mut map = shell(node);
+    let (mut blocks, mut nodes) = pasted_blocks(&item.blocks, node);
     if let Some(checked) = item.task {
         let mark = text_span(if checked { "☑ " } else { "☐ " }, false);
-        match blocks.first_mut() {
-            Some(Block::Paragraph(spans)) => spans.insert(0, mark),
-            _ => blocks.insert(0, Block::Paragraph(vec![mark])),
+        match (blocks.first_mut(), nodes.first_mut()) {
+            (Some(Block::Paragraph(spans)), Some(first)) => {
+                first.shift_text(mark.text.len());
+                spans.insert(0, mark);
+            }
+            _ => {
+                blocks.insert(0, Block::Paragraph(vec![mark]));
+                let start = map.source.start;
+                nodes.insert(
+                    0,
+                    Node {
+                        source: start..start,
+                        ..Node::default()
+                    },
+                );
+            }
         }
     }
-    ListItem { task: None, blocks }
+    map.children = nodes;
+    (ListItem { task: None, blocks }, map)
 }
 
 fn text_span(text: &str, strong: bool) -> Span {

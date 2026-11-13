@@ -1,184 +1,44 @@
 //! Source maps of the GitHub parse: every exact piece is its source, and
-//! a change in the source finds the rendered text that shows it.
+//! a change in the source finds the rendered text that shows it. The
+//! corpus check covers every target.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use markup::source_map::{Fragment, Node, SourceMap};
-use markup::{Block, Document, Span, frontmatter, github};
+use markup::github;
+use markup::source_map::Fragment;
 
-/// The text of a node: its spans' text, or a code or HTML block's string.
-fn spans_text(spans: &[Span]) -> String {
-    spans.iter().map(|span| span.text.as_str()).collect()
-}
+mod maps;
 
-/// Each block of `blocks` beside its node, and the text of every node in
-/// the tree by path; fails where the map's shape isn't the document's.
-fn texts(
-    blocks: &[Block],
-    nodes: &[Node],
-    path: &mut Vec<usize>,
-    out: &mut Vec<(Vec<usize>, String)>,
-) {
-    assert_eq!(blocks.len(), nodes.len(), "blocks at {path:?}");
-    for (ix, (block, node)) in blocks.iter().zip(nodes).enumerate() {
-        path.push(ix);
-        let leaf = |text: String, out: &mut Vec<_>| {
-            assert!(node.children.is_empty(), "children at {path:?}");
-            out.push((path.clone(), text));
-        };
-        match block {
-            Block::Paragraph(spans) | Block::Heading { spans, .. } => leaf(spans_text(spans), out),
-            Block::Code { text, .. } | Block::Html(text) => leaf(text.clone(), out),
-            Block::Rule => leaf(String::new(), out),
-            Block::Quote(blocks) | Block::Alert { blocks, .. } => {
-                assert!(node.pieces.is_empty());
-                texts(blocks, &node.children, path, out);
-            }
-            Block::List(list) => {
-                assert_eq!(list.items.len(), node.children.len(), "items at {path:?}");
-                for (ix, (item, child)) in list.items.iter().zip(&node.children).enumerate() {
-                    path.push(ix);
-                    texts(&item.blocks, &child.children, path, out);
-                    path.pop();
-                }
-            }
-            Block::Table(table) => {
-                let rows: Vec<_> = std::iter::once(&table.header).chain(&table.rows).collect();
-                assert_eq!(rows.len(), node.children.len(), "rows at {path:?}");
-                for (ix, (row, row_node)) in rows.iter().zip(&node.children).enumerate() {
-                    assert_eq!(row.len(), row_node.children.len(), "cells at {path:?}/{ix}");
-                    for (cell, (col, cell_node)) in
-                        row.iter().zip(row_node.children.iter().enumerate())
-                    {
-                        assert!(cell_node.children.is_empty());
-                        out.push(([path.as_slice(), &[ix, col]].concat(), spans_text(cell)));
-                    }
-                }
-            }
-        }
-        path.pop();
-    }
-}
+use maps::{Target, check, corpus, range_of, review_pairs};
 
-fn text_at(doc: &Document, map: &SourceMap, path: &[usize]) -> String {
-    let mut all = Vec::new();
-    texts(&doc.blocks, &map.blocks, &mut Vec::new(), &mut all);
-    all.into_iter()
-        .find(|(at, _)| at == path)
-        .map(|(_, text)| text)
-        .unwrap_or_else(|| panic!("no text at {path:?}"))
-}
-
-/// What `locate` finds for `range`, as each fragment's path and text.
+/// What `locate` finds for `range` in the GitHub parse.
 fn shown(source: &str, range: Range<usize>) -> Vec<(Vec<usize>, String)> {
-    let (doc, map) = github::parse_mapped(source);
-    map.locate(range)
-        .into_iter()
-        .map(|Fragment { path, text }| {
-            let shown = text_at(&doc, &map, &path)[text].to_owned();
-            (path, shown)
-        })
-        .collect()
-}
-
-fn range_of(source: &str, needle: &str) -> Range<usize> {
-    let start = source
-        .find(needle)
-        .unwrap_or_else(|| panic!("{needle:?} in {source:?}"));
-    start..start + needle.len()
-}
-
-/// Every pair of review fixtures in `dir`, by name.
-fn review_pairs(dir: &Path) -> Vec<(String, String, String)> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|entry| {
-            let name = entry.unwrap().file_name().into_string().unwrap();
-            name.strip_suffix(".before.md").map(str::to_owned)
-        })
-        .collect();
-    names.sort();
-    names
-        .into_iter()
-        .map(|name| {
-            let read = |side: &str| {
-                std::fs::read_to_string(dir.join(format!("{name}.{side}.md"))).unwrap()
-            };
-            let (before, after) = (read("before"), read("after"));
-            (name, before, after)
-        })
-        .collect()
-}
-
-fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            markdown_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "md") {
-            out.push(path);
-        }
-    }
+    maps::shown(Target::Github, source, range)
 }
 
 const SYNTAX_EDITS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/review");
 
 #[test]
 fn every_text_piece_reproduces_its_literal() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    markdown_files(&root.join("tests/fixtures"), &mut files);
-    markdown_files(&root.join("../draftmux/fixtures/review"), &mut files);
-    files.sort();
-    assert!(files.len() > 100, "{} fixtures", files.len());
     let mut failures = Vec::new();
-    let mut checked = 0;
-    for file in &files {
-        let text = std::fs::read_to_string(file).unwrap();
-        // The preview parses the body after any frontmatter.
-        let body = frontmatter::parse(&text).body;
-        for source in [text.as_str(), body] {
-            let name = file.strip_prefix(root).unwrap().display();
-            let (doc, map) = github::parse_mapped(source);
-            assert_eq!(doc, github::parse(source), "{name}");
-            let mut nodes = Vec::new();
-            texts(&doc.blocks, &map.blocks, &mut Vec::new(), &mut nodes);
-            for (path, text) in nodes {
-                let node = map.node(&path);
-                let mut covered = 0;
-                for piece in &node.pieces {
-                    checked += 1;
-                    let at = format!("{name} {path:?} {piece:?}");
-                    if piece.text.start != covered || piece.text.is_empty() {
-                        failures.push(format!("{at}: doesn't follow {covered}"));
-                    }
-                    covered = piece.text.end;
-                    let Some(slice) = source.get(piece.source.clone()) else {
-                        failures.push(format!("{at}: not in the source"));
-                        continue;
-                    };
-                    if piece.source.start < node.source.start || piece.source.end > node.source.end
-                    {
-                        failures.push(format!("{at}: outside its block {:?}", node.source));
-                    }
-                    if piece.exact && text.get(piece.text.clone()) != Some(slice) {
-                        failures.push(format!(
-                            "{at}: {slice:?} isn't {:?}",
-                            text.get(piece.text.clone())
-                        ));
-                    }
-                    if !piece.exact && slice.is_empty() {
-                        failures.push(format!("{at}: no source"));
-                    }
-                }
-                if covered != text.len() {
-                    failures.push(format!("{name} {path:?}: covers {covered} of {:?}", text));
-                }
+    let mut checked = Vec::new();
+    for target in maps::TARGETS {
+        let mut count = 0;
+        for (name, source) in corpus() {
+            count += check(target, &name, &source, &mut failures);
+            // Slack and plain text read `\r\n` as `\n`; their maps point
+            // back at both bytes.
+            if matches!(target, Target::Slack | Target::Posted | Target::Plain) {
+                let crlf = source.replace('\n', "\r\n");
+                count += check(target, &format!("{name} (crlf)"), &crlf, &mut failures);
             }
         }
+        checked.push((target, count));
     }
-    assert!(checked > 1000, "{checked} pieces");
+    for (target, count) in checked {
+        assert!(count > 1000, "{target:?}: {count} pieces");
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -502,4 +362,37 @@ fn a_wrapped_code_span_maps_exactly_around_its_line_end() {
     );
     // The line end and the next line's indentation render as one space.
     assert_eq!(shown(source, range_of(source, "\n ")), [(item, " ".into())]);
+}
+
+#[test]
+fn frontmatter_ranges_map_to_fields() {
+    let text =
+        "---\nto: a@example.com\n# who else\ncc:\nsubject: |-\n  First\n\n  second\n---\nBody\n";
+    let (draft, map) = markup::frontmatter::parse_mapped(text);
+    let keys: Vec<_> = draft.fields.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["to", "cc", "subject"]);
+    let field = |needle: &str| map.locate(range_of(text, needle));
+    assert_eq!(field("example"), [0]);
+    // A block scalar's lines, a blank one included, belong to its key.
+    assert_eq!(field("First"), [2]);
+    assert_eq!(field("second"), [2]);
+    assert_eq!(field("cc:\nsubject"), [1, 2]);
+    // Between fields, a change shows on the field before it.
+    assert_eq!(field("# who"), [0]);
+    // A point at a line's start belongs to the field ending before it.
+    let cc = range_of(text, "cc").start;
+    assert_eq!(map.locate(cc..cc), [1]);
+    // The delimiters show on the nearest field.
+    assert_eq!(map.locate(0..3), [0]);
+    assert_eq!(field("---\nBody"), [2]);
+    // The body isn't in a field.
+    assert_eq!(map.end, draft.body_offset);
+    assert_eq!(field("Body"), []);
+    // Lines that aren't one per field map every field to the whole block.
+    let flow = "---\n{a: 1, b: 2}\n---\n";
+    let (draft, map) = markup::frontmatter::parse_mapped(flow);
+    assert_eq!(draft.fields.len(), 2);
+    assert_eq!(map.locate(range_of(flow, "2")), [0, 1]);
+    // Without fields there is nothing to show.
+    assert_eq!(markup::frontmatter::parse_mapped("Body").1.locate(0..4), []);
 }

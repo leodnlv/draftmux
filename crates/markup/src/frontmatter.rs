@@ -1,5 +1,7 @@
 //! Lossless separation of a draft's ordered scalar fields from its body.
 
+use std::ops::Range;
+
 use indexmap::IndexMap;
 use serde_yaml_ng::{Mapping, Value};
 
@@ -20,6 +22,90 @@ pub fn parse(text: &str) -> Draft<'_> {
         body: text,
         body_offset: 0,
     })
+}
+
+/// [`parse`], with where each field came from in `text`.
+pub fn parse_mapped(text: &str) -> (Draft<'_>, FieldMap) {
+    let draft = parse(text);
+    let map = FieldMap::new(text, &draft);
+    (draft, map)
+}
+
+/// Where a draft's fields came from: each field's key line and the
+/// indented lines that continue its value. A change maps to whole fields,
+/// since a value's text isn't its source (quotes, block scalars).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FieldMap {
+    /// One range per field, in the fields' order.
+    pub fields: Vec<Range<usize>>,
+    /// Where the body starts; the fields are before it.
+    pub end: usize,
+}
+
+impl FieldMap {
+    fn new(text: &str, draft: &Draft) -> FieldMap {
+        let end = draft.body_offset;
+        if draft.fields.is_empty() {
+            return FieldMap {
+                fields: Vec::new(),
+                end,
+            };
+        }
+        let mut fields: Vec<Range<usize>> = Vec::new();
+        let mut at = 0;
+        // The lines between the delimiters.
+        let mut lines = text[..end].split_inclusive('\n');
+        at += lines.next().map_or(0, str::len);
+        let lines: Vec<_> = lines.collect();
+        for line in &lines[..lines.len().saturating_sub(1)] {
+            let content = line.trim_end_matches(['\r', '\n']);
+            let range = at..at + content.len();
+            at += line.len();
+            if content.trim().is_empty() || content.starts_with('#') {
+                continue;
+            }
+            if content.starts_with([' ', '\t']) {
+                if let Some(last) = fields.last_mut() {
+                    last.end = range.end;
+                }
+                continue;
+            }
+            fields.push(range);
+        }
+        // Lines that aren't one per field, as in a flow mapping, map every
+        // field to the whole block.
+        if fields.len() != draft.fields.len() {
+            fields = vec![0..end; draft.fields.len()];
+        }
+        FieldMap { fields, end }
+    }
+
+    /// The fields that show `source`, by index: those it touches, or for an
+    /// empty range or one only between fields, the field it is in or ends,
+    /// else the one before it, else the first. Nothing at or after
+    /// [`end`](Self::end) is in a field.
+    pub fn locate(&self, source: Range<usize>) -> Vec<usize> {
+        if source.start >= self.end || self.fields.is_empty() {
+            return Vec::new();
+        }
+        let source = source.start..source.end.min(self.end);
+        let touched: Vec<usize> = self
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.start < source.end && source.start < field.end)
+            .map(|(ix, _)| ix)
+            .collect();
+        if !touched.is_empty() {
+            return touched;
+        }
+        let ix = self
+            .fields
+            .iter()
+            .rposition(|field| field.start <= source.start)
+            .unwrap_or(0);
+        vec![ix]
+    }
 }
 
 fn parse_fields(text: &str) -> Option<Draft<'_>> {
