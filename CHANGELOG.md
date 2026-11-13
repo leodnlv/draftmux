@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The app logs to `draftmux.log` in the data directory however it was started,
+  including from Finder, the Dock or Spotlight, and records crashes there with
+  a backtrace. Each start is logged with the time and version, and the log is
+  moved to `draftmux.log.1` once it passes 1 MB.
 - A hand-edited `settings.json` that doesn't parse is no longer overwritten
   when you change a setting in the app. The change applies until Draftmux
   restarts, and the Settings window shows the file's error until you fix it.

@@ -24,11 +24,11 @@ use gpui::{App, AsyncApp, WindowHandle};
 use serde::{Deserialize, Serialize};
 
 use crate::chrome::Chrome;
+use crate::diagnostics;
 use crate::resources;
 
 const SOCKET: &str = "draftmux.sock";
 const LOCK: &str = "draftmux.lock";
-const LOG: &str = "draftmux.log";
 /// How long the CLI waits for a launched app to start listening, and for a
 /// reply.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -202,7 +202,8 @@ pub fn activate_running() -> Result<()> {
 
 /// Starts the app detached from the caller, with no stdin or stdout, so a
 /// caller reading the CLI's output doesn't wait for the app to exit; stderr
-/// goes to `draftmux.log`. From inside `Draftmux.app` the bundle is launched
+/// goes to `draftmux.log`, rotated here because the app keeps a log it
+/// already writes to. From inside `Draftmux.app` the bundle is launched
 /// through LaunchServices (`open -n`, leaving the lock to decide which
 /// instance runs), which doesn't pass on the caller's environment, so `HOME`
 /// and the directory overrides are forwarded to keep the app on the CLI's
@@ -211,12 +212,8 @@ pub fn activate_running() -> Result<()> {
 /// as `draftmux app` in its own process group, so the agent's tool timeout or
 /// Ctrl-C doesn't kill it.
 fn launch(dir: &Path) -> Result<Child> {
-    let log_path = dir.join(LOG);
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("opening {}", log_path.display()))?;
+    let log_path = diagnostics::log_path(dir);
+    let log = diagnostics::open_log(&log_path)?;
     let exe = resources::exe()?;
     let mut command = match resources::bundle(&exe) {
         Some(app) => {
@@ -271,7 +268,7 @@ fn wait_for_app(socket: &Path, mut child: Option<Child>) -> Result<UnixStream> {
             if !status.success() {
                 bail!(
                     "the app exited with {status}; see {}",
-                    socket.with_file_name(LOG).display()
+                    socket.with_file_name(diagnostics::LOG).display()
                 );
             }
             child = None;
@@ -280,7 +277,7 @@ fn wait_for_app(socket: &Path, mut child: Option<Child>) -> Result<UnixStream> {
             bail!(
                 "the app didn't start listening within {}s; see {}",
                 TIMEOUT.as_secs(),
-                socket.with_file_name(LOG).display()
+                socket.with_file_name(diagnostics::LOG).display()
             );
         }
         thread::sleep(POLL);

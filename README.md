@@ -115,6 +115,13 @@ selection actions:
 A draft can start with YAML frontmatter for fields kept apart from the body,
 such as `title` for PRs and issues or `subject`, `to` and `cc` for emails.
 
+## Troubleshooting
+
+The app writes errors, its start time and version, and any crash with a
+backtrace to `draftmux.log`, in `~/Library/Application Support/Draftmux` on
+macOS and `~/.local/share/Draftmux` on Linux. Once the log passes 1 MB it is
+moved to `draftmux.log.1` when the app next starts.
+
 ## Development
 
 Needs the Rust toolchain in `rust-toolchain.toml`, plus full Xcode on macOS.

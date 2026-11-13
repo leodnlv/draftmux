@@ -10,6 +10,7 @@ mod chat_model;
 mod chrome;
 mod compare;
 mod copy;
+mod diagnostics;
 mod drafts;
 mod file_watch;
 mod fold;
@@ -120,6 +121,7 @@ fn run_app() -> Result<()> {
         ipc::Claim::Taken => return ipc::activate_running(),
     };
     let data_dir = draftmux_storage::data_dir()?;
+    diagnostics::init(&data_dir);
     let config_dir = draftmux_storage::prepare_config_dir()?;
     let store = Store::open_default()?;
 
