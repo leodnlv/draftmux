@@ -13,6 +13,8 @@ mod skeleton;
 
 use preview::Preview;
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -132,6 +134,9 @@ pub struct Chrome {
     copied: Option<(usize, Task<()>)>,
     /// The sidebar row context menu, while it is open.
     row_menu: Option<sidebar::RowMenu>,
+    /// The drafts the sidebar listed when it last rendered.
+    seen_rows: RefCell<Option<HashSet<String>>>,
+    leaving_rows: Vec<sidebar::LeavingRow>,
     sidebar_scroll: ScrollHandle,
     sidebar_focus: FocusHandle,
     content_focus: FocusHandle,
@@ -153,6 +158,7 @@ impl Render for Chrome {
         let _timing = editor::timing::span("chrome-render");
         let palette = *theme::palette(cx);
         self.fit_to_width(window, cx);
+        self.leaving_rows.retain(sidebar::LeavingRow::folding);
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let content = if self.drafts.current().is_some() {
             div()
@@ -268,7 +274,7 @@ impl Render for Chrome {
                     .min_h_0()
                     .flex()
                     .when(self.show_sidebar, |row| {
-                        row.child(self.sidebar(sidebar_bar, cx))
+                        row.child(self.sidebar(sidebar_bar, window, cx))
                     })
                     .child(content)
                     .child(
@@ -460,6 +466,8 @@ impl Chrome {
             toast: None,
             copied: None,
             row_menu: None,
+            seen_rows: RefCell::default(),
+            leaving_rows: Vec::new(),
             sidebar_scroll: ScrollHandle::new(),
             sidebar_focus: cx.focus_handle(),
             content_focus: cx.focus_handle(),

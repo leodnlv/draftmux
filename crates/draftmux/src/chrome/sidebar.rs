@@ -2,16 +2,20 @@
 
 use std::time::Duration;
 
-use chrono::Utc;
+use std::collections::HashSet;
+use std::path::Path;
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
 use gpui::{
-    Animation, AnimationExt, App, ClipboardItem, Context, FontWeight, KeyBinding, MouseButton,
-    MouseDownEvent, Pixels, Point, SharedString, Task, actions, anchored, deferred, div,
-    ease_out_quint, prelude::*, px, svg,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, FontWeight, KeyBinding,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Task, actions, anchored, deferred,
+    div, ease_out_quint, prelude::*, px, svg,
 };
 
 use super::{Chrome, shadow, sidebar_column};
 use crate::assets::{ARCHIVE_ICON, TOAST_DONE_ICON, TOAST_ERROR_ICON};
-use crate::drafts::{relative_time, tilde};
+use crate::drafts::{Row, relative_time, tilde};
 use crate::menu::{MenuItem, menu_panel};
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::theme;
@@ -68,6 +72,19 @@ pub(super) struct Toast {
     dismiss: Option<Task<()>>,
     /// Whether the toast is fading out.
     leaving: bool,
+}
+
+/// An archived draft's row, folding shut where it was.
+pub(super) struct LeavingRow {
+    index: usize,
+    row: Row,
+    since: Instant,
+}
+
+impl LeavingRow {
+    pub(super) fn folding(&self) -> bool {
+        self.since.elapsed() < crate::fold::DURATION
+    }
 }
 
 /// A right-clicked draft row's menu, at the click.
@@ -127,154 +144,59 @@ impl Chrome {
         }
     }
 
-    pub(super) fn sidebar(&self, bar: &ScrollbarState, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn sidebar(
+        &self,
+        bar: &ScrollbarState,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let now = Utc::now();
         let home = std::env::home_dir();
-        let current = self.drafts.current_id();
-        // Ids follow the draft, not its position, so a press that straddles
-        // a reorder can't land on another draft.
-        let rows = self.drafts.rows().iter().map(|row| {
-            let id = row.draft.id.clone();
-            let selected = current == Some(id.as_str());
-            let menu_open = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
-            let group: SharedString = format!("draft-row-{id}").into();
-            div()
-                .id(group.clone())
-                .group(group.clone())
-                .relative()
-                .flex_none()
-                .flex()
-                .gap(px(8.))
-                .px(px(8.))
-                .py(px(7.))
-                .rounded(px(6.))
-                .when(selected, |row| row.bg(palette.selected_row))
-                // As in Finder and Mail, the right-clicked row gets a ring
-                // without being selected. An overlay, since a shadow would
-                // also fill the row and a border would shift its content.
-                .when(menu_open, |row| {
-                    row.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(px(6.))
-                            .border_2()
-                            .border_color(palette.accent),
-                    )
-                })
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let id = id.clone();
-                        move |this, event: &MouseDownEvent, _, cx| {
-                            this.row_menu = Some(RowMenu {
-                                id: id.clone(),
-                                position: event.position,
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }),
+        let ids: HashSet<String> = self
+            .drafts
+            .rows()
+            .iter()
+            .map(|row| row.draft.id.clone())
+            .collect();
+        // Rows that weren't there last time unfold, except on the first
+        // render, which shows the list as it is.
+        let seen = self.seen_rows.replace(Some(ids.clone()));
+        let mut rows: Vec<AnyElement> = self
+            .drafts
+            .rows()
+            .iter()
+            .map(|row| {
+                let entering = seen
+                    .as_ref()
+                    .is_some_and(|seen| !seen.contains(&row.draft.id));
+                let element = self.draft_row(row, now, home.as_deref(), &palette, cx);
+                crate::fold::fold(
+                    SharedString::from(format!("draft-fold-{}", row.draft.id)),
+                    true,
+                    entering,
+                    move || div().pb(px(1.)).child(element).into_any_element(),
+                    window,
+                    cx,
                 )
-                .on_click(cx.listener({
-                    let id = id.clone();
-                    move |this, _, window, cx| {
-                        this.select(&id, window, cx).ok();
-                        this.focus_sidebar(window, cx);
-                    }
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(13.))
-                                        .line_height(px(18.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(markup::replace_shortcodes(&row.title)),
-                                )
-                                // Wide enough that the title stops short of the
-                                // archive button, which replaces the time on hover.
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .min_w(px(20.))
-                                        .flex()
-                                        .justify_end()
-                                        .text_size(px(11.))
-                                        .text_color(palette.faint)
-                                        .group_hover(group.clone(), |style| style.opacity(0.))
-                                        .child(relative_time(row.draft.meta.updated_at, now)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                // The sample's directory is just where it was
-                                // created, not a project it came from.
-                                .map(|line| {
-                                    if row.draft.meta.is_sample() {
-                                        line.child(sample_badge(&palette))
-                                    } else {
-                                        line.child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_size(px(12.))
-                                                .text_color(palette.muted)
-                                                .child(markup::replace_shortcodes(&tilde(
-                                                    &row.draft.meta.cwd,
-                                                    home.as_deref(),
-                                                ))),
-                                        )
-                                    }
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("archive-{id}")))
-                        .absolute()
-                        .top(px(5.))
-                        .right(px(6.))
-                        .size(px(22.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .opacity(0.)
-                        .group_hover(group, |style| style.opacity(1.))
-                        // Translucent, so it darkens whatever the row shows.
-                        .hover(|style| style.bg(palette.selected_row))
-                        .active(|style| style.opacity(0.8))
-                        .tooltip(crate::tooltip::text("Archive"))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.archive(&id, window, cx)),
-                        )
-                        .child(
-                            svg()
-                                .path(ARCHIVE_ICON)
-                                .size(px(14.))
-                                .text_color(palette.muted),
-                        ),
-                )
-        });
+            })
+            .collect();
+        // Archived rows fold shut where they were.
+        for leaving in &self.leaving_rows {
+            if ids.contains(&leaving.row.draft.id) {
+                continue;
+            }
+            let element = self.draft_row(&leaving.row, now, home.as_deref(), &palette, cx);
+            let folded = crate::fold::fold(
+                SharedString::from(format!("draft-fold-{}", leaving.row.draft.id)),
+                false,
+                false,
+                move || div().pb(px(1.)).child(element).into_any_element(),
+                window,
+                cx,
+            );
+            rows.insert(leaving.index.min(rows.len()), folded);
+        }
 
         sidebar_column(&palette)
             .h_full()
@@ -315,7 +237,6 @@ impl Chrome {
                             .px(px(8.))
                             .flex()
                             .flex_col()
-                            .gap(px(1.))
                             .overflow_y_scroll()
                             .track_scroll(&self.sidebar_scroll)
                             .children(rows)
@@ -328,6 +249,156 @@ impl Chrome {
                     .child(scrollbar(Source::Handle(self.sidebar_scroll.clone()), bar)),
             )
             .children(self.row_menu(&palette, cx))
+    }
+
+    /// One row of the drafts list.
+    fn draft_row(
+        &self,
+        row: &Row,
+        now: DateTime<Utc>,
+        home: Option<&Path>,
+        palette: &theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let palette = *palette;
+        let current = self.drafts.current_id();
+        let id = row.draft.id.clone();
+        let selected = current == Some(id.as_str());
+        let menu_open = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
+        let group: SharedString = format!("draft-row-{id}").into();
+        div()
+            .id(group.clone())
+            .group(group.clone())
+            .relative()
+            .flex_none()
+            .flex()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(7.))
+            .rounded(px(6.))
+            .when(selected, |row| row.bg(palette.selected_row))
+            // As in Finder and Mail, the right-clicked row gets a ring
+            // without being selected. An overlay, since a shadow would
+            // also fill the row and a border would shift its content.
+            .when(menu_open, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(6.))
+                        .border_2()
+                        .border_color(palette.accent),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let id = id.clone();
+                    move |this, event: &MouseDownEvent, _, cx| {
+                        this.row_menu = Some(RowMenu {
+                            id: id.clone(),
+                            position: event.position,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, window, cx| {
+                    this.select(&id, window, cx).ok();
+                    this.focus_sidebar(window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(markup::replace_shortcodes(&row.title)),
+                            )
+                            // Wide enough that the title stops short of the
+                            // archive button, which replaces the time on hover.
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .min_w(px(20.))
+                                    .flex()
+                                    .justify_end()
+                                    .text_size(px(11.))
+                                    .text_color(palette.faint)
+                                    .group_hover(group.clone(), |style| style.opacity(0.))
+                                    .child(relative_time(row.draft.meta.updated_at, now)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            // The sample's directory is just where it was
+                            // created, not a project it came from.
+                            .map(|line| {
+                                if row.draft.meta.is_sample() {
+                                    line.child(sample_badge(&palette))
+                                } else {
+                                    line.child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(12.))
+                                            .text_color(palette.muted)
+                                            .child(markup::replace_shortcodes(&tilde(
+                                                &row.draft.meta.cwd,
+                                                home.as_deref(),
+                                            ))),
+                                    )
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("archive-{id}")))
+                    .absolute()
+                    .top(px(5.))
+                    .right(px(6.))
+                    .size(px(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
+                    // Translucent, so it darkens whatever the row shows.
+                    .hover(|style| style.bg(palette.selected_row))
+                    .active(|style| style.opacity(0.8))
+                    .tooltip(crate::tooltip::text("Archive"))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| this.archive(&id, window, cx)))
+                    .child(
+                        svg()
+                            .path(ARCHIVE_ICON)
+                            .size(px(14.))
+                            .text_color(palette.muted),
+                    ),
+            )
     }
 
     fn row_menu(
@@ -408,6 +479,19 @@ impl Chrome {
 
     fn archive(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let was_current = self.drafts.current_id() == Some(id);
+        let leaving = self
+            .drafts
+            .rows()
+            .iter()
+            .position(|row| row.draft.id == id)
+            .map(|index| LeavingRow {
+                index,
+                row: Row {
+                    draft: self.drafts.rows()[index].draft.clone(),
+                    title: self.drafts.rows()[index].title.clone(),
+                },
+                since: Instant::now(),
+            });
         let next = match self.drafts.archive(id) {
             Ok(next) => next,
             Err(err) => {
@@ -425,6 +509,7 @@ impl Chrome {
                 None => self.deselect(cx),
             }
         }
+        self.leaving_rows.extend(leaving);
         self.present_toast("Draft archived".into(), false, Some(id.to_owned()), cx);
     }
 
