@@ -53,12 +53,6 @@ pub struct Hunk {
 }
 
 impl Hunk {
-    /// Names the change by its text, so it is recognised again whichever
-    /// versions it is compared across.
-    pub fn key(&self) -> String {
-        format!("{}\0{}", self.removed, self.added)
-    }
-
     /// Whether it only removes text.
     pub fn is_removal(&self) -> bool {
         self.added.trim().is_empty()

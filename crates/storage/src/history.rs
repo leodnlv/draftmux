@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 pub struct History {
     #[serde(default)]
     pub edits: Vec<Edit>,
-    /// Keys of the changes the user kept, which stay kept whichever edits
-    /// they are compared across.
+    /// Keys of the changes the user kept. A key names the edit the change
+    /// was compared from, where the change starts in the text before that
+    /// edit, and its removed and added text, so identical changes elsewhere
+    /// stay unreviewed. Edits are only ever appended, so an edit's index
+    /// names it for good.
     #[serde(default)]
     pub kept: Vec<String>,
 }

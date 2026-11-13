@@ -163,12 +163,23 @@ impl Changes {
         Some(compared)
     }
 
+    /// Names a change in the comparison by where it starts in the text
+    /// before edit [`Self::since`], which never changes, so typing elsewhere
+    /// leaves the name alone while identical changes elsewhere get their
+    /// own.
+    fn key(&self, hunk: &Hunk) -> String {
+        format!(
+            "{}\0{}\0{}\0{}",
+            self.since, hunk.old.start, hunk.removed, hunk.added
+        )
+    }
+
     fn is_kept(&self, hunk: &Hunk) -> bool {
-        self.kept.contains(&hunk.key())
+        self.kept.contains(&self.key(hunk))
     }
 
     fn keep(&mut self, hunk: &Hunk, kept: bool) {
-        let key = hunk.key();
+        let key = self.key(hunk);
         if kept {
             if self.kept.insert(key.clone()) {
                 self.history.kept.push(key);
@@ -540,6 +551,12 @@ impl Chrome {
         if self.editor.read(cx).is_read_only() {
             self.show_error("Wait for the agent to finish before reverting.", cx);
             return;
+        }
+        // Reverting rejects this change, so it is asked about again if it
+        // comes back.
+        if self.changes.is_kept(&hunk) {
+            self.changes.keep(&hunk, false);
+            self.save_kept();
         }
         // One undoable edit, as if typed.
         self.editor.update(cx, |editor, cx| {
@@ -1320,5 +1337,59 @@ mod tests {
         changes.keep(&hunk, false);
         assert!(!changes.is_kept(&hunk));
         assert!(changes.history.kept.is_empty());
+    }
+
+    const BEFORE: &str = include_str!("../../fixtures/review/word-replaced-twice.before.md");
+    const AFTER: &str = include_str!("../../fixtures/review/word-replaced-twice.after.md");
+
+    #[test]
+    fn keeping_a_change_leaves_identical_ones_elsewhere_unkept() {
+        let mut changes = Changes::default();
+        let hunks = compare::compare(BEFORE, AFTER).hunks;
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(
+            (&hunks[0].removed, &hunks[0].added),
+            (&hunks[1].removed, &hunks[1].added)
+        );
+        changes.keep(&hunks[1], true);
+        assert!(!changes.is_kept(&hunks[0]));
+        assert!(changes.is_kept(&hunks[1]));
+    }
+
+    #[test]
+    fn a_kept_change_stays_kept_through_edits_elsewhere() {
+        let mut changes = Changes::default();
+        changes.keep(&compare::compare(BEFORE, AFTER).hunks[1], true);
+        // Typed between the two changes, moving the kept one in the draft.
+        let edited = AFTER.replace("Unrelated text", "Some unrelated text");
+        let swaps: Vec<bool> = compare::compare(BEFORE, &edited)
+            .hunks
+            .iter()
+            .filter(|hunk| hunk.added == "a")
+            .map(|hunk| changes.is_kept(hunk))
+            .collect();
+        assert_eq!(swaps, [false, true]);
+    }
+
+    #[test]
+    fn reverting_a_kept_change_does_not_pass_the_keep_to_its_twin() {
+        let mut changes = Changes::default();
+        changes.keep(&compare::compare(BEFORE, AFTER).hunks[0], true);
+        let reverted = AFTER.replacen("a cache", "the cache", 1);
+        let hunks = compare::compare(BEFORE, &reverted).hunks;
+        assert_eq!(hunks.len(), 1);
+        assert!(!changes.is_kept(&hunks[0]));
+    }
+
+    #[test]
+    fn keeps_belong_to_the_edit_they_were_compared_from() {
+        let mut changes = Changes::default();
+        let hunk = compare::compare(BEFORE, AFTER).hunks[0].clone();
+        changes.since = 1;
+        changes.keep(&hunk, true);
+        changes.since = 0;
+        assert!(!changes.is_kept(&hunk));
+        changes.since = 1;
+        assert!(changes.is_kept(&hunk));
     }
 }
