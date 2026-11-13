@@ -11,6 +11,7 @@ mod preview_work;
 mod review;
 mod sidebar;
 mod skeleton;
+mod update_offer;
 
 use preview::Preview;
 
@@ -139,6 +140,8 @@ pub struct Chrome {
     /// Why the selected draft's last save failed; cleared by the next save.
     save_error: Option<SharedString>,
     toast: Option<sidebar::Toast>,
+    /// The update button's card, while it is open.
+    update_card: Option<update_offer::UpdateCard>,
     /// The selected draft's agent edits and the changes being compared.
     changes: review::Changes,
     /// Review of those changes, while it is open.
@@ -557,6 +560,7 @@ impl Chrome {
             collapsed_for_width: false,
             save_error: None,
             toast: None,
+            update_card: None,
             changes: Default::default(),
             review: None,
             review_focus: cx.focus_handle(),
@@ -1395,50 +1399,6 @@ impl Chrome {
                         bar.child(self.toolbar_actions(target, &palette, cx))
                     }),
             )
-    }
-
-    /// Restarts into an installed update, or opens the page of one this copy
-    /// can't install itself.
-    fn update_button(&self, palette: &Palette, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let (label, tooltip, ready): (SharedString, SharedString, bool) =
-            match &Updater::global(cx).read(cx).status {
-                update::Status::Ready(version) => (
-                    "Restart to Update".into(),
-                    format!("Draftmux {version} is installed").into(),
-                    true,
-                ),
-                update::Status::Blocked { reason, .. } => {
-                    ("Update Available".into(), reason.clone().into(), false)
-                }
-                _ => return None,
-            };
-        Some(
-            div()
-                .id("update")
-                .flex_none()
-                .h(px(22.))
-                .px(px(9.))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .bg(palette.accent_soft)
-                .text_color(palette.accent)
-                .hover(|style| style.opacity(0.85))
-                .active(|style| style.opacity(0.7))
-                .tooltip(crate::tooltip::text(tooltip))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    if !ready {
-                        Updater::global(cx).read(cx).open_release_page(cx);
-                    } else if this.flush_before_exit(cx) {
-                        cx.restart();
-                    }
-                }))
-                .child(label),
-        )
     }
 
     /// Draft actions at the toolbar's right end. Their mouse-downs don't reach

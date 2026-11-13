@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Clicking Update Available or Restart to Update in the toolbar shows what
+  changed in every version since yours before you update. Linux and
+  development builds get the button too when Check for Updates finds a newer
+  release.
 - The app logs to `draftmux.log` in the data directory however it was started,
   including from Finder, the Dock or Spotlight, and records crashes there with
   a backtrace. Each start is logged with the time and version, and the log is

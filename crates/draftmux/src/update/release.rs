@@ -83,6 +83,7 @@ fn parse_release(release: GithubRelease) -> Result<Release> {
         checksum_url: asset(checksum_name(&version))?,
         page: release.html_url,
         version,
+        notes: None,
     })
 }
 

@@ -3,6 +3,7 @@
 //! once a day, installs it in the background by swapping the bundle in place
 //! and offers to restart into it. Development builds and Linux never check
 //! on their own; Check for Updates still reports a newer release to them.
+//! The toolbar offers a newer release with what changed in it.
 
 // Linux only reports releases, so the install states go unused there.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -10,6 +11,7 @@
 mod cache;
 #[cfg(target_os = "macos")]
 mod install;
+mod notes;
 mod release;
 
 use std::time::Duration;
@@ -22,7 +24,6 @@ use crate::app_settings::AppSettings;
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `CFBundleIdentifier` in macos/Info.plist.
 const BUNDLE_ID: &str = "fi.zendit.Draftmux";
-const RELEASES_PAGE: &str = "https://github.com/raine/draftmux/releases";
 /// Disables automatic checks when set to `1`, `true` or `yes`.
 const NO_CHECK_VAR: &str = "DRAFTMUX_NO_UPDATE_CHECK";
 /// How long after launch the first automatic check waits, and how often a
@@ -39,6 +40,9 @@ pub struct Release {
     pub page: String,
     pub archive_url: String,
     pub checksum_url: String,
+    /// What changed since this copy's version, as Markdown; `None` when
+    /// the changelog couldn't be read.
+    pub notes: Option<String>,
 }
 
 /// Why this copy of Draftmux can't install updates itself.
@@ -77,7 +81,7 @@ pub enum Status {
     Checking,
     Installing(Version),
     /// The new version is installed and runs after a restart.
-    Ready(Version),
+    Ready(Release),
     /// A newer release this copy can't install itself.
     Blocked {
         release: Release,
@@ -133,10 +137,13 @@ impl Updater {
         match &self.status {
             Status::Idle | Status::Blocked { .. } => {}
             Status::Checking | Status::Installing(_) => return,
-            Status::Ready(version) => {
+            Status::Ready(release) => {
                 if manual {
                     cx.emit(notice(
-                        format!("Draftmux {version} is installed. Restart to use it."),
+                        format!(
+                            "Draftmux {} is installed. Restart to use it.",
+                            release.version
+                        ),
                         false,
                     ));
                 }
@@ -157,7 +164,13 @@ impl Updater {
             if !manual && (built_here || !cache::check_due()) {
                 return Ok(None);
             }
-            let release = cache::check()?;
+            let release = cache::check()?.map(|mut release| {
+                // Best effort: the update is offered without them.
+                release.notes = notes::fetch(&current_version(), &release.version)
+                    .ok()
+                    .flatten();
+                release
+            });
             Ok::<_, anyhow::Error>(Some((release, eligibility)))
         });
         cx.spawn(async move |this, cx| {
@@ -182,12 +195,10 @@ impl Updater {
                         if manual {
                             cx.emit(notice(guidance.clone(), false));
                         }
-                        if matches!(reason, Ineligible::Unwritable(_)) {
-                            this.status = Status::Blocked {
-                                release,
-                                reason: guidance,
-                            };
-                        }
+                        this.status = Status::Blocked {
+                            release,
+                            reason: guidance,
+                        };
                     }
                     Err(err) => {
                         if manual {
@@ -211,6 +222,7 @@ impl Updater {
         cx: &mut Context<Self>,
     ) {
         let version = release.version.clone();
+        let ready = release.clone();
         if manual {
             cx.emit(notice(format!("Downloading Draftmux {version}…"), false));
         }
@@ -220,7 +232,7 @@ impl Updater {
             let result = task.await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.status = Status::Ready(version),
+                    Ok(()) => this.status = Status::Ready(ready),
                     Err(err) => {
                         this.status = Status::Idle;
                         if manual {
@@ -241,15 +253,6 @@ impl Updater {
     #[cfg(not(target_os = "macos"))]
     fn install(&mut self, _: Release, installation: Installation, _: bool, _: &mut Context<Self>) {
         match installation {}
-    }
-
-    /// Opens the page of the release this copy can't install itself.
-    pub fn open_release_page(&self, cx: &App) {
-        let page = match &self.status {
-            Status::Blocked { release, .. } => release.page.as_str(),
-            _ => RELEASES_PAGE,
-        };
-        cx.open_url(page);
     }
 }
 
