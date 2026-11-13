@@ -310,59 +310,69 @@ pub fn marked(comparison: &Comparison, side: Side) -> String {
         Side::After => hunk.is_removal(),
     };
     let mut out = String::new();
-    // A point before any text waits for the first line's block marker.
-    let mut leading_point = None;
+    // Points at the start of the text or of a block wait for the next
+    // line's text, after its block marker.
+    let mut pending: Vec<usize> = Vec::new();
+    let flush = |out: &mut String, pending: &mut Vec<usize>, text: &str| -> usize {
+        let Some(at) = point_at(text).filter(|_| !pending.is_empty()) else {
+            return 0;
+        };
+        out.push_str(&text[..at]);
+        for hunk in pending.drain(..) {
+            push_point(out, hunk, point_marks);
+        }
+        at
+    };
     for op in &comparison.ops {
         let hunk = op.hunk.unwrap_or_default();
         if op.kind == Kind::Equal {
-            match leading_point.take() {
-                Some(hunk) if !op.text.is_empty() => {
-                    let prefix = block_prefix(&op.text);
-                    out.push_str(&op.text[..prefix]);
-                    point(&mut out, hunk, point_marks);
-                    out.push_str(&op.text[prefix..]);
-                }
-                pending => {
-                    leading_point = pending;
-                    out.push_str(&op.text);
-                }
-            }
+            let at = flush(&mut out, &mut pending, &op.text);
+            out.push_str(&op.text[at..]);
         } else if op.kind == shown {
-            let mut text = op.text.as_str();
-            if let Some(other) = leading_point.take() {
-                let prefix = block_prefix(text);
-                out.push_str(&text[..prefix]);
-                point(&mut out, other, point_marks);
-                text = &text[prefix..];
-            }
-            wrap(&mut out, text, marks, hunk);
+            let at = flush(&mut out, &mut pending, &op.text);
+            wrap(&mut out, &op.text[at..], marks, hunk);
         } else if op.kind == hidden && comparison.hunks.get(hunk).is_some_and(points) {
-            match out.is_empty() {
-                true => leading_point = Some(hunk),
-                false => point(&mut out, hunk, point_marks),
+            if out.is_empty() || out.ends_with("\n\n") || !pending.is_empty() {
+                pending.push(hunk);
+            } else {
+                point(&mut out, hunk, point_marks);
             }
         }
     }
-    if let Some(hunk) = leading_point {
+    for hunk in pending {
         point(&mut out, hunk, point_marks);
     }
     out
 }
 
-/// Marks where the other side's text is. A point at the start of a line
-/// would open a block of its own, so it goes at the end of the line before.
-fn point(out: &mut String, hunk: usize, (open, close): (char, char)) {
-    let newline = out.ends_with('\n');
-    if newline {
-        out.pop();
+/// Where a point goes in `text`: past any blank lines and the first line's
+/// block marker, or `None` when the text has no line to hold it.
+fn point_at(text: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            return Some(at + block_prefix(line));
+        }
+        at += line.len();
     }
+    None
+}
+
+/// Marks where the other side's text is. A point at the start of a line
+/// would open a block of its own, so it goes at the end of the last line
+/// with text.
+fn point(out: &mut String, hunk: usize, marks: (char, char)) {
+    let body = out.trim_end_matches('\n').len();
+    let newlines = out.split_off(body);
+    push_point(out, hunk, marks);
+    out.push_str(&newlines);
+}
+
+fn push_point(out: &mut String, hunk: usize, (open, close): (char, char)) {
     out.push(open);
     out.push(tag(hunk));
     out.push_str(POINT);
     out.push(close);
-    if newline {
-        out.push('\n');
-    }
 }
 
 /// Whether `block` shows any of hunk `hunk`'s marks.
@@ -785,6 +795,25 @@ mod tests {
         assert_eq!(
             readable_side("- one\n- two\n- three\n", "- one\n- three\n", Side::After),
             "- one[-|-]\n- three\n"
+        );
+    }
+
+    #[test]
+    fn a_point_after_a_blank_line_opens_the_next_block() {
+        let old = "# Done\n\nCopy the message out.\n";
+        let new = "# Done\n\nSend your finished text.\n";
+        assert_eq!(
+            readable_side(old, new, Side::After),
+            "# Done\n\n[-|-]{+Send your finished text.+}\n"
+        );
+        assert_eq!(
+            readable_side(old, new, Side::Before),
+            "# Done\n\n[-Copy the message out.-]{+|+}\n"
+        );
+        // A removed last paragraph points from the end of the text before.
+        assert_eq!(
+            readable_side("Keep.\n\nDrop this.\n", "Keep.\n", Side::After),
+            "Keep.[-|-]\n"
         );
     }
 
