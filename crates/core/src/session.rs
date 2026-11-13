@@ -1,11 +1,13 @@
 //! The editing session: which draft is selected, the text the editor holds,
-//! when its pending edit is saved, how a failed save is reported, and how
-//! changes to the draft's file from outside the editor reach it.
+//! when its pending edit is saved, how a failed save is reported, how
+//! changes to the draft's file from outside the editor reach it, and what
+//! the drafts' agents are doing to them.
 //!
 //! The app reports what happens (a selection, an edit, its autosave timer
 //! firing, a prompt) and carries out the returned [`Outcome`]: the effects in
 //! order, then its autosave timer rearmed from [`Outcome::deadline`].
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -49,6 +51,8 @@ pub enum Effect {
         text: String,
         saved: Result<String, String>,
     },
+    /// Leave `text` in the composer for the user to send.
+    Offer(String),
 }
 
 pub struct Session {
@@ -67,6 +71,8 @@ pub struct Session {
     asking: bool,
     /// Why the autosave timer leaves the pending edit alone; see [`Held`].
     held: Option<Held>,
+    /// The drafts whose agent is running, as last reported.
+    running: HashSet<String>,
 }
 
 /// The pending edit isn't saved by the autosave timer because the file
@@ -95,6 +101,7 @@ impl Session {
             text: String::new(),
             asking: false,
             held: None,
+            running: HashSet::new(),
         }
     }
 
@@ -411,6 +418,66 @@ impl Session {
                 epoch: self.epoch,
                 text: disk,
             }],
+            deadline: None,
+        }
+    }
+
+    /// Draft `id`'s agent started or finished a run.
+    pub fn agent_running(&mut self, id: &str, running: bool) {
+        if running {
+            self.running.insert(id.to_owned());
+        } else {
+            self.running.remove(id);
+        }
+    }
+
+    /// The editor is read-only while the selected draft's agent runs, so
+    /// the user's edits and the agent's don't meet.
+    pub fn editor_read_only(&self) -> bool {
+        self.drafts
+            .current_id()
+            .is_some_and(|id| self.running.contains(id))
+    }
+
+    /// The agent is writing into the selected draft, or its first draft is
+    /// still to be requested.
+    pub fn writing(&self) -> bool {
+        self.editor_read_only()
+            || self
+                .drafts
+                .current()
+                .is_some_and(|draft| draft.meta.first_draft_pending)
+    }
+
+    /// Draft `id` was handed off and its agent is ready for `prompt`, which
+    /// asks for the first draft. Records that it was requested. The agent
+    /// writes the first draft only into an empty draft, so text the user
+    /// typed while it was starting is kept and the prompt is offered for
+    /// them to send or drop. Otherwise the prompt is sent once the draft is
+    /// saved. Ignored unless `id` is selected. Starts no turn, so the first
+    /// draft isn't recorded as an edit.
+    pub fn first_draft_ready(&mut self, id: &str, prompt: String) -> Outcome {
+        if self.drafts.current_id() != Some(id) {
+            return Outcome::default();
+        }
+        if let Err(err) = self.drafts.first_draft_requested(id) {
+            eprintln!("draftmux: recording the first-draft request: {err:#}");
+        }
+        let effect = if self.text.trim().is_empty() {
+            let saved = self
+                .flush()
+                .map(|()| self.text.clone())
+                .map_err(|err| format!("{err:#}"));
+            Effect::Prompt {
+                text: prompt,
+                saved,
+            }
+        } else {
+            Effect::Offer(prompt)
+        };
+        // The autosave timer is left as it was.
+        Outcome {
+            effects: vec![effect],
             deadline: None,
         }
     }

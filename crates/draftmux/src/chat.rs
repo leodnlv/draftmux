@@ -93,12 +93,13 @@ pub enum ChatEvent {
     Send(String),
     /// The agent wrote draft `id`, selected or not; `text` is its new text.
     DraftWritten { id: String, text: String },
-    /// The selected draft's agent started or finished a run.
-    Running(bool),
-    /// The selected draft was handed off and its agent is ready: record
-    /// that the first draft was requested, then send `text` like
+    /// Draft `id`'s agent is `running` a turn or not: reported whenever its
+    /// transcript changes, and when `id` is selected.
+    Running { id: String, running: bool },
+    /// Draft `id` is selected, was handed off, and its agent is ready:
+    /// record that the first draft was requested, then send `text` like
     /// [`ChatEvent::Send`] unless the draft already has text.
-    FirstDraft(String),
+    FirstDraft { id: String, text: String },
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -347,7 +348,12 @@ impl Chat {
             .map(|session| Scroller::List(session.list.clone()));
         self.text_selection
             .update(cx, |selection, _| selection.set_scroller(scroller));
-        cx.emit(ChatEvent::Running(self.busy()));
+        if let Some(id) = self.current.clone() {
+            cx.emit(ChatEvent::Running {
+                id,
+                running: self.busy(),
+            });
+        }
         cx.notify();
     }
 
@@ -502,9 +508,10 @@ impl Chat {
             return;
         }
         session.draft.meta.first_draft_pending = false;
-        cx.emit(ChatEvent::FirstDraft(first_draft_prompt(
-            session.draft.meta.note.as_deref(),
-        )));
+        cx.emit(ChatEvent::FirstDraft {
+            id: id.to_owned(),
+            text: first_draft_prompt(session.draft.meta.note.as_deref()),
+        });
     }
 
     fn history_loaded(
@@ -767,8 +774,11 @@ impl Chat {
     fn after_change(&mut self, id: &str, cx: &mut Context<Self>) {
         self.enter_new_items(id);
         self.sync_list(id, cx);
-        if self.current.as_deref() == Some(id) {
-            cx.emit(ChatEvent::Running(self.busy()));
+        if let Some(session) = self.sessions.get(id) {
+            cx.emit(ChatEvent::Running {
+                id: id.to_owned(),
+                running: session.transcript.busy,
+            });
         }
     }
 

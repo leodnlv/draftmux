@@ -845,6 +845,7 @@ impl Chrome {
         self.load_changes(cx);
         self.chat.update(cx, |chat, cx| chat.set_draft(None, cx));
         self.sync_selection_draft(cx);
+        self.sync_agent(cx);
     }
 
     fn chat_event(&mut self, event: &ChatEvent, cx: &mut Context<Self>) {
@@ -854,28 +855,10 @@ impl Chrome {
                 let outcome = self.session.send(text.clone(), crate::chat::message(text));
                 self.apply(outcome, None, cx);
             }
-            ChatEvent::FirstDraft(text) => {
-                let Some(id) = self.session.drafts().current_id().map(str::to_owned) else {
-                    return;
-                };
-                if let Err(err) = self.session.drafts_mut().first_draft_requested(&id) {
-                    eprintln!("draftmux: recording the first-draft request: {err:#}");
-                }
-                // Text the user typed while pi was starting is kept, and the
-                // request is left in the composer for them to send or drop.
-                if !self.editor.read(cx).text().trim().is_empty() {
-                    let text = text.clone();
-                    self.chat.update(cx, |chat, cx| chat.offer(&text, cx));
-                } else {
-                    let saved = self
-                        .session
-                        .flush()
-                        .map(|()| self.editor.read(cx).text().to_owned())
-                        .map_err(|err| format!("{err:#}"));
-                    let text = text.clone();
-                    self.chat
-                        .update(cx, |chat, cx| chat.prompt(text, saved, cx));
-                }
+            ChatEvent::FirstDraft { id, text } => {
+                debug_assert_eq!(self.session.text(), self.editor.read(cx).text());
+                let outcome = self.session.first_draft_ready(id, text.clone());
+                self.apply(outcome, None, cx);
             }
             ChatEvent::DraftWritten { id, text } => {
                 let current = self.session.drafts().current_id() == Some(id.as_str());
@@ -889,33 +872,37 @@ impl Chrome {
                 }
                 self.apply(outcome, None, cx);
             }
-            ChatEvent::Running(running) => {
-                let running = *running;
-                let writing = running
-                    || self
-                        .session
-                        .drafts()
-                        .current()
-                        .is_some_and(|draft| draft.meta.first_draft_pending);
-                self.preview.update(cx, |preview, cx| {
-                    if preview.writing != writing {
-                        preview.writing = writing;
-                        cx.notify();
-                    }
-                });
-                self.editor
-                    .update(cx, |editor, cx| editor.set_read_only(running, cx));
-                self.formatter
-                    .update(cx, |formatter, cx| formatter.set_agent_running(running, cx));
-                // Selection actions are unavailable while the editor is
-                // read-only.
-                if running {
-                    self.selection
-                        .update(cx, |selection, cx| selection.dismiss(cx));
+            ChatEvent::Running { id, running } => {
+                self.session.agent_running(id, *running);
+                if self.session.drafts().current_id() != Some(id.as_str()) {
+                    return;
                 }
+                self.sync_agent(cx);
             }
         }
         cx.notify();
+    }
+
+    /// Shows what the selected draft's agent is doing: the editor is
+    /// read-only while it runs, and the preview shows it writing.
+    fn sync_agent(&mut self, cx: &mut Context<Self>) {
+        let running = self.session.editor_read_only();
+        let writing = self.session.writing();
+        self.preview.update(cx, |preview, cx| {
+            if preview.writing != writing {
+                preview.writing = writing;
+                cx.notify();
+            }
+        });
+        self.editor
+            .update(cx, |editor, cx| editor.set_read_only(running, cx));
+        self.formatter
+            .update(cx, |formatter, cx| formatter.set_agent_running(running, cx));
+        // Selection actions are unavailable while the editor is read-only.
+        if running {
+            self.selection
+                .update(cx, |selection, cx| selection.dismiss(cx));
+        }
     }
 
     fn edited(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1179,6 +1166,9 @@ impl Chrome {
                 Effect::Prompt { text, saved } => {
                     self.chat
                         .update(cx, |chat, cx| chat.prompt(text, saved, cx));
+                }
+                Effect::Offer(text) => {
+                    self.chat.update(cx, |chat, cx| chat.offer(&text, cx));
                 }
                 Effect::AskOutsideEdit(question) => {
                     let window = window

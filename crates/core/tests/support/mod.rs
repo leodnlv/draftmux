@@ -11,7 +11,7 @@ use draftmux_core::history::{EditLog, Recorded};
 use draftmux_core::outside::{Choice, Question};
 use draftmux_core::session::{Effect, Epoch, Outcome, Session};
 use draftmux_core::text::normalize_line_endings;
-use draftmux_storage::{History, NewDraft, Store, Target};
+use draftmux_storage::{History, NewDraft, Source, SourceKind, Store, Target};
 use tempfile::TempDir;
 
 pub struct Script {
@@ -26,6 +26,8 @@ pub struct Script {
     pub prompts: Vec<(String, Result<String, String>)>,
     /// Questions asked about outside edits, oldest first.
     pub questions: Vec<Question>,
+    /// Prompts left in the composer for the user to send.
+    pub offers: Vec<String>,
     /// `meta.json` as it was before [`Script::break_meta`].
     saved_meta: Option<Vec<u8>>,
     t0: DateTime<Utc>,
@@ -57,6 +59,7 @@ impl Script {
             timer: None,
             prompts: Vec::new(),
             questions: Vec::new(),
+            offers: Vec::new(),
             saved_meta: None,
             t0: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
             i0: Instant::now(),
@@ -99,6 +102,7 @@ impl Script {
                 }
                 Effect::Prompt { text, saved } => self.prompts.push((text, saved)),
                 Effect::AskOutsideEdit(question) => self.questions.push(question),
+                Effect::Offer(text) => self.offers.push(text),
             }
         }
         if let Some(deadline) = outcome.deadline {
@@ -131,12 +135,29 @@ impl Script {
     /// Creates a draft holding `text`, as `draftmux open` does, and lists
     /// it as the app does on its next refresh. Returns its id.
     pub fn draft(&mut self, text: &str) -> String {
+        self.create(text, None)
+    }
+
+    /// Creates an empty draft handed off from an agent session, as
+    /// `draftmux open` without `--draft-file` does: its first draft is still
+    /// to be requested. Returns its id.
+    pub fn handed_off(&mut self) -> String {
+        self.create(
+            "",
+            Some(Source {
+                kind: SourceKind::Pi,
+                path: "/home/u/.pi/sessions/source.jsonl".into(),
+            }),
+        )
+    }
+
+    fn create(&mut self, text: &str, source: Option<Source>) -> String {
         let id = self
             .store
             .create(NewDraft {
                 target: Target::Github,
                 title: String::new(),
-                source: None,
+                source,
                 cwd: "/home/u/code/app".into(),
                 pi_agent_dir: "/tmp/.pi/agent".into(),
                 note: None,
@@ -172,6 +193,19 @@ impl Script {
     /// from the saved text.
     pub fn send(&mut self, message: &str) {
         let outcome = self.session.send(message.to_owned(), message);
+        self.apply(outcome);
+    }
+
+    /// The chat reports that draft `id`'s agent started or finished a run.
+    pub fn running(&mut self, id: &str, running: bool) {
+        self.session.agent_running(id, running);
+    }
+
+    /// Draft `id`'s agent is ready to write its first draft.
+    pub fn first_draft_ready(&mut self, id: &str) {
+        let outcome = self
+            .session
+            .first_draft_ready(id, "Write the first draft".to_owned());
         self.apply(outcome);
     }
 
@@ -274,6 +308,7 @@ impl Script {
         self.editor = FakeEditor::default();
         self.timer = None;
         self.questions.clear();
+        self.offers.clear();
     }
 
     pub fn text(&self, id: &str) -> String {
