@@ -128,8 +128,8 @@ pub struct MarkupStyle {
 /// insertions on a green tint, deletions struck through on a red one. Kept
 /// changes lose the tint, insertions underlined and deletions faded; the
 /// selected change is outlined, and the hovered one more faintly. Where
-/// a change has no text on this side ([`compare::POINT`]) a bar stands in
-/// for it.
+/// a change has no text on this side ([`compare::POINT`]), a bar marks its
+/// place while it is selected or hovered.
 pub struct Redline {
     pub selected: Option<usize>,
     pub hovered: Option<usize>,
@@ -191,7 +191,7 @@ impl Redline {
             background: (!kept && !point).then_some(background),
             ring,
             underline: (kept && !mark.deleted).then(|| color.opacity(0.45)),
-            bar: point.then(|| {
+            bar: (point && ring.is_some()).then(|| {
                 let bar = match mark.deleted {
                     true => colors.removed_point,
                     false => colors.added_point,
