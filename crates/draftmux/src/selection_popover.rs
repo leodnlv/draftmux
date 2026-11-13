@@ -227,6 +227,8 @@ struct Panel {
     bounds: Bounds<Pixels>,
     /// The edge a resize keeps in place.
     pinned: Edge,
+    /// The edge that faces the selection.
+    side: Edge,
     /// Dismisses the popover when the panel, key after a click on it, loses
     /// focus to another app.
     _activation: Subscription,
@@ -921,7 +923,9 @@ impl SelectionPopover {
 
     /// Where the panel goes, in screen coordinates: above the selection's
     /// first visible row, or below its last when there's no room above, with
-    /// the edge that faces the selection. `None` when the popover is hidden
+    /// the edge that faces the selection. A panel already above may grow
+    /// past the pane's top up to the window's, so typing a newline in it
+    /// doesn't flip it below. `None` when the popover is hidden
     /// or the selection is scrolled away.
     fn placement(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, Edge)> {
         self.open.as_ref()?;
@@ -939,7 +943,12 @@ impl SelectionPopover {
         let size = self.content_size?;
 
         let above = first.top() - GAP - size.height;
-        let (y, side) = if above >= pane.top() + MARGIN {
+        let stays_above = self
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.side == Edge::Bottom);
+        let top = if stays_above { px(0.) } else { pane.top() };
+        let (y, side) = if above >= top + MARGIN {
             (above, Edge::Bottom)
         } else {
             (last.bottom() + GAP, Edge::Top)
@@ -1028,6 +1037,7 @@ impl SelectionPopover {
                             handle,
                             bounds,
                             pinned,
+                            side,
                             _activation: activation.expect("set when the window opens"),
                         });
                         // Dismissed while it opened.
