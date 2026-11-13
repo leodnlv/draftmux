@@ -236,7 +236,11 @@ fn sync_closed(
         .2
         .hunks
         .iter()
-        .filter(|hunk| !kept.contains(&hunk.key()))
+        .filter(|hunk| {
+            // `Changes::key` for the first edit.
+            let key = format!("0\0{}\0{}\0{}", hunk.old.start, hunk.removed, hunk.added);
+            !kept.contains(&key)
+        })
         .count();
     *cached = Some(compared);
     unreviewed
