@@ -859,7 +859,10 @@ impl Chrome {
                 debug_assert_eq!(self.session.text(), self.editor.read(cx).text());
                 let outcome = self.session.first_draft_ready(id, text.clone());
                 self.apply(outcome, None, cx);
+                // The preview stops showing the first draft as still to come.
+                self.sync_agent(cx);
             }
+            ChatEvent::Accepted { id } => self.session.prompt_accepted(id),
             ChatEvent::DraftWritten { id, text } => {
                 let current = self.session.drafts().current_id() == Some(id.as_str());
                 // Shown now rather than on the next poll. Nothing is pending

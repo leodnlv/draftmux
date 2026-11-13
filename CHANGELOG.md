@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A handed-off draft whose first draft was never started, because Draftmux
+  quit or pi failed before taking the request, asks pi for it again the next
+  time it opens, instead of staying empty. Once pi has taken the request it is
+  never sent again. If pi refuses it, the chat shows the error with Retry.
+
 - While Draftmux asks whether to keep your edits or a version of the draft
   changed outside it, the toolbar no longer shows an earlier "Couldn't save"
   error, and the app stops trying to save until you answer. If the question

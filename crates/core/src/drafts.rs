@@ -292,7 +292,7 @@ impl Drafts {
         self.update_row(id, meta, title)
     }
 
-    /// Records that the first draft of `id` was requested.
+    /// Records that the first draft of `id` no longer needs requesting.
     pub fn first_draft_requested(&mut self, id: &str) -> Result<()> {
         self.store
             .update_meta(id, |meta| meta.first_draft_pending = false)?;

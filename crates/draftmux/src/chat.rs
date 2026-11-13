@@ -96,10 +96,14 @@ pub enum ChatEvent {
     /// Draft `id`'s agent is `running` a turn or not: reported whenever its
     /// transcript changes, and when `id` is selected.
     Running { id: String, running: bool },
-    /// Draft `id` is selected, was handed off, and its agent is ready:
-    /// record that the first draft was requested, then send `text` like
-    /// [`ChatEvent::Send`] unless the draft already has text.
+    /// Draft `id` is selected, its first draft is pending, and its agent is
+    /// ready: send `text` like [`ChatEvent::Send`] unless the draft already
+    /// has text. Reported each time the draft is shown until the first draft
+    /// is no longer pending.
     FirstDraft { id: String, text: String },
+    /// Draft `id`'s agent accepted a prompt; a rejected or failed one isn't
+    /// reported.
+    Accepted { id: String },
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -496,7 +500,7 @@ impl Chat {
     }
 
     /// Asks the owner to send the first-draft request for a handed-off
-    /// draft whose agent is ready.
+    /// draft whose agent is ready. The owner decides whether it is still due.
     fn request_first_draft(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.current.as_deref() != Some(id) {
             return;
@@ -507,7 +511,6 @@ impl Chat {
         if !session.draft.meta.first_draft_pending || session.transcript.busy {
             return;
         }
-        session.draft.meta.first_draft_pending = false;
         cx.emit(ChatEvent::FirstDraft {
             id: id.to_owned(),
             text: first_draft_prompt(session.draft.meta.note.as_deref()),
@@ -585,6 +588,9 @@ impl Chat {
                         let Some(session) = this.sessions.get_mut(&id) else {
                             return;
                         };
+                        if reply.is_ok() {
+                            cx.emit(ChatEvent::Accepted { id: id.clone() });
+                        }
                         match reply {
                             Ok(Disposition::Handled) => session.transcript.handled(),
                             Ok(_) => return,

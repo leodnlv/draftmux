@@ -69,7 +69,7 @@ fn selecting_a_draft_takes_its_last_running_state() {
 }
 
 #[test]
-fn the_first_draft_of_an_empty_draft_is_prompted_and_no_longer_pending() {
+fn the_first_draft_of_an_empty_draft_is_prompted_and_pending_until_accepted() {
     let mut s = Script::new();
     let id = s.handed_off();
     s.select(&id);
@@ -83,6 +83,13 @@ fn the_first_draft_of_an_empty_draft_is_prompted_and_no_longer_pending() {
         [("Write the first draft".to_owned(), Ok(String::new()))]
     );
     assert!(s.offers.is_empty());
+    assert!(pending(&s));
+    assert!(s.store.load(&id).unwrap().meta.first_draft_pending);
+    // Requested, so no longer still to come; the run shows it writing.
+    assert!(!s.session.writing());
+
+    s.accepted(&id);
+
     assert!(!pending(&s));
     assert!(!s.store.load(&id).unwrap().meta.first_draft_pending);
     assert!(!s.session.writing());
@@ -100,9 +107,28 @@ fn the_first_draft_request_is_offered_when_the_user_already_typed() {
     assert_eq!(s.offers, ["Write the first draft"]);
     assert!(s.prompts.is_empty());
     assert!(!s.store.load(&id).unwrap().meta.first_draft_pending);
+    assert!(!s.session.writing());
     // Offering saves nothing; the typed text waits for autosave.
     assert_eq!(s.text(&id), "");
     assert!(s.session.drafts().deadline().is_some());
+}
+
+#[test]
+fn an_offered_first_draft_request_is_not_repeated_after_a_restart() {
+    let mut s = Script::new();
+    let id = s.handed_off();
+    s.select(&id);
+    s.type_text("My own start\n");
+    s.first_draft_ready(&id);
+    // The app quits before the user sends or drops the offered prompt, and
+    // before the typed text is saved.
+
+    s.restart_with(&id);
+    s.first_draft_ready(&id);
+
+    assert!(s.prompts.is_empty());
+    assert!(s.offers.is_empty());
+    assert!(!s.session.writing());
 }
 
 #[test]
@@ -148,6 +174,7 @@ fn a_retried_first_draft_request_goes_through_send_and_records_no_edit() {
     let (prompt, _) = s.prompts[0].clone();
     s.send(&prompt);
     assert_eq!(s.prompts.len(), 2);
+    s.accepted(&id);
     s.running(&id, true);
 
     assert_eq!(
@@ -159,22 +186,104 @@ fn a_retried_first_draft_request_goes_through_send_and_records_no_edit() {
     assert_eq!(s.editor.text, "A first draft\n");
     assert_eq!(s.history_bytes(&id), None);
     assert!(s.log().edits().is_empty());
+    assert!(!s.store.load(&id).unwrap().meta.first_draft_pending);
 }
 
 #[test]
-fn a_first_draft_request_is_not_repeated_after_a_restart() {
+fn a_rejected_first_draft_request_stays_pending_without_being_repeated() {
+    let mut s = Script::new();
+    let id = s.handed_off();
+    s.select(&id);
+    s.first_draft_ready(&id);
+    // The agent rejects the prompt, and the chat shows it failed with
+    // Retry. Showing the draft again reports the agent ready again.
+    s.first_draft_ready(&id);
+
+    assert_eq!(s.prompts.len(), 1);
+    assert!(s.store.load(&id).unwrap().meta.first_draft_pending);
+    assert!(!s.session.writing());
+
+    // The next start requests it again.
+    s.restart_with(&id);
+    assert!(s.session.writing());
+    s.first_draft_ready(&id);
+    assert_eq!(s.prompts.len(), 2);
+}
+
+#[test]
+fn an_accepted_first_draft_request_is_not_repeated_after_a_restart() {
+    let mut s = Script::new();
+    let id = s.handed_off();
+    s.select(&id);
+    s.first_draft_ready(&id);
+    s.accepted(&id);
+
+    s.restart_with(&id);
+    s.first_draft_ready(&id);
+
+    assert_eq!(s.prompts.len(), 1);
+    assert!(!pending(&s));
+    assert!(!s.session.writing());
+}
+
+#[test]
+fn a_first_draft_request_is_repeated_after_quitting_before_it_is_accepted() {
     let mut s = Script::new();
     let id = s.handed_off();
     s.select(&id);
     s.first_draft_ready(&id);
     // The app quits before the agent accepts the prompt.
 
-    s.crash();
-    s.session.drafts_mut().refresh();
+    s.restart_with(&id);
+
+    assert!(pending(&s));
+    assert!(s.session.writing());
+    s.first_draft_ready(&id);
+    assert_eq!(
+        s.prompts,
+        [
+            ("Write the first draft".to_owned(), Ok(String::new())),
+            ("Write the first draft".to_owned(), Ok(String::new())),
+        ]
+    );
+}
+
+#[test]
+fn a_first_draft_request_is_sent_once_across_switching_drafts() {
+    let mut s = Script::new();
+    let a = s.handed_off();
+    let b = s.draft("B\n");
+    s.select(&a);
+    s.first_draft_ready(&a);
+
+    // Shown again before the agent accepts: not sent again.
+    s.select(&b);
+    s.select(&a);
+    s.first_draft_ready(&a);
+    assert_eq!(s.prompts.len(), 1);
+    assert!(!s.session.writing());
+
+    // Accepted while another draft is selected.
+    s.select(&b);
+    s.accepted(&a);
+    assert!(!s.store.load(&a).unwrap().meta.first_draft_pending);
+
+    s.select(&a);
+    s.first_draft_ready(&a);
+    assert_eq!(s.prompts.len(), 1);
+    assert!(!s.session.writing());
+}
+
+#[test]
+fn an_accepted_prompt_leaves_a_first_draft_not_yet_requested_pending() {
+    let mut s = Script::new();
+    let id = s.handed_off();
     s.select(&id);
 
-    assert!(!pending(&s));
-    assert!(!s.session.writing());
+    s.accepted(&id);
+
+    assert!(pending(&s));
+    assert!(s.session.writing());
 }
 
 #[test]

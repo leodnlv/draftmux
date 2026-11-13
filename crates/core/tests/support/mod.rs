@@ -209,6 +209,18 @@ impl Script {
         self.apply(outcome);
     }
 
+    /// The chat reports that draft `id`'s agent accepted a prompt.
+    pub fn accepted(&mut self, id: &str) {
+        self.session.prompt_accepted(id);
+    }
+
+    /// The app starts again after quitting, and draft `id` is selected.
+    pub fn restart_with(&mut self, id: &str) {
+        self.crash();
+        self.session.drafts_mut().refresh();
+        self.select(id);
+    }
+
     /// The agent writes `text` to draft `id`'s file, and the app hasn't
     /// seen it yet.
     pub fn agent_saves(&self, id: &str, text: &str) {

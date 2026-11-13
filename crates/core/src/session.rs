@@ -73,6 +73,10 @@ pub struct Session {
     held: Option<Held>,
     /// The drafts whose agent is running, as last reported.
     running: HashSet<String>,
+    /// The drafts whose first-draft prompt was sent and not yet accepted by
+    /// the agent. Not persisted: after a restart the first draft of a draft
+    /// still marked pending is requested again.
+    requested: HashSet<String>,
 }
 
 /// The pending edit isn't saved by the autosave timer because the file
@@ -102,6 +106,7 @@ impl Session {
             asking: false,
             held: None,
             running: HashSet::new(),
+            requested: HashSet::new(),
         }
     }
 
@@ -443,27 +448,32 @@ impl Session {
     /// still to be requested.
     pub fn writing(&self) -> bool {
         self.editor_read_only()
-            || self
-                .drafts
-                .current()
-                .is_some_and(|draft| draft.meta.first_draft_pending)
+            || self.drafts.current().is_some_and(|draft| {
+                draft.meta.first_draft_pending && !self.requested.contains(&draft.id)
+            })
     }
 
     /// Draft `id` was handed off and its agent is ready for `prompt`, which
-    /// asks for the first draft. Records that it was requested. The agent
-    /// writes the first draft only into an empty draft, so text the user
-    /// typed while it was starting is kept and the prompt is offered for
-    /// them to send or drop. Otherwise the prompt is sent once the draft is
-    /// saved. Ignored unless `id` is selected. Starts no turn, so the first
-    /// draft isn't recorded as an edit.
+    /// asks for the first draft. The agent writes the first draft only into
+    /// an empty draft, so text the user typed while it was starting is kept
+    /// and the prompt is offered for them to send or drop; the first draft is
+    /// then no longer pending. Otherwise the prompt is sent once the draft is
+    /// saved, and the first draft stays pending until the agent accepts a
+    /// prompt ([`Session::prompt_accepted`]), so a request lost to a quit or
+    /// a failed start is made again next time. Ignored unless `id` is
+    /// selected, its first draft is pending, and it wasn't already requested
+    /// since the app started. Starts no turn, so the first draft isn't
+    /// recorded as an edit.
     pub fn first_draft_ready(&mut self, id: &str, prompt: String) -> Outcome {
-        if self.drafts.current_id() != Some(id) {
+        let pending = self
+            .drafts
+            .current()
+            .is_some_and(|draft| draft.id == id && draft.meta.first_draft_pending);
+        if !pending || self.requested.contains(id) {
             return Outcome::default();
         }
-        if let Err(err) = self.drafts.first_draft_requested(id) {
-            eprintln!("draftmux: recording the first-draft request: {err:#}");
-        }
         let effect = if self.text.trim().is_empty() {
+            self.requested.insert(id.to_owned());
             let saved = self
                 .flush()
                 .map(|()| self.text.clone())
@@ -473,12 +483,30 @@ impl Session {
                 saved,
             }
         } else {
+            self.first_draft_requested(id);
             Effect::Offer(prompt)
         };
         // The autosave timer is left as it was.
         Outcome {
             effects: vec![effect],
             deadline: None,
+        }
+    }
+
+    /// Draft `id`'s agent accepted a prompt, selected or not. When its first
+    /// draft was requested, that request, or whatever the user sent in its
+    /// place, is now the agent's to carry out, and it is no longer pending.
+    /// A prompt the agent rejects or never answers leaves it pending: the
+    /// chat offers Retry, and the next start requests it again.
+    pub fn prompt_accepted(&mut self, id: &str) {
+        if self.requested.remove(id) {
+            self.first_draft_requested(id);
+        }
+    }
+
+    fn first_draft_requested(&mut self, id: &str) {
+        if let Err(err) = self.drafts.first_draft_requested(id) {
+            eprintln!("draftmux: recording the first-draft request: {err:#}");
         }
     }
 
