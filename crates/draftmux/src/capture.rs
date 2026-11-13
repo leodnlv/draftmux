@@ -29,7 +29,7 @@ use gpui::{
 use markup::Document;
 
 use crate::assets;
-use crate::compare::{self, Mark, Side};
+use crate::compare::{self, Mark, Run, Side};
 use crate::inline_text::MarkHandlers;
 use crate::markup_view::{self, MarkupStyle, Redline, RedlineColors};
 use crate::theme::Palette;
@@ -228,12 +228,11 @@ async fn capture_reviews(
 /// Marked text with its marks spelled out: `[-n:…-]` deleted, `{+n:…+}`
 /// inserted, `|` a point.
 fn readable(marked: &str) -> String {
-    let marked = marked.replace(compare::POINT, "|");
     let mut open = None;
     let mut out = String::new();
     let mut last: Option<Mark> = None;
     let close = |out: &mut String, mark: Mark| out.push_str(if mark.deleted { "-]" } else { "+}" });
-    for (mark, text) in compare::split_marks(&marked, &mut open) {
+    for (mark, run) in compare::split_marks(marked, &mut open) {
         if mark != last {
             if let Some(last) = last {
                 close(&mut out, last);
@@ -243,7 +242,10 @@ fn readable(marked: &str) -> String {
                 out.push_str(&format!("{open}{}:", mark.hunk));
             }
         }
-        out.push_str(text);
+        out.push_str(match run {
+            Run::Text(text) => text,
+            Run::Point => "|",
+        });
         last = mark;
     }
     if let Some(last) = last {

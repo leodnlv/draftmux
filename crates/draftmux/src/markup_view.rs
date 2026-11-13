@@ -166,7 +166,7 @@ impl RedlineColors {
 }
 
 impl Redline {
-    fn style(&self, segment: &mut Segment, mark: Mark) {
+    fn style(&self, segment: &mut Segment, mark: Mark, point: bool) {
         let colors = self.colors;
         let kept = self.kept.get(mark.hunk).copied().unwrap_or(false);
         let (color, background) = if mark.deleted {
@@ -179,7 +179,6 @@ impl Redline {
         } else {
             color
         });
-        let point = segment.text.as_ref() == compare::POINT;
         segment.strike |= mark.deleted && !point;
         let ring = if self.selected == Some(mark.hunk) {
             Some(colors.selected)
@@ -1156,13 +1155,17 @@ impl<'a> Renderer<'a> {
         };
         let mut marked = Vec::with_capacity(segments.len());
         for segment in segments {
-            for (mark, text) in compare::split_marks(&segment.text, &mut self.open_mark) {
+            for (mark, run) in compare::split_marks(&segment.text, &mut self.open_mark) {
+                let text = match run {
+                    compare::Run::Text(text) => text,
+                    compare::Run::Point => compare::POINT,
+                };
                 let mut piece = Segment {
                     text: text.to_owned().into(),
                     ..segment.clone()
                 };
                 if let Some(mark) = mark {
-                    redline.style(&mut piece, mark);
+                    redline.style(&mut piece, mark, run == compare::Run::Point);
                 }
                 marked.push(piece);
             }
@@ -2167,23 +2170,67 @@ mod tests {
             .collect()
     }
 
-    /// A document's debug form without the redline's marks and points,
-    /// which `{:?}` writes as `\u{…}` escapes.
-    fn unmarked(doc: &markup::Document) -> String {
-        let text = format!("{doc:?}");
-        let mut out = String::new();
-        let mut rest = text.as_str();
-        while let Some(at) = rest.find("\\u{") {
-            out.push_str(&rest[..at]);
-            let end = rest[at..].find('}').unwrap() + at + 1;
-            let code = u32::from_str_radix(&rest[at + 3..end - 1], 16).unwrap();
-            if !((0xE000..=0xF8FF).contains(&code) || code == 0x200A) {
-                out.push_str(&rest[at..end]);
-            }
-            rest = &rest[end..];
-        }
-        out.push_str(rest);
-        out.replace(crate::compare::POINT, "")
+    /// `blocks` with `edit` applied to every text in them: spans, code and
+    /// HTML. Spans left empty are dropped.
+    fn map_text(blocks: &[markup::Block], edit: &dyn Fn(&str) -> String) -> Vec<markup::Block> {
+        use markup::{Block, Span};
+        let spans = |spans: &[Span]| -> Vec<Span> {
+            spans
+                .iter()
+                .map(|span| Span {
+                    text: edit(&span.text),
+                    ..span.clone()
+                })
+                .filter(|span| !span.text.is_empty())
+                .collect()
+        };
+        blocks
+            .iter()
+            .map(|block| match block {
+                Block::Paragraph(text) => Block::Paragraph(spans(text)),
+                Block::Heading { level, spans: text } => Block::Heading {
+                    level: *level,
+                    spans: spans(text),
+                },
+                Block::List(list) => Block::List(markup::List {
+                    items: list
+                        .items
+                        .iter()
+                        .map(|item| markup::ListItem {
+                            task: item.task,
+                            blocks: map_text(&item.blocks, edit),
+                        })
+                        .collect(),
+                    ..list.clone()
+                }),
+                Block::Quote(inner) => Block::Quote(map_text(inner, edit)),
+                Block::Alert { kind, blocks } => Block::Alert {
+                    kind: *kind,
+                    blocks: map_text(blocks, edit),
+                },
+                Block::Code { lang, text } => Block::Code {
+                    lang: lang.clone(),
+                    text: edit(text),
+                },
+                Block::Html(text) => Block::Html(edit(text)),
+                Block::Table(table) => Block::Table(markup::Table {
+                    alignments: table.alignments.clone(),
+                    header: table.header.iter().map(|cell| spans(cell)).collect(),
+                    rows: table
+                        .rows
+                        .iter()
+                        .map(|row| row.iter().map(|cell| spans(cell)).collect())
+                        .collect(),
+                }),
+                Block::Rule => Block::Rule,
+            })
+            .collect()
+    }
+
+    /// A point keeps the spaces before it in its line, which the text
+    /// without it loses, so neither side keeps a span's trailing space.
+    fn trim_span_end(text: &str) -> String {
+        text.strip_suffix(' ').unwrap_or(text).to_owned()
     }
 
     #[test]
@@ -2196,24 +2243,71 @@ mod tests {
             for target in [Target::Github, Target::Slack] {
                 for (side, text) in [(Side::Before, &before), (Side::After, &after)] {
                     let marked = super::redline(&comparison, side, target);
-                    let plain = super::preview(target, text);
+                    // The redline shows what parses as a sentinel as U+FFFD.
+                    let plain = super::preview(target, &compare::neutralize(text));
+                    // Nothing else in a draft parses as one.
+                    let reserved = std::cell::Cell::new(false);
+                    map_text(&plain.blocks, &|text| {
+                        reserved.set(reserved.get() || compare::strip_marks(text) != text);
+                        String::new()
+                    });
+                    if reserved.get() {
+                        failures.push(format!("{name} {side:?} {target:?}: a sentinel parsed"));
+                    }
                     // An empty side shows only a point, in a paragraph of its
-                    // own, and a point keeps the spaces before it in its line.
-                    let (marked, plain) = match plain.blocks.is_empty() {
-                        true if marked.blocks.len() == 1 => continue,
-                        _ => (unmarked(&marked), unmarked(&plain)),
-                    };
-                    let trim = |doc: String| doc.replace(" \", style", "\", style");
-                    let (marked, plain) = (trim(marked), trim(plain));
+                    // own.
+                    if plain.blocks.is_empty() && marked.blocks.len() == 1 {
+                        continue;
+                    }
+                    // Only the marked side loses anything besides trailing
+                    // spaces: the marks the redline added.
+                    let marked = map_text(&marked.blocks, &|text| {
+                        trim_span_end(&compare::strip_marks(text))
+                    });
+                    let plain = map_text(&plain.blocks, &trim_span_end);
                     if marked != plain {
                         failures.push(format!(
-                            "{name} {side:?} {target:?}:\n  marked {marked}\n  plain  {plain}"
+                            "{name} {side:?} {target:?}:\n  marked {marked:?}\n  plain  {plain:?}"
                         ));
                     }
                 }
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn only_a_point_draws_a_bar() {
+        use super::{Redline, RedlineColors, Segment};
+        use crate::compare::{self, Mark};
+        use crate::inline_text::MarkHandlers;
+        use crate::theme::Palette;
+        use std::rc::Rc;
+        let redline = Redline {
+            selected: Some(0),
+            hovered: None,
+            kept: vec![false],
+            colors: RedlineColors::new(&Palette::light()),
+            handlers: Rc::new(MarkHandlers {
+                click: Rc::new(|_, _, _| {}),
+                hover: Rc::new(|_, _| {}),
+                placed: Rc::new(|_, _| {}),
+            }),
+        };
+        let mark = Mark {
+            hunk: 0,
+            deleted: true,
+        };
+        let bar = |point| {
+            let mut segment = Segment {
+                text: compare::POINT.into(),
+                ..Segment::default()
+            };
+            redline.style(&mut segment, mark, point);
+            (segment.mark.unwrap().bar.is_some(), segment.strike)
+        };
+        assert_eq!(bar(true), (true, false));
+        assert_eq!(bar(false), (false, true));
     }
 
     #[test]

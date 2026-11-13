@@ -1,9 +1,12 @@
 //! Compares two versions of a draft for review: a line-then-word diff
 //! grouped into hunks, and the redline text the preview renders, with each
-//! insertion and deletion marked inline by private-use sentinels that pass
-//! through the markdown parsers as ordinary text.
+//! insertion and deletion marked inline by sentinels that pass through the
+//! markdown parsers as ordinary text. The sentinels are Unicode
+//! noncharacters, which, unlike the private use area, no font gives a glyph;
+//! [`neutralize`] keeps a draft from supplying them.
 
-use std::ops::Range;
+use std::borrow::Cow;
+use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 
 use similar::{Algorithm, DiffOp, capture_diff_deadline};
@@ -11,18 +14,23 @@ use similar::{Algorithm, DiffOp, capture_diff_deadline};
 /// How long each diff may run before it settles for a coarser answer.
 const DIFF_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Opens inserted text; the next character carries the hunk, see [`tag`].
-const INS_OPEN: char = '\u{E000}';
-const INS_CLOSE: char = '\u{E001}';
+/// Opens inserted text; the hunk's [`tag`] follows.
+const INS_OPEN: char = '\u{FDD0}';
+const INS_CLOSE: char = '\u{FDD1}';
 /// Opens deleted text, like [`INS_OPEN`].
-const DEL_OPEN: char = '\u{E002}';
-const DEL_CLOSE: char = '\u{E003}';
-/// Where one version has text the other lacks, shown in the other: a hair
-/// space marked as that change, drawn as a bar.
+const DEL_OPEN: char = '\u{FDD2}';
+const DEL_CLOSE: char = '\u{FDD3}';
+/// Where one version has text the other lacks, shown in the other, marked
+/// as that change; [`split_marks`] reads it as a [`Run::Point`].
+const POINT_MARK: char = '\u{FDD4}';
+/// What a point is drawn on: a hair space, shown as a bar.
 pub const POINT: &str = "\u{200A}";
-/// The hunk tags take the rest of the private use area.
-const TAG_BASE: u32 = 0xE100;
-const TAG_LAST: u32 = 0xF8FF;
+/// A tag's hexadecimal digits, from 0 at `DIGIT_BASE`. Every byte of a
+/// draft could be its own hunk at most, so 8 digits are enough.
+const DIGIT_BASE: u32 = 0xFDE0;
+const TAG_DIGITS: usize = 8;
+/// The noncharacters the sentinels and digits are taken from.
+const RESERVED: RangeInclusive<char> = '\u{FDD0}'..='\u{FDEF}';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -321,6 +329,9 @@ pub fn marked(comparison: &Comparison, side: Side, unseen: &[usize]) -> String {
         .filter(|op| op.kind == Kind::Equal || op.kind == shown)
         .map(|op| op.text.as_str())
         .collect();
+    // The whole side, so a character reference split between ops is still
+    // found; it keeps every op's offsets.
+    let text = neutralize(&text);
     let mut at = 0;
     let mut out = String::new();
     // Points wait here for a line that can hold them.
@@ -329,8 +340,9 @@ pub fn marked(comparison: &Comparison, side: Side, unseen: &[usize]) -> String {
         let hunk = op.hunk.unwrap_or_default();
         let mut queue = None;
         if op.kind == Kind::Equal || op.kind == shown {
-            let start = flush(&mut out, &mut pending, &op.text);
-            let rest = &op.text[start..];
+            let op_text = &text[at..at + op.text.len()];
+            let start = flush(&mut out, &mut pending, op_text);
+            let rest = &op_text[start..];
             let full = &text[at + start..];
             match op.kind {
                 Kind::Equal => out.push_str(rest),
@@ -444,8 +456,8 @@ fn point(out: &mut String, hunk: usize, marks: (char, char)) {
 
 fn push_point(out: &mut String, hunk: usize, (open, close): (char, char)) {
     out.push(open);
-    out.push(tag(hunk));
-    out.push_str(POINT);
+    out.push_str(&tag(hunk));
+    out.push(POINT_MARK);
     out.push(close);
 }
 
@@ -469,14 +481,18 @@ fn alert_line(line: &str) -> bool {
 /// Whether `block` shows any of hunk `hunk`'s marks.
 pub fn block_has_hunk(block: &markup::Block, hunk: usize) -> bool {
     use markup::Block;
+    // Tags follow only openers and are all as long, so the opener and tag
+    // can't match anywhere else.
     let tag = tag(hunk);
-    let spans = |spans: &[markup::Span]| spans.iter().any(|span| span.text.contains(tag));
+    let [ins, del] = [INS_OPEN, DEL_OPEN].map(|open| format!("{open}{tag}"));
+    let has = |text: &str| text.contains(&ins) || text.contains(&del);
+    let spans = |spans: &[markup::Span]| spans.iter().any(|span| has(&span.text));
     let blocks = |blocks: &[Block]| blocks.iter().any(|block| block_has_hunk(block, hunk));
     match block {
         Block::Paragraph(text) | Block::Heading { spans: text, .. } => spans(text),
         Block::List(list) => list.items.iter().any(|item| blocks(&item.blocks)),
         Block::Quote(inner) | Block::Alert { blocks: inner, .. } => blocks(inner),
-        Block::Code { text, .. } | Block::Html(text) => text.contains(tag),
+        Block::Code { text, .. } | Block::Html(text) => has(text),
         Block::Table(table) => {
             table.header.iter().any(|cell| spans(cell))
                 || table.rows.iter().flatten().any(|cell| spans(cell))
@@ -485,9 +501,85 @@ pub fn block_has_hunk(block: &markup::Block, hunk: usize) -> bool {
     }
 }
 
-fn tag(hunk: usize) -> char {
-    let code = (TAG_BASE + hunk as u32).min(TAG_LAST);
-    char::from_u32(code).expect("private use code points are chars")
+/// Hunk `hunk`'s number in [`TAG_DIGITS`] digits.
+fn tag(hunk: usize) -> String {
+    let hunk = u32::try_from(hunk).expect("a draft has fewer hunks than u32::MAX");
+    (0..TAG_DIGITS)
+        .rev()
+        .map(|place| digit((hunk >> (place * 4)) & 0xF))
+        .collect()
+}
+
+fn digit(value: u32) -> char {
+    char::from_u32(DIGIT_BASE + value).expect("noncharacters are chars")
+}
+
+/// The hunk whose tag starts `text`.
+fn read_tag(text: &str) -> Option<usize> {
+    let mut chars = text.chars();
+    let mut hunk: usize = 0;
+    for _ in 0..TAG_DIGITS {
+        let value = (chars.next()? as u32).checked_sub(DIGIT_BASE)?;
+        if value > 0xF {
+            return None;
+        }
+        hunk = hunk << 4 | value as usize;
+    }
+    Some(hunk)
+}
+
+/// `text` with every character a parser could read as a [`RESERVED`] one
+/// replaced by U+FFFD: the characters themselves, and the digits of numeric
+/// character references to them, which become FFFD's padded to their
+/// width. Every byte offset stays the same.
+pub fn neutralize(text: &str) -> Cow<'_, str> {
+    if !text.contains(|c| RESERVED.contains(&c)) && !text.contains("&#") {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if RESERVED.contains(&c) {
+            out.push(char::REPLACEMENT_CHARACTER);
+            rest = &rest[c.len_utf8()..];
+        } else if let Some(len) = reserved_reference(rest) {
+            let (hex, digits) = match rest.as_bytes()[2] {
+                b'x' | b'X' => (true, &rest[3..len - 1]),
+                _ => (false, &rest[2..len - 1]),
+            };
+            let replacement = if hex { "FFFD" } else { "65533" };
+            out.push_str(&rest[..len - 1 - digits.len()]);
+            out.push_str(&format!("{replacement:0>width$}", width = digits.len()));
+            out.push(';');
+            rest = &rest[len..];
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    debug_assert_eq!(out.len(), text.len());
+    Cow::Owned(out)
+}
+
+/// The length of the numeric character reference that starts `text`, when
+/// it decodes to a [`RESERVED`] character. Like CommonMark, takes up to 6
+/// hexadecimal or 7 decimal digits.
+fn reserved_reference(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix("&#")?;
+    let (digits, radix, max) = match rest.strip_prefix(['x', 'X']) {
+        Some(digits) => (digits, 16, 6),
+        None => (rest, 10, 7),
+    };
+    let len = digits
+        .find(|c: char| !c.is_digit(radix))
+        .unwrap_or(digits.len());
+    if !(1..=max).contains(&len) || !digits[len..].starts_with(';') {
+        return None;
+    }
+    let value = u32::from_str_radix(&digits[..len], radix).ok()?;
+    char::from_u32(value)
+        .filter(|c| RESERVED.contains(c))
+        .map(|_| text.len() - digits.len() + len + 1)
 }
 
 fn wrap(out: &mut String, text: &str, full: &str, (open, close): (char, char), hunk: usize) {
@@ -532,7 +624,7 @@ fn wrap(out: &mut String, text: &str, full: &str, (open, close): (char, char), h
         }
         out.push_str(&body[..prefix]);
         out.push(open);
-        out.push(tag(hunk));
+        out.push_str(&tag(hunk));
         out.push_str(core);
         out.push(close);
         out.push_str(&rest[core.len()..]);
@@ -690,49 +782,61 @@ pub struct Mark {
     pub deleted: bool,
 }
 
+/// A piece of a parsed redline's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run<'a> {
+    Text(&'a str),
+    /// The place of a change whose text only the other side has.
+    Point,
+}
+
 /// Splits `text` from a parsed redline into runs with their marks, dropping
 /// the sentinels. `open` carries a mark across calls for text split into
-/// several spans.
-pub fn split_marks<'a>(text: &'a str, open: &mut Option<Mark>) -> Vec<(Option<Mark>, &'a str)> {
+/// several spans. An opener without a whole tag opens no mark.
+pub fn split_marks<'a>(text: &'a str, open: &mut Option<Mark>) -> Vec<(Option<Mark>, Run<'a>)> {
     let mut out = Vec::new();
     let mut start = 0;
-    let mut chars = text.char_indices().peekable();
+    let mut chars = text.char_indices();
     while let Some((at, c)) = chars.next() {
-        let deleted = match c {
-            INS_OPEN | DEL_OPEN => Some(c == DEL_OPEN),
-            INS_CLOSE | DEL_CLOSE => None,
-            _ => continue,
-        };
+        if !RESERVED.contains(&c) {
+            continue;
+        }
         if start < at {
-            out.push((*open, &text[start..at]));
+            out.push((*open, Run::Text(&text[start..at])));
         }
         start = at + c.len_utf8();
-        *open = deleted.map(|deleted| {
-            let hunk = match chars.peek() {
-                Some(&(at, tag)) if (TAG_BASE..=TAG_LAST).contains(&(tag as u32)) => {
-                    chars.next();
-                    start = at + tag.len_utf8();
-                    (tag as u32 - TAG_BASE) as usize
-                }
-                _ => 0,
-            };
-            Mark { hunk, deleted }
-        });
+        match c {
+            INS_OPEN | DEL_OPEN => {
+                *open = read_tag(&text[start..]).map(|hunk| {
+                    for _ in 0..TAG_DIGITS {
+                        chars.next();
+                    }
+                    start += TAG_DIGITS * digit(0).len_utf8();
+                    Mark {
+                        hunk,
+                        deleted: c == DEL_OPEN,
+                    }
+                });
+            }
+            INS_CLOSE | DEL_CLOSE => *open = None,
+            POINT_MARK => out.push((*open, Run::Point)),
+            // A digit outside a tag.
+            _ => {}
+        }
     }
     if start < text.len() {
-        out.push((*open, &text[start..]));
+        out.push((*open, Run::Text(&text[start..])));
     }
     out
 }
 
-/// `text` without redline sentinels.
+/// `text` without redline sentinels and points.
 pub fn strip_marks(text: &str) -> String {
     text.chars().filter(|&c| !is_sentinel(c)).collect()
 }
 
 fn is_sentinel(c: char) -> bool {
-    matches!(c, INS_OPEN | INS_CLOSE | DEL_OPEN | DEL_CLOSE)
-        || (TAG_BASE..=TAG_LAST).contains(&(c as u32))
+    RESERVED.contains(&c)
 }
 
 #[cfg(test)]
@@ -751,11 +855,15 @@ mod tests {
     /// One side with marks written as `{+…+}` and `[-…-]`, and a point as
     /// `|`.
     fn readable_side(old: &str, new: &str, side: Side) -> String {
-        let marked = marked(&compare(old, new), side, &[]).replace(POINT, "|");
+        let marked = marked(&compare(old, new), side, &[]);
         let mut open = None;
         let mut out = String::new();
         let mut last: Option<Mark> = None;
-        for (mark, text) in split_marks(&marked, &mut open) {
+        for (mark, run) in split_marks(&marked, &mut open) {
+            let text = match run {
+                Run::Text(text) => text,
+                Run::Point => "|",
+            };
             if let Some(last) = last.filter(|_| mark != last) {
                 out.push_str(if last.deleted { "-]" } else { "+}" });
             }
@@ -1013,9 +1121,137 @@ mod tests {
             hunk: 0,
             deleted: false,
         });
-        assert_eq!(first.last().unwrap(), &(mark, "c"));
-        assert_eq!(second.first().unwrap(), &(mark, "d"));
+        assert_eq!(first.last().unwrap(), &(mark, Run::Text("c")));
+        assert_eq!(second.first().unwrap(), &(mark, Run::Text("d")));
         assert_eq!(strip_marks(&marked), "a cd\n");
+    }
+
+    /// Each side's text, with its marks taken out by [`strip_marks`] and by
+    /// [`split_marks`].
+    fn unmarked_sides(old: &str, new: &str) -> [(String, String); 2] {
+        let comparison = compare(old, new);
+        [Side::Before, Side::After].map(|side| {
+            let marked = marked(&comparison, side, &[]);
+            let runs = split_marks(&marked, &mut None)
+                .into_iter()
+                .filter_map(|(_, run)| match run {
+                    Run::Text(text) => Some(text),
+                    Run::Point => None,
+                })
+                .collect();
+            (strip_marks(&marked), runs)
+        })
+    }
+
+    #[test]
+    fn keeps_private_use_characters() {
+        let cases = [
+            (
+                "```\n\u{F113} main\n```\n",
+                "```\n\u{F113} main branch\n```\n",
+            ),
+            ("The \u{F8FF} logo\n", "The \u{F8FF} new logo\n"),
+            ("\u{E100} one\n", "\u{E100} two\n"),
+            ("\u{F0001} icon\n", "\u{F0001} icons\n"),
+            ("a \u{E000} b \u{E001}\n", "a \u{E000} c \u{E001}\n"),
+            ("a\u{200A}b c\n", "a\u{200A}b d\n"),
+        ];
+        for (old, new) in cases {
+            let [(before, before_runs), (after, after_runs)] = unmarked_sides(old, new);
+            assert_eq!((before.as_str(), before_runs.as_str()), (old, old));
+            assert_eq!((after.as_str(), after_runs.as_str()), (new, new));
+        }
+    }
+
+    #[test]
+    fn a_hair_space_in_a_change_is_text_not_a_point() {
+        // The parser splits the hair space into a span of its own.
+        let text = marked(&compare("a\n", "a **x**\u{200A}*y*\n"), Side::After, &[]);
+        let cut = text.find('\u{200A}').unwrap();
+        let mut open = None;
+        split_marks(&text[..cut], &mut open);
+        let space = split_marks(&text[cut..cut + POINT.len()], &mut open);
+        assert_eq!(space, [(open, Run::Text(POINT))]);
+        assert!(open.is_some());
+        // A removal shows a point on the side without its text.
+        let text = marked(&compare("a b c\n", "a c\n"), Side::After, &[]);
+        let runs = split_marks(&text, &mut None);
+        assert!(
+            runs.iter()
+                .any(|(mark, run)| mark.is_some() && *run == Run::Point)
+        );
+    }
+
+    #[test]
+    fn neutralizes_reserved_characters_and_references_to_them() {
+        let cases = [
+            ("a \u{FDD0} b \u{FDEF}", "a \u{FFFD} b \u{FFFD}"),
+            ("&#xFDD0; &#XfdD4; &#64976;", "&#xFFFD; &#XFFFD; &#65533;"),
+            ("&#x00FDD0; &#0064976;", "&#x00FFFD; &#0065533;"),
+            // Not references CommonMark decodes, or not to reserved ones.
+            (
+                "&#x0000FDD0; &#xFDD0 &#xE001; &#xF8FF; &#;",
+                "&#x0000FDD0; &#xFDD0 &#xE001; &#xF8FF; &#;",
+            ),
+            ("\u{F113} \u{F8FF} \u{200A}", "\u{F113} \u{F8FF} \u{200A}"),
+        ];
+        for (text, neutral) in cases {
+            assert_eq!(neutralize(text), neutral);
+            assert_eq!(neutralize(text).len(), text.len());
+        }
+        assert!(matches!(neutralize("plain \u{F8FF}"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn reserved_characters_in_a_draft_open_no_marks() {
+        let old = "One \u{FDD0}\u{FDE0} two &#xFDD1; three\n";
+        let new = "One \u{FDD0}\u{FDE0} two &#xFDD1; four\n";
+        let [(before, _), (after, _)] = unmarked_sides(old, new);
+        assert_eq!(before, neutralize(old));
+        assert_eq!(after, neutralize(new));
+        let text = marked(&compare(old, new), Side::After, &[]);
+        let marks: Vec<_> = split_marks(&text, &mut None)
+            .into_iter()
+            .filter_map(|(mark, _)| mark)
+            .collect();
+        assert!(!marks.is_empty());
+        assert!(marks.iter().all(|mark| mark.hunk == 0));
+    }
+
+    #[test]
+    fn a_reference_split_between_ops_is_neutralized() {
+        let old = "x &#xFDD0; y\n";
+        let new = "x &#xFDD1; y\n";
+        let [(before, _), (after, _)] = unmarked_sides(old, new);
+        assert_eq!(before, neutralize(old));
+        assert_eq!(after, neutralize(new));
+    }
+
+    #[test]
+    fn tags_tell_every_hunk_apart() {
+        for hunk in [0, 1, 0xF8FF, 70_000, u32::MAX as usize] {
+            assert_eq!(read_tag(&tag(hunk)), Some(hunk));
+            assert_eq!(tag(hunk).chars().count(), TAG_DIGITS);
+        }
+        let mut open = None;
+        let text = format!("{INS_OPEN}{}x{INS_CLOSE}", tag(70_000));
+        assert_eq!(
+            split_marks(&text, &mut open),
+            [(
+                Some(Mark {
+                    hunk: 70_000,
+                    deleted: false
+                }),
+                Run::Text("x")
+            )]
+        );
+    }
+
+    #[test]
+    fn an_opener_without_a_whole_tag_opens_no_mark() {
+        let short: String = tag(5).chars().skip(1).collect();
+        let text = format!("{DEL_OPEN}{short}x");
+        assert_eq!(split_marks(&text, &mut None), [(None, Run::Text("x"))]);
     }
 
     #[test]
