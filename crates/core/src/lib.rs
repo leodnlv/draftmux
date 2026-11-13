@@ -4,5 +4,6 @@
 //! Storage calls are synchronous against [`draftmux_storage::Store`], and
 //! time is always an argument.
 
+pub mod drafts;
 pub mod history;
 pub mod text;

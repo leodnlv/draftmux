@@ -36,7 +36,7 @@ use crate::app_settings::AppSettings;
 use crate::assets::{EDITOR_PANE_ICON, PREVIEW_ICON};
 use crate::chat::{Chat, ChatEvent};
 use crate::copy::{self, Copy};
-use crate::drafts::{Drafts, tilde};
+use crate::drafts::{self, Drafts, tilde};
 use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
@@ -598,7 +598,7 @@ impl Chrome {
         ));
         if let Some(home) = std::env::home_dir() {
             let settings = AppSettings::global(cx).read(cx).settings.clone();
-            if let Err(err) = chrome.drafts.first_launch_sample(&settings, &home) {
+            if let Err(err) = drafts::first_launch_sample(&mut chrome.drafts, &settings, &home) {
                 eprintln!("draftmux: creating the sample draft: {err:#}");
             }
         }
@@ -614,7 +614,7 @@ impl Chrome {
         let settings = AppSettings::global(cx).read(cx).settings.clone();
         let created = std::env::home_dir()
             .ok_or_else(|| anyhow::anyhow!("no home directory"))
-            .and_then(|home| self.drafts.create_sample(&settings, &home));
+            .and_then(|home| drafts::create_sample(&mut self.drafts, &settings, &home));
         match created {
             Ok(id) => {
                 self.select(&id, window, cx).ok();

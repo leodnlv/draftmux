@@ -7,8 +7,9 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-chrono = { version = "0.4.45", default-features = false }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 draftmux-storage = { path = "../storage" }
+markup = { path = "../markup" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
