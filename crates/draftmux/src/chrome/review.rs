@@ -931,17 +931,17 @@ impl Chrome {
                             cx.listener(|this, _, _, cx| this.step(true, cx)),
                         )),
                 )
-                .child(bar_button("review-revert", "Revert", &palette).when_else(
-                    selected.is_some(),
-                    |button| {
-                        button
-                            .tooltip(crate::tooltip::text("Revert This Change (R)"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.revert_change(window, cx)),
-                            )
-                    },
-                    |button| button.opacity(0.45),
-                ))
+                // With no change selected it restores the whole before column.
+                .child(match selected {
+                    Some(_) => bar_button("review-revert", "Revert", &palette)
+                        .tooltip(crate::tooltip::text("Revert This Change (R)"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.revert_change(window, cx)),
+                        ),
+                    None => bar_button("review-revert", "Revert All", &palette)
+                        .tooltip(crate::tooltip::text("Revert to the Before Column"))
+                        .on_click(cx.listener(|this, _, window, cx| this.revert_all(window, cx))),
+                })
                 .child(
                     bar_button("review-keep", if kept { "Kept" } else { "Keep" }, &palette)
                         .when(kept, |button| {
