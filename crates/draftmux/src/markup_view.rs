@@ -327,7 +327,8 @@ impl MarkupStyle {
     /// A Rich text draft as Apple Mail shows the HTML Copy writes: WebKit's
     /// default layout in Mail's 13px Helvetica message font, plus the
     /// HTML's own styles for code, quotes and tables. Dark colors are the
-    /// light ones with their lightness inverted, as Mail shows messages
+    /// light ones passed through WebKit's `apple-invert-lightness()` filter
+    /// (a 180° hue rotation, then a fixed matrix), as Mail shows messages
     /// that declare no dark colors.
     pub fn rich_text(dark: bool) -> Self {
         let c = |light: u32, dark_hex: u32| -> Hsla {
@@ -335,7 +336,7 @@ impl MarkupStyle {
         };
         let transparent = gpui::transparent_black();
         let text_color = c(0x000000ff, 0xffffffff);
-        let border_color = c(0xd0d7deff, 0x21282fff);
+        let border_color = c(0xd0d7deff, 0x4e5459ff);
         let github = Self::github(dark);
         Self {
             background: c(0xffffffff, 0x000000ff),
@@ -365,7 +366,7 @@ impl MarkupStyle {
             },
             text_color,
             muted_color: text_color,
-            link_color: c(0x0000eeff, 0x1111ffff),
+            link_color: c(0x0000eeff, 0x5656ffff),
             link_underline: true,
             border_color,
             inline_code: InlineBox {
@@ -399,7 +400,7 @@ impl MarkupStyle {
             table_cell_padding: (px(10.), px(4.)),
             rule_padding: px(0.),
             rule_height: px(2.),
-            rule_color: c(0x9a9a9aff, 0x656565ff),
+            rule_color: c(0x9a9a9aff, 0x848484ff),
             ..github
         }
     }
