@@ -106,7 +106,7 @@ fn a_save_failure_then_archiving_keeps_the_draft() {
 }
 
 #[test]
-fn a_conflict_is_not_reported_as_a_save_error() {
+fn a_conflict_is_not_reported_as_a_save_error_or_retried() {
     let mut s = Script::new();
     let id = s.draft("One\n");
     s.select(&id);
@@ -117,8 +117,9 @@ fn a_conflict_is_not_reported_as_a_save_error() {
 
     assert_eq!(s.session.save_error(), None);
     assert_eq!(s.text(&id), "Theirs\n");
-    // The edit stays pending and the save is retried.
+    // The edit stays pending, and waits for the question about it.
     assert!(s.session.drafts().deadline().is_some());
+    assert_eq!(s.timer, None);
     assert!(s.leave_window().is_err());
     assert_eq!(s.session.save_error(), None);
 }

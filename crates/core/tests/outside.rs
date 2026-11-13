@@ -45,7 +45,7 @@ fn an_outside_edit_with_nothing_pending_reloads_without_saving() {
 }
 
 #[test]
-fn an_outside_edit_during_a_pending_save_asks() {
+fn an_outside_edit_during_a_pending_save_asks_and_holds_the_save() {
     let mut s = Script::new();
     let id = s.draft("One\n");
     s.select(&id);
@@ -61,6 +61,36 @@ fn an_outside_edit_during_a_pending_save_asks() {
     assert_eq!(s.session.save_error(), None);
     assert_eq!(s.text(&id), "Theirs\n");
     assert!(s.session.drafts().deadline().is_some());
+    // The save isn't retried while the question is open.
+    assert_eq!(s.timer, None);
+}
+
+#[test]
+fn an_earlier_save_error_is_not_shown_while_the_question_is_open() {
+    let mut s = Script::new();
+    let id = s.draft("One\n");
+    s.select(&id);
+    s.break_meta(&id);
+    s.type_text("Mine\n");
+    s.advance(ms(600));
+    assert!(s.session.save_error().is_some());
+
+    s.write_outside(&id, "Theirs\n");
+    s.check_outside();
+    assert_eq!(s.questions.len(), 1);
+    assert_eq!(s.session.save_error(), None);
+    s.advance(ms(1200));
+    assert_eq!(s.session.save_error(), None);
+    assert_eq!(s.text(&id), "Theirs\n");
+
+    // Keeping the edits tries the save, which reports why it still fails.
+    s.answer(Choice::KeepMine);
+    assert!(s.session.save_error().is_some());
+    assert_eq!(s.text(&id), "Mine\n");
+    s.fix_meta(&id);
+    s.advance(ms(600));
+    assert_eq!(s.session.save_error(), None);
+    assert_eq!(s.session.drafts().deadline(), None);
 }
 
 #[test]
@@ -203,9 +233,9 @@ fn an_answer_after_the_pending_edit_was_saved_is_ignored() {
     s.type_text("Mine\n");
     s.write_outside(&id, "Theirs\n");
     s.check_outside();
-    // A retried save writes the edit once the file is back as it was.
+    // Leaving the window saves the edit once the file is back as it was.
     s.write_outside(&id, "One\n");
-    s.advance(ms(600));
+    s.leave_window().unwrap();
     assert_eq!(s.text(&id), "Mine\n");
     s.write_outside(&id, "Theirs\n");
 
@@ -238,21 +268,121 @@ fn only_one_question_is_open_at_a_time() {
     assert_eq!(updated_at(&s, &id), asked);
 }
 
-#[test]
-fn a_dismissed_question_is_asked_again_on_the_next_check() {
+/// Types "Mine", has the file changed to "Theirs" outside, and dismisses
+/// the question that follows once the edit was due.
+fn dismissed() -> (Script, String) {
     let mut s = Script::new();
     let id = s.draft("One\n");
     s.select(&id);
     s.type_text("Mine\n");
     s.write_outside(&id, "Theirs\n");
     s.check_outside();
-
+    s.advance(ms(600));
     s.answer(Choice::Dismissed);
+    (s, id)
+}
+
+#[test]
+fn a_dismissed_question_is_not_asked_again_while_nothing_changes() {
+    let (mut s, id) = dismissed();
     assert_eq!(s.editor.text, "Mine\n");
     assert!(s.session.drafts().deadline().is_some());
+    let asked = updated_at(&s, &id);
 
+    for _ in 0..5 {
+        s.advance(ms(1000));
+        s.check_outside();
+    }
+
+    assert!(s.questions.is_empty());
+    assert_eq!(s.text(&id), "Theirs\n");
+    assert_eq!(s.editor.text, "Mine\n");
+    assert!(s.session.drafts().deadline().is_some());
+    assert_eq!(s.session.save_error(), None);
+    assert_eq!(updated_at(&s, &id), asked);
+    // Leaving still refuses to replace the file.
+    assert!(s.leave_window().is_err());
+    assert_eq!(s.text(&id), "Theirs\n");
+}
+
+#[test]
+fn a_dismissed_question_is_asked_again_when_the_file_changes_again() {
+    let (mut s, id) = dismissed();
+    s.check_outside();
+
+    s.write_outside(&id, "Theirs, again\n");
+    s.check_outside();
+
+    assert_eq!(s.questions.len(), 1);
+    s.answer(Choice::KeepMine);
+    assert_eq!(s.text(&id), "Mine\n");
+    assert_eq!(s.session.drafts().deadline(), None);
+}
+
+#[test]
+fn a_dismissed_question_is_asked_again_once_a_later_edit_is_due() {
+    let (mut s, id) = dismissed();
+
+    s.type_text("Mine, more\n");
+    s.check_outside();
+    assert!(s.questions.is_empty());
+    s.advance(ms(600));
+    assert_eq!(s.text(&id), "Theirs\n");
+    assert_eq!(s.timer, None);
+    s.check_outside();
+
+    assert_eq!(s.questions.len(), 1);
+    s.answer(Choice::UseNew);
+    assert_eq!(s.editor.text, "Theirs\n");
+    assert_eq!(s.text(&id), "Theirs\n");
+}
+
+#[test]
+fn an_edit_typed_back_to_the_dismissed_text_is_not_asked_about() {
+    let (mut s, id) = dismissed();
+
+    s.type_text("Mine, more\n");
+    s.type_text("Mine\n");
+    s.advance(ms(600));
+    s.check_outside();
+
+    assert!(s.questions.is_empty());
+    assert_eq!(s.text(&id), "Theirs\n");
+}
+
+#[test]
+fn a_held_edit_is_saved_once_the_file_is_back_as_it_was() {
+    let (mut s, id) = dismissed();
+
+    s.write_outside(&id, "One\n");
+    s.check_outside();
+    assert!(s.questions.is_empty());
+    s.advance(ms(1));
+
+    assert_eq!(s.text(&id), "Mine\n");
+    assert_eq!(s.session.drafts().deadline(), None);
+    // A later change is a new one, and asked about if an edit is pending.
+    s.type_text("Mine, more\n");
+    s.write_outside(&id, "Theirs\n");
     s.check_outside();
     assert_eq!(s.questions.len(), 1);
+}
+
+#[test]
+fn a_save_refused_before_the_check_saw_the_change_is_asked_about() {
+    let mut s = Script::new();
+    let id = s.draft("One\n");
+    s.select(&id);
+    s.type_text("Mine\n");
+    s.write_outside(&id, "Theirs\n");
+
+    s.advance(ms(600));
+    assert_eq!(s.timer, None);
+    s.check_outside();
+
+    assert_eq!(s.questions.len(), 1);
+    s.answer(Choice::KeepMine);
+    assert_eq!(s.text(&id), "Mine\n");
 }
 
 #[test]

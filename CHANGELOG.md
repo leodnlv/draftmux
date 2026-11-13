@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- While Draftmux asks whether to keep your edits or a version of the draft
+  changed outside it, the toolbar no longer shows an earlier "Couldn't save"
+  error, and the app stops trying to save until you answer. If the question
+  is closed without an answer, it comes back only once the file changes again
+  or you edit the draft again.
 - Clicking Update Available or Restart to Update in the toolbar shows what
   changed in every version since yours before you update. Linux and
   development builds get the button too when Check for Updates finds a newer

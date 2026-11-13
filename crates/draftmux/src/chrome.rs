@@ -1116,8 +1116,10 @@ impl Chrome {
     /// version to keep when the user has unsaved edits.
     fn check_outside_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let outcome = self.session.check_outside();
-        if !outcome.effects.is_empty() {
-            self.apply(outcome, Some(window), cx);
+        let changed = !outcome.effects.is_empty();
+        // A held edit resumes saving with only a deadline.
+        self.apply(outcome, Some(window), cx);
+        if changed {
             cx.notify();
         }
     }

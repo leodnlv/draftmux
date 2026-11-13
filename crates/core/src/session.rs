@@ -65,6 +65,23 @@ pub struct Session {
     text: String,
     /// A [`Question`] is open. Only one is asked at a time.
     asking: bool,
+    /// Why the autosave timer leaves the pending edit alone; see [`Held`].
+    held: Option<Held>,
+}
+
+/// The pending edit isn't saved by the autosave timer because the file
+/// changed outside the editor. Nothing retries the save: what happens to the
+/// edit is the user's answer, and a flush still refuses to replace the file.
+/// While a question is open the timer does nothing either.
+#[derive(Debug)]
+enum Held {
+    /// A save found the change. The next check asks about it.
+    Found,
+    /// The user closed the question about the file holding `disk` without
+    /// choosing, while the editor held `text`. It isn't asked again until
+    /// there is something new to ask about: the file changes again, or an
+    /// edit made since is due to be saved.
+    Dismissed { disk: String, text: String },
 }
 
 impl Session {
@@ -77,6 +94,7 @@ impl Session {
             epoch: Epoch::default(),
             text: String::new(),
             asking: false,
+            held: None,
         }
     }
 
@@ -127,6 +145,7 @@ impl Session {
     pub fn select(&mut self, id: &str) -> Result<Outcome> {
         let text = self.drafts.select(id)?;
         self.save_error = None;
+        self.held = None;
         self.epoch.0 += 1;
         self.log = EditLog::load(self.drafts.store(), id);
         Ok(self.load(text))
@@ -134,6 +153,7 @@ impl Session {
 
     /// Empties the editor after the selected draft left the list.
     pub fn deselect(&mut self) -> Outcome {
+        self.held = None;
         self.epoch.0 += 1;
         self.log = EditLog::default();
         self.load(String::new())
@@ -171,13 +191,26 @@ impl Session {
 
     /// The autosave timer armed during `epoch` fired: saves the pending
     /// edit if it is due. A failed save keeps it pending and is retried
-    /// after another delay.
+    /// after another delay, unless the file changed outside the editor:
+    /// then the edit is [`Held`] until the user is asked.
     pub fn wake(&mut self, epoch: Epoch, now: Instant) -> Outcome {
-        if epoch != self.epoch {
+        if epoch != self.epoch || self.asking {
+            return Outcome::default();
+        }
+        if let Some(Held::Dismissed { text, .. }) = &self.held
+            && *text == self.text
+        {
             return Outcome::default();
         }
         match self.drafts.poll(now) {
-            Ok(()) => self.save_error = None,
+            Ok(()) => self.saved(),
+            Err(err) if err.is::<Conflict>() => {
+                // A dismissed question is asked again: the edit made since
+                // would be lost to it otherwise.
+                self.held = Some(Held::Found);
+                self.save_error = None;
+                return Outcome::default();
+            }
             Err(err) => {
                 self.save_failed(&err);
                 self.drafts.edited(&self.text, now);
@@ -192,10 +225,18 @@ impl Session {
     pub fn flush(&mut self) -> Result<()> {
         let result = self.drafts.flush();
         match &result {
-            Ok(()) => self.save_error = None,
+            Ok(()) => self.saved(),
             Err(err) => self.save_failed(err),
         }
         result
+    }
+
+    /// Nothing is pending or the pending edit was saved.
+    fn saved(&mut self) {
+        self.save_error = None;
+        if self.drafts.deadline().is_none() {
+            self.held = None;
+        }
     }
 
     fn save_failed(&mut self, err: &anyhow::Error) {
@@ -235,25 +276,42 @@ impl Session {
     /// Picks up a change to the selected draft's file made outside the
     /// editor, counting it as activity. With no edit pending, the editor
     /// takes the new text; otherwise the user is asked which version to
-    /// keep. Nothing is checked while a question is open.
+    /// keep. Nothing is checked while a question is open, and a dismissed
+    /// question isn't asked again while the file still holds what it was
+    /// about. A [`Held`] edit is saved again once the file is back to what
+    /// the editor last read or wrote.
     pub fn check_outside(&mut self) -> Outcome {
         if self.asking {
             return Outcome::default();
         }
-        let Some(disk) = self.changed_outside() else {
-            return Outcome::default();
+        let disk = match self.drafts.changed_on_disk() {
+            Ok(Some(disk)) => disk,
+            Ok(None) if self.held.take().is_some() => return self.due(),
+            _ => return Outcome::default(),
         };
         if self.drafts.deadline().is_none() {
+            self.touched(&disk);
             return self.replace(disk);
         }
-        let Some(id) = self.drafts.current_id() else {
+        if let Some(Held::Dismissed {
+            disk: dismissed, ..
+        }) = &self.held
+            && *dismissed == disk
+        {
+            return Outcome::default();
+        }
+        let Some(id) = self.drafts.current_id().map(str::to_owned) else {
             return Outcome::default();
         };
+        self.touched(&disk);
         self.asking = true;
+        // The edit isn't saved while the question is open, so an earlier
+        // save failure no longer says why.
+        self.save_error = None;
         Outcome {
             effects: vec![Effect::AskOutsideEdit(Question {
                 epoch: self.epoch,
-                id: id.to_owned(),
+                id,
                 disk,
             })],
             deadline: None,
@@ -263,7 +321,8 @@ impl Session {
     /// The user answered `question`. The answer is about the pending edit
     /// to the draft as it was, and the file's text when asked: it is
     /// ignored if the draft was left, the edit was saved meanwhile, or the
-    /// file changed again, and the next check starts over.
+    /// file changed again. Then autosave goes on, and a save the file
+    /// still refuses is asked about by the next check.
     pub fn answer(&mut self, question: Question, choice: Choice) -> Outcome {
         self.asking = false;
         if question.epoch != self.epoch
@@ -271,16 +330,24 @@ impl Session {
             || self.drafts.deadline().is_none()
             || self.drafts.changed_on_disk().ok().flatten().as_ref() != Some(&question.disk)
         {
-            return Outcome::default();
+            self.held = None;
+            return self.due();
         }
         match choice {
             Choice::UseNew => self.replace(question.disk),
             Choice::KeepMine => {
+                self.held = None;
                 self.drafts.adopt(question.disk);
                 self.flush().ok();
+                self.due()
+            }
+            Choice::Dismissed => {
+                self.held = Some(Held::Dismissed {
+                    disk: question.disk,
+                    text: self.text.clone(),
+                });
                 Outcome::default()
             }
-            Choice::Dismissed => Outcome::default(),
         }
     }
 
@@ -310,28 +377,34 @@ impl Session {
             }
             return (recorded, Outcome::default());
         }
-        // A pending edit is asked about by the next check.
-        let outcome = match self.changed_outside() {
-            Some(disk) if self.drafts.deadline().is_none() => self.replace(disk),
-            _ => Outcome::default(),
+        // A file that can't be read is reported by the next save, and a
+        // pending edit is asked about by the next check.
+        let Ok(Some(disk)) = self.drafts.changed_on_disk() else {
+            return (recorded, Outcome::default());
+        };
+        self.touched(&disk);
+        let outcome = if self.drafts.deadline().is_none() {
+            self.replace(disk)
+        } else {
+            Outcome::default()
         };
         (recorded, outcome)
     }
 
-    /// The selected draft's file text when it changed outside the editor,
-    /// counted as the draft's activity. A file that can't be read is
-    /// reported by the next save.
-    fn changed_outside(&mut self) -> Option<String> {
-        let id = self.drafts.current_id()?.to_owned();
-        let disk = self.drafts.changed_on_disk().ok().flatten()?;
-        if let Err(err) = self.drafts.touched(&id, &disk) {
+    /// Counts the change that left the selected draft's file holding `disk`
+    /// as the draft's activity.
+    fn touched(&mut self, disk: &str) {
+        let Some(id) = self.drafts.current_id().map(str::to_owned) else {
+            return;
+        };
+        if let Err(err) = self.drafts.touched(&id, disk) {
             eprintln!("draftmux: recording the outside edit: {err:#}");
         }
-        Some(disk)
     }
 
     /// Takes `disk`, which the file holds, as the editor's text.
     fn replace(&mut self, disk: String) -> Outcome {
+        self.held = None;
         self.drafts.adopt(disk.clone());
         Outcome {
             effects: vec![Effect::ReplaceText {
