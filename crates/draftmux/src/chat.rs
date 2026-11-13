@@ -7,15 +7,16 @@
 //! it after the agent writes it, and locks the editor while the agent runs.
 //!
 //! A non-empty selection in the draft editor is attached to the next
-//! message: a chip in the composer's footer shows it, and sending puts it in
-//! the prompt ([`quote`]). It stays attached while the composer has focus, since
-//! the editor keeps its selection when it loses focus. Sending or the chip's
-//! × detaches it, and selecting something else attaches that.
+//! message: a stack of quotes above the message field shows it, and sending
+//! puts it in the prompt ([`quote`]). It stays attached while the composer
+//! has focus, since the editor keeps its selection when it loses focus.
+//! Sending or the quote's × detaches it, and selecting something else
+//! attaches that.
 //!
 //! With several selections in the editor (see
-//! [`Editor::extra_selections`]), they all attach, as a stack of quotes
-//! above the message field. Each quote's × drops that selection and Clear
-//! drops them all; sending sends them together and drops them.
+//! [`Editor::extra_selections`]), they all attach, one quote each in the
+//! same stack. Each quote's × drops that selection and Clear drops them
+//! all; sending sends them together and drops them.
 
 mod quote;
 mod transcript;
@@ -61,9 +62,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long pi gets to answer a request. pi answers a prompt only after
 /// compacting and running input hooks or an extension command.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// How long the draft's selection must stay put before the composer's chip
-/// shows it, so dragging a selection doesn't flicker the chip.
-const CHIP_SETTLE: Duration = Duration::from_millis(250);
+/// How long the draft's selection must stay put before the composer's
+/// quotes show it, so dragging a selection doesn't flicker them.
+const QUOTES_SETTLE: Duration = Duration::from_millis(250);
 const KEY_CONTEXT: &str = "Composer";
 /// How long a newly arrived item takes to fade in and rise into place.
 const ENTRANCE: Duration = Duration::from_millis(200);
@@ -113,10 +114,10 @@ pub struct Chat {
     /// The selection the user detached; the selection follows text edits,
     /// so this does too.
     detached: Option<Range<usize>>,
-    /// The draft selections the composer's chip or quote stack shows, which
-    /// follow the editor's once they settle.
-    chip: Vec<Range<usize>>,
-    settle_chip: Task<()>,
+    /// The draft selections the composer's quote stack shows, which follow
+    /// the editor's once they settle.
+    shown: Vec<Range<usize>>,
+    settle_shown: Task<()>,
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
@@ -204,8 +205,8 @@ impl Chat {
                     if this.detached.is_some() {
                         this.detached = Some(editor.selected_range());
                     }
-                    this.chip = editor.selected_ranges();
-                    this.settle_chip = Task::ready(());
+                    this.shown = editor.selected_ranges();
+                    this.settle_shown = Task::ready(());
                 }
                 EditorEvent::SelectionChanged(_) | EditorEvent::ExtraSelectionsChanged => {
                     if let EditorEvent::SelectionChanged(range) = event
@@ -213,10 +214,10 @@ impl Chat {
                     {
                         this.detached = None;
                     }
-                    this.settle_chip = cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(CHIP_SETTLE).await;
+                    this.settle_shown = cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(QUOTES_SETTLE).await;
                         this.update(cx, |this, cx| {
-                            this.chip = this.draft_editor.read(cx).selected_ranges();
+                            this.shown = this.draft_editor.read(cx).selected_ranges();
                             cx.notify();
                         })
                         .ok();
@@ -247,8 +248,8 @@ impl Chat {
             composer,
             draft_editor,
             detached: None,
-            chip: Vec::new(),
-            settle_chip: Task::ready(()),
+            shown: Vec::new(),
+            settle_shown: Task::ready(()),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
@@ -600,8 +601,8 @@ impl Chat {
     fn detach(&mut self, cx: &mut Context<Self>) {
         let ranges = self.draft_editor.read(cx).selected_ranges();
         self.detached = ranges.first().cloned();
-        self.chip = ranges;
-        self.settle_chip = Task::ready(());
+        self.shown = ranges;
+        self.settle_shown = Task::ready(());
         cx.notify();
     }
 
@@ -621,8 +622,8 @@ impl Chat {
                 editor.select_range(selection.end..selection.end, cx);
             }
         });
-        self.chip = self.draft_editor.read(cx).selected_ranges();
-        self.settle_chip = Task::ready(());
+        self.shown = self.draft_editor.read(cx).selected_ranges();
+        self.settle_shown = Task::ready(());
         cx.notify();
     }
 
@@ -1180,8 +1181,9 @@ impl Chat {
             })
     }
 
-    /// The quotes of several selections, one row each above the message
-    /// field, so every one stays visible and removable while writing.
+    /// The attached selections' quotes, one row each above the message
+    /// field, so every one stays visible and removable while writing. A
+    /// second selection adds a row rather than moving the first.
     fn quote_stack(
         &self,
         quotes: &[Quote],
@@ -1189,6 +1191,9 @@ impl Chat {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let ranges: Vec<_> = quotes.iter().map(|quote| quote.range.clone()).collect();
+        // The only selection is the editor's own, which detaching keeps
+        // selected; extra ones are dropped from the editor.
+        let single = quotes.len() == 1;
         let head = div()
             .flex()
             .items_center()
@@ -1199,14 +1204,17 @@ impl Chat {
             .pb(px(2.))
             .text_size(px(11.))
             .text_color(palette.muted)
-            .child(format!("{} selections", quotes.len()))
+            .child(match quotes.len() {
+                1 => "1 selection".to_string(),
+                n => format!("{n} selections"),
+            })
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(palette.faint)
-                    .child("pi edits each one"),
+                    .when(!single, |hint| hint.child("pi edits each one")),
             )
             .child(
                 div()
@@ -1216,8 +1224,18 @@ impl Chat {
                     .rounded(px(4.))
                     .hover(|style| style.bg(palette.control_hover).text_color(palette.text))
                     .active(|style| style.opacity(0.8))
-                    .tooltip(crate::tooltip::text("Don't attach these selections"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.drop_selections(&ranges, cx)))
+                    .tooltip(crate::tooltip::text(if single {
+                        "Don't attach the selection"
+                    } else {
+                        "Don't attach these selections"
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if single {
+                            this.detach(cx)
+                        } else {
+                            this.drop_selections(&ranges, cx)
+                        }
+                    }))
                     .child("Clear"),
             );
         let rows = quotes.iter().enumerate().map(|(index, quote)| {
@@ -1245,7 +1263,11 @@ impl Chat {
                         palette,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.drop_selections(std::slice::from_ref(&range), cx)
+                        if single {
+                            this.detach(cx)
+                        } else {
+                            this.drop_selections(std::slice::from_ref(&range), cx)
+                        }
                     })),
                 )
         });
@@ -1280,40 +1302,13 @@ impl Chat {
             self.send_state.set((state, from));
         }
         let model = session.and_then(|session| session.model.clone());
-        let quotes = self.quotes(&self.chip, cx);
+        let quotes = self.quotes(&self.shown, cx);
         let placeholder: SharedString = match quotes.len() {
             0 => "Ask pi to change the draft, or ask about the session…".into(),
             1 => "Ask pi to change the selection, or ask about it…".into(),
             n => format!("Tell pi what to do with these {n} selections…").into(),
         };
-        let stack = (quotes.len() > 1).then(|| self.quote_stack(&quotes, &palette, cx));
-        // The chip sits in the footer, so attaching a selection doesn't
-        // change the composer's height.
-        let chip = match &quotes[..] {
-            [quote] => Some(quote),
-            _ => None,
-        };
-        let chip = chip.map(|quote| {
-            div()
-                .min_w_0()
-                .max_w(relative(0.6))
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .h(px(22.))
-                .pl(px(7.))
-                .pr(px(2.))
-                .rounded(px(6.))
-                .border_1()
-                .border_color(palette.hairline)
-                .bg(palette.hover)
-                .child(quote_label(quote, palette.faint, palette.text))
-                .child(
-                    close_button("detach-selection", "Don't attach the selection", &palette)
-                        .on_click(cx.listener(|this, _, _, cx| this.detach(cx))),
-                )
-                .with_animation("selection-chip", entrance(), rise_in)
-        });
+        let stack = (!quotes.is_empty()).then(|| self.quote_stack(&quotes, &palette, cx));
         div().flex_none().px(px(12.)).pt(px(8.)).pb(px(12.)).child(
             div()
                 .key_context(KEY_CONTEXT)
@@ -1353,10 +1348,7 @@ impl Chat {
                         .text_color(palette.faint)
                         .child(div().flex_1().min_w_0().overflow_hidden().children(model))
                         // While the agent runs, the transcript shows it.
-                        .when(!busy && chip.is_none(), |footer| {
-                            footer.child("↵ send · ⇧↵ newline")
-                        })
-                        .children(chip)
+                        .when(!busy, |footer| footer.child("↵ send · ⇧↵ newline"))
                         .child(
                             div()
                                 .id("send")

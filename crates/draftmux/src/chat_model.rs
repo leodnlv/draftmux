@@ -221,8 +221,8 @@ impl Render for ChatModel {
                     })
                     .child(div().min_w_0().truncate().child(model))
                     .when_some(thinking, |label, thinking| {
-                        // Shrinks with the model, so a chip beside the
-                        // label never covers it.
+                        // Shrinks with the model, so the footer's hints
+                        // beside the label never cover it.
                         label.child(
                             div()
                                 .min_w_0()
