@@ -93,6 +93,7 @@ fn decorations_cover_every_hunk_on_both_sides() {
         for target in [Target::Github, Target::Slack, Target::Rich, Target::Plain] {
             for (side, text) in [(Side::Before, before), (Side::After, after)] {
                 let side_has_text = !shown(target, text, 0..text.len()).is_empty();
+                let draft = frontmatter::parse(text);
                 for hunk in 0..comparison.hunks.len() {
                     let mine: Vec<&Decoration> = all
                         .iter()
@@ -106,11 +107,15 @@ fn decorations_cover_every_hunk_on_both_sides() {
                     let found = mine.iter().any(|decoration| {
                         !shown(target, text, decoration.range.clone()).is_empty()
                     });
-                    // A side with no text shows a point on its own.
-                    let standalone = !side_has_text
-                        && mine
-                            .iter()
-                            .any(|decoration| decoration.kind == DecorationKind::Point);
+                    // Unmapped frontmatter and a side with no text need a
+                    // standalone point. The renderer's oracle checks that it
+                    // actually draws these fallback points.
+                    let standalone = mine.iter().any(|decoration| {
+                        (!side_has_text && decoration.kind == DecorationKind::Point)
+                            || (draft.fields.is_empty()
+                                && decoration.range.start < draft.body_offset
+                                && decoration.range.end <= draft.body_offset)
+                    });
                     if !found && !standalone {
                         failures.push(format!("{at}: shows nowhere"));
                     }

@@ -196,7 +196,7 @@ async fn capture_reviews(
                 &redlined.marks,
                 &Palette::light(),
             )));
-            readable(*side, fields, &redlined.marks, &redlined.document, &style)
+            readable(*side, fields, &redlined.document, &style)
         });
         let path = out.join(format!("{name}-review.txt"));
         std::fs::write(
@@ -250,42 +250,66 @@ async fn capture_reviews(
 fn readable(
     side: Side,
     fields: &markup::frontmatter::Fields,
-    marks: &Marks,
     doc: &Document,
     style: &MarkupStyle,
 ) -> String {
     let mut out = String::new();
     for (ix, (key, value)) in fields.iter().enumerate() {
-        let mut segment = Segment {
-            text: value.clone().into(),
-            ..Segment::default()
-        };
-        let mut points = Vec::new();
-        for mark in marks.field(ix) {
-            let drawn = crate::inline_text::SegmentMark {
-                hunk: mark.hunk,
-                background: (!mark.point).then(gpui::transparent_black),
-                ring: None,
-                underline: None,
-                bar: None,
-            };
-            if mark.point {
-                points.push(Segment {
-                    text: markup_view::POINT.into(),
-                    mark: Some(drawn),
-                    ..Segment::default()
-                });
-            } else {
-                segment.mark = Some(drawn);
-            }
-        }
-        let segments: Vec<Segment> = std::iter::once(segment).chain(points).collect();
+        let segments = markup_view::field_segments(value, ix, style.redline.as_ref().unwrap());
         out.push_str(&format!("{key}: {}\n", spell(side, &segments)));
     }
     for (path, segments) in markup_view::drawn(doc, style) {
         out.push_str(&format!("{path:?} {}\n", spell(side, &segments)));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    fn frontmatter_transcript_matches_rendered_segments() {
+        let before = include_str!("../fixtures/review/frontmatter-multiple.before.md");
+        let after = include_str!("../fixtures/review/frontmatter-multiple.after.md");
+        let comparison = compare(before, after);
+        assert_eq!(comparison.hunks.len(), 2);
+        let decorations = decorations(&comparison);
+        for (side, text) in [(Side::Before, before), (Side::After, after)] {
+            let mapped = markup_view::preview_mapped(Target::Github, text);
+            let redlined = markup_view::redline(&mapped, &decorations, side);
+            let mut style = markup_view::style(Target::Github, false);
+            style.redline = Some(Rc::new(Redline {
+                marks: redlined.marks.clone(),
+                selected: None,
+                hovered: None,
+                kept: vec![false; comparison.hunks.len()],
+                colors: RedlineColors::new(&Palette::light()),
+                handlers: Rc::new(MarkHandlers {
+                    click: Rc::new(|_, _, _| {}),
+                    hover: Rc::new(|_, _| {}),
+                    placed: Rc::new(|_, _| {}),
+                }),
+            }));
+            let expected = format!(
+                "subject: {}\n",
+                spell(
+                    side,
+                    &markup_view::field_segments(
+                        &mapped.fields["subject"],
+                        0,
+                        style.redline.as_ref().unwrap()
+                    )
+                )
+            );
+            let transcript = readable(side, &mapped.fields, &redlined.document, &style);
+            assert!(
+                transcript.starts_with(&expected),
+                "expected {expected:?}, got {transcript:?}"
+            );
+        }
+    }
 }
 
 /// `segments` with their marks spelled out. A mark without a background is

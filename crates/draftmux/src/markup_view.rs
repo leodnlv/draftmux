@@ -1189,10 +1189,17 @@ pub fn redline(mapped: &Mapped, decorations: &[Decoration], side: Side) -> Redli
             },
             point: decoration.kind == DecorationKind::Point,
         };
-        for field in mapped.field_map.locate(range.clone()) {
+        let fields = mapped.field_map.locate(range.clone());
+        for &field in &fields {
             marks.fields.push((field, mark));
         }
         if range.end <= offset && !(range.is_empty() && range.start >= offset) {
+            if fields.is_empty() {
+                alone.push(Mark {
+                    point: true,
+                    ..mark
+                });
+            }
             continue;
         }
         let body = range.start.max(offset) - offset..range.end.max(offset) - offset;
@@ -1237,27 +1244,46 @@ pub fn redline(mapped: &Mapped, decorations: &[Decoration], side: Side) -> Redli
     }
 }
 
-/// Field `index`'s `value` with the review's changes to it drawn: the whole
-/// value as changed, and a bar after it where the other side has text.
+/// Field `index`'s `value` with the review's changes to it drawn.
 pub fn field_value(value: &str, index: usize, redline: &Redline) -> InlineText {
+    InlineText::new(field_segments(value, index, redline)).marks(Some(redline.handlers.clone()))
+}
+
+/// Field maps locate whole values, not decoded scalar substrings. A single
+/// text change can tint the value; multiple text changes use separate points
+/// so each hunk has its own hit target and kept/selected state. Empty values
+/// also use points, since an empty segment has no drawable hit target.
+pub fn field_segments(value: &str, index: usize, redline: &Redline) -> Vec<Segment> {
     let mut segment = Segment {
         text: SharedString::from(value.to_owned()),
         ..Segment::default()
     };
     let marks: Vec<Mark> = redline.marks.field(index).collect();
-    if let Some(&mark) = marks.iter().find(|mark| !mark.point) {
-        redline.style(&mut segment, mark);
+    let whole = !value.is_empty() && marks.iter().filter(|mark| !mark.point).count() == 1;
+    if whole {
+        redline.style(
+            &mut segment,
+            *marks.iter().find(|mark| !mark.point).unwrap(),
+        );
     }
-    let points = marks.iter().filter(|mark| mark.point).map(|&mark| {
-        let mut point = Segment {
-            text: POINT.into(),
-            ..Segment::default()
-        };
-        redline.style(&mut point, mark);
-        point
-    });
-    let segments = std::iter::once(segment).chain(points).collect();
-    InlineText::new(segments).marks(Some(redline.handlers.clone()))
+    let points = marks
+        .iter()
+        .filter(|mark| mark.point || !whole)
+        .map(|&mark| {
+            let mut point = Segment {
+                text: POINT.into(),
+                ..Segment::default()
+            };
+            redline.style(
+                &mut point,
+                Mark {
+                    point: true,
+                    ..mark
+                },
+            );
+            point
+        });
+    std::iter::once(segment).chain(points).collect()
 }
 
 /// The preview style for `target` in the light or dark appearance.
@@ -2682,6 +2708,17 @@ mod tests {
                 failures.push(format!("{at}: the mapped parse isn't the preview's"));
             }
             let style = redline_style(target, redlined.marks.clone(), hunks);
+            for (ix, (_, value)) in mapped.fields.iter().enumerate() {
+                let segments = super::field_segments(value, ix, style.redline.as_ref().unwrap());
+                let shown: String = segments
+                    .iter()
+                    .filter(|segment| !is_point(segment))
+                    .map(|segment| segment.text.as_ref())
+                    .collect();
+                if shown != *value {
+                    failures.push(format!("{at}: field {ix}: {shown:?} != {value:?}"));
+                }
+            }
             let marked: Vec<(Vec<usize>, String)> = super::drawn(&redlined.document, &style)
                 .into_iter()
                 // The paragraph holding points with no text to stand by.
@@ -2729,11 +2766,13 @@ mod tests {
                     shown[mark.hunk] = true;
                 }
             }
-            // The fields card draws every field.
-            if !mapped.fields.is_empty() {
-                for (field, mark) in &redlined.marks.fields {
-                    assert!(*field < mapped.fields.len());
-                    shown[mark.hunk] = true;
+            for (ix, (_, value)) in mapped.fields.iter().enumerate() {
+                for segment in super::field_segments(value, ix, style.redline.as_ref().unwrap()) {
+                    if !segment.text.is_empty() {
+                        if let Some(mark) = segment.mark {
+                            shown[mark.hunk] = true;
+                        }
+                    }
                 }
             }
             for (hunk, shown) in shown.into_iter().enumerate() {
@@ -2745,6 +2784,34 @@ mod tests {
         });
         assert!(checked > 500, "{checked} hunks checked");
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn frontmatter_hunks_have_independent_selection_and_kept_state() {
+        let before = include_str!("../fixtures/review/frontmatter-multiple.before.md");
+        let after = include_str!("../fixtures/review/frontmatter-multiple.after.md");
+        let comparison = draftmux_core::diff::compare(before, after);
+        assert_eq!(comparison.hunks.len(), 2);
+        let decorations = draftmux_core::decorations::decorations(&comparison);
+        for (side, text) in [(Side::Before, before), (Side::After, after)] {
+            let mapped = super::preview_mapped(Target::Github, text);
+            let redlined = super::redline(&mapped, &decorations, side);
+            let mut style = redline_style(Target::Github, redlined.marks, 2);
+            let redline = Rc::get_mut(style.redline.as_mut().unwrap()).unwrap();
+            redline.kept[0] = true;
+            for selected in 0..2 {
+                redline.selected = Some(selected);
+                let segments = super::field_segments(&mapped.fields["subject"], 0, redline);
+                assert_eq!(segments[0].text.as_ref(), mapped.fields["subject"]);
+                assert!(segments[0].mark.is_none(), "no hunk owns the whole value");
+                let marks: Vec<_> = segments.iter().filter_map(|s| s.mark.as_ref()).collect();
+                assert_eq!(marks.iter().map(|m| m.hunk).collect::<Vec<_>>(), [0, 1]);
+                for mark in marks {
+                    assert_eq!(mark.ring.is_some(), mark.hunk == selected);
+                    assert_eq!(mark.bar.is_some(), mark.hunk == selected);
+                }
+            }
+        }
     }
 
     #[test]
