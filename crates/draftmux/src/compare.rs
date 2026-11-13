@@ -903,8 +903,8 @@ mod tests {
             if let Some(last) = last.filter(|_| mark != last) {
                 out.push_str(if last.deleted { "-]" } else { "+}" });
             }
-            if mark.is_some() && mark != last {
-                out.push_str(if mark.unwrap().deleted { "[-" } else { "{+" });
+            if let Some(mark) = mark.filter(|_| mark != last) {
+                out.push_str(if mark.deleted { "[-" } else { "{+" });
             }
             out.push_str(text);
             last = mark;

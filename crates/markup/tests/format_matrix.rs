@@ -255,7 +255,7 @@ fn hard_breaks_and_cross_mode_laws() {
         "*a  \nb*\n",
     ] {
         for wrap in MODES {
-            let out = format(&input, wrap);
+            let out = format(input, wrap);
             invariant(input, &out, wrap);
             assert!(out.contains("\\\n"));
         }

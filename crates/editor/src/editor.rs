@@ -335,7 +335,7 @@ pub(crate) const FLASH_DURATION: Duration = Duration::from_millis(900);
 /// square so it lingers before it goes; `None` once it has gone.
 pub fn flash_alpha(started: Instant) -> Option<f32> {
     let progress = started.elapsed().as_secs_f32() / FLASH_DURATION.as_secs_f32();
-    (progress < 1.).then(|| 1. - progress * progress)
+    (progress < 1.).then_some(1. - progress * progress)
 }
 
 /// How long the caret stays on, and then off, while blinking.

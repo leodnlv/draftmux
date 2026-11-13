@@ -48,6 +48,9 @@ pub fn init(cx: &mut App) {
 /// message, then its order in the body. Keys order paragraphs as they read.
 pub type Key = (usize, usize);
 
+/// Ranges to tint, when their tint started fading and its colour.
+type Flash = (Vec<(Pos, Pos)>, Instant, Hsla);
+
 /// Paragraph text collected while constructing a virtualized body, including
 /// paragraphs whose elements will not be laid out or painted.
 pub type TextRegistry = Rc<RefCell<BTreeMap<Key, SharedString>>>;
@@ -126,7 +129,7 @@ pub struct TextSelection {
     marks: Vec<(Pos, Pos)>,
     /// Ranges tinted in a colour that fades, from a start time, as the
     /// editor's [`flash`](editor::Editor::flash) does.
-    flash: Option<(Vec<(Pos, Pos)>, Instant, Hsla)>,
+    flash: Option<Flash>,
     /// While the button is down: what the drag extends by and the unit it
     /// started on, which stays selected whichever way it goes.
     dragging: Option<(Unit, Pos, Pos)>,

@@ -67,9 +67,12 @@ pub struct SegmentMark {
     pub bar: Option<Hsla>,
 }
 
+/// Called with the hunk of a clicked mark.
+pub type HunkClick = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
 /// What clicking and hovering a [`SegmentMark`] do, given its hunk.
 pub struct MarkHandlers {
-    pub click: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+    pub click: HunkClick,
     /// Called on each pointer move over a mark, with the pointer's position.
     pub hover: Rc<dyn Fn(usize, Point<Pixels>)>,
     /// Told where each mark is laid out, every frame it is.

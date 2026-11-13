@@ -884,28 +884,6 @@ fn align_table(rows: &[Vec<String>], alignments: &[TableAlignment]) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn semantic_guard_detects_changes_to_non_prose_payloads() {
-        for (a, b) in [
-            ("a  \nb", "a b"),
-            ("[a](/u)", "[a](/v)"),
-            ("`a  b`", "`a b`"),
-            ("<i>a</i>", "<b>a</b>"),
-            ("$a_b$", "$a\\_b$"),
-            ("3. a", "1. a"),
-            ("- [x] a", "- [ ] a"),
-            ("x[^1]\n\n[^1]: note", "x\\[^1\\]\n\n[^1]: note"),
-        ] {
-            assert!(!equivalent(a, b), "{a:?} vs {b:?}");
-        }
-        assert!(equivalent("a\nb", "a b"));
-    }
-}
-
 /// Rendered semantics include code, HTML, hard breaks, math and footnotes.
 /// Whitespace normalization applies only to prose text, never literal payloads.
 fn equivalent(a: &str, b: &str) -> bool {
@@ -942,4 +920,26 @@ fn equivalent(a: &str, b: &str) -> bool {
         html
     }
     canonical(a) == canonical(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_guard_detects_changes_to_non_prose_payloads() {
+        for (a, b) in [
+            ("a  \nb", "a b"),
+            ("[a](/u)", "[a](/v)"),
+            ("`a  b`", "`a b`"),
+            ("<i>a</i>", "<b>a</b>"),
+            ("$a_b$", "$a\\_b$"),
+            ("3. a", "1. a"),
+            ("- [x] a", "- [ ] a"),
+            ("x[^1]\n\n[^1]: note", "x\\[^1\\]\n\n[^1]: note"),
+        ] {
+            assert!(!equivalent(a, b), "{a:?} vs {b:?}");
+        }
+        assert!(equivalent("a\nb", "a b"));
+    }
 }

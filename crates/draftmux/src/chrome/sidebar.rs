@@ -560,7 +560,7 @@ impl Chrome {
                                             .text_color(palette.muted)
                                             .child(markup::replace_shortcodes(&tilde(
                                                 &row.draft.meta.cwd,
-                                                home.as_deref(),
+                                                home,
                                             ))),
                                     )
                                 }

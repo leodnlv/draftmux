@@ -12,7 +12,7 @@ use gpui::{
 use markup::Document;
 
 use crate::block_cache::BlockCache;
-use crate::inline_text::MarkHandlers;
+use crate::inline_text::{HunkClick, MarkHandlers};
 use crate::markup_view::{self, Redline, RedlineColors, SelectBody};
 use crate::selectable::{self, TextSelection};
 use crate::theme;
@@ -39,12 +39,18 @@ pub(super) struct Preview {
     pub _selection: gpui::Subscription,
 }
 
+/// A change under the pointer, and where the pointer is.
+pub(super) type Hit = Option<(usize, Point<Pixels>)>;
+
+/// Called with the change under the pointer.
+pub(super) type HunkHover = Rc<dyn Fn(Hit, &mut Window, &mut App)>;
+
 /// What the redline's marks reported in the last frame, and the scrolling
 /// that follows from it.
 #[derive(Default)]
 pub(super) struct MarkState {
     /// The change under the pointer during the current mouse move.
-    hit: Rc<Cell<Option<(usize, Point<Pixels>)>>>,
+    hit: Rc<Cell<Hit>>,
     /// Where each change's first mark was laid out.
     placed: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     /// The last reveal request handled, and how many frames it has taken.
@@ -65,10 +71,10 @@ pub(super) struct PreviewRedline {
     /// A change to scroll into view, with a serial that differs for each
     /// request.
     pub reveal: Option<(usize, u64)>,
-    pub on_click: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+    pub on_click: HunkClick,
     /// Told after every mouse move which change, if any, is under the
     /// pointer, and where the pointer is.
-    pub on_hover: Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut Window, &mut App)>,
+    pub on_hover: HunkHover,
 }
 
 /// Frames a reveal may take: one to bring the change's block on screen,
