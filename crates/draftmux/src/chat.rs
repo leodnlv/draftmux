@@ -126,10 +126,6 @@ pub struct Chat {
     settle_shown: Task<()>,
     /// The quotes the stack last showed, which it keeps while folding shut.
     folding_quotes: RefCell<Vec<Quote>>,
-    /// The quote stack was open when the composer last rendered.
-    quotes_open: Cell<bool>,
-    /// The transcript followed its tail until the quote stack opened.
-    resume_tail: Cell<bool>,
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
@@ -263,8 +259,6 @@ impl Chat {
             shown: Vec::new(),
             settle_shown: Task::ready(()),
             folding_quotes: RefCell::default(),
-            quotes_open: Cell::new(false),
-            resume_tail: Cell::new(false),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
@@ -1327,130 +1321,132 @@ impl Chat {
         if open {
             *self.folding_quotes.borrow_mut() = quotes.clone();
         }
-        // The stack grows the composer over the transcript's end instead of
-        // pushing the transcript up as it follows its tail. Following resumes
-        // once the end is back in view: when the stack has folded shut, or
-        // when the user scrolls down to it.
-        if open != self.quotes_open.replace(open)
-            && let Some(session) = session
-        {
-            let list = &session.list;
-            if open && list.is_following_tail() {
-                // At its end a bottom-aligned list has no anchor and stays
-                // aligned to the bottom; an offset a hair short of the end
-                // anchors it at the top instead.
-                let end = list.max_offset_for_scrollbar().y;
-                list.set_follow_mode(FollowMode::Normal);
-                list.set_offset_from_scrollbar(gpui::point(px(0.), px(0.01) - end));
-                self.resume_tail.set(true);
-            } else if !open && self.resume_tail.replace(false) {
-                // In tail mode but paused here, so it follows again once the
-                // folding stack uncovers the end.
-                let offset = list.scroll_px_offset_for_scrollbar();
-                list.set_follow_mode(FollowMode::Tail);
-                list.set_offset_from_scrollbar(offset);
-            }
-        }
         let shown = self.folding_quotes.borrow().clone();
         let stack = (!shown.is_empty()).then(|| self.quote_stack(&shown, &palette, cx));
         let stack = crate::fold::fold(
             "quote-stack",
             open,
             true,
-            move || div().children(stack).into_any_element(),
+            move || {
+                div()
+                    .pb(COMPOSER_RADIUS)
+                    .rounded_t(COMPOSER_RADIUS)
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(palette.line_strong)
+                    .bg(palette.control)
+                    .children(stack)
+                    .into_any_element()
+            },
             window,
             cx,
         );
-        div().flex_none().px(px(12.)).pt(px(8.)).pb(px(12.)).child(
-            div()
-                .key_context(KEY_CONTEXT)
-                .on_action(cx.listener(|this, _: &Send, _, cx| this.send(cx)))
-                .on_action(cx.listener(|this, _: &Stop, _, cx| this.stop(cx)))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(palette.line_strong)
-                .bg(palette.control)
-                .child(stack)
-                .child(
-                    div()
-                        .h(px(58.))
-                        .relative()
-                        .child(self.composer.clone())
-                        .when(empty, |input| {
-                            input.child(
+        // The stack rises from behind the composer's top edge over the
+        // transcript, so attaching a selection doesn't resize the transcript
+        // and move what it shows.
+        let stack = div()
+            .absolute()
+            .left(px(12.))
+            .right(px(12.))
+            .top(px(8.) + COMPOSER_RADIUS)
+            .child(div().absolute().left_0().right_0().bottom_0().child(stack));
+        div()
+            .flex_none()
+            .relative()
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(12.))
+            .child(stack)
+            .child(
+                div()
+                    .key_context(KEY_CONTEXT)
+                    .on_action(cx.listener(|this, _: &Send, _, cx| this.send(cx)))
+                    .on_action(cx.listener(|this, _: &Stop, _, cx| this.stop(cx)))
+                    .rounded(COMPOSER_RADIUS)
+                    .border_1()
+                    .border_color(palette.line_strong)
+                    .bg(palette.control)
+                    .child(
+                        div()
+                            .h(px(58.))
+                            .relative()
+                            .child(self.composer.clone())
+                            .when(empty, |input| {
+                                input.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(9.))
+                                        .left(px(11.))
+                                        .text_size(px(13.))
+                                        .text_color(palette.faint)
+                                        .child(placeholder),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pl(px(11.))
+                            .pr(px(6.))
+                            .pb(px(6.))
+                            .text_size(px(11.))
+                            .text_color(palette.faint)
+                            .child(div().flex_1().min_w_0().overflow_hidden().children(model))
+                            // While the agent runs, the transcript shows it.
+                            .when(!busy, |footer| footer.child("↵ send · ⇧↵ newline"))
+                            .child(
                                 div()
-                                    .absolute()
-                                    .top(px(9.))
-                                    .left(px(11.))
-                                    .text_size(px(13.))
-                                    .text_color(palette.faint)
-                                    .child(placeholder),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pl(px(11.))
-                        .pr(px(6.))
-                        .pb(px(6.))
-                        .text_size(px(11.))
-                        .text_color(palette.faint)
-                        .child(div().flex_1().min_w_0().overflow_hidden().children(model))
-                        // While the agent runs, the transcript shows it.
-                        .when(!busy, |footer| footer.child("↵ send · ⇧↵ newline"))
-                        .child(
-                            div()
-                                .id("send")
-                                .size(px(26.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(7.))
-                                .text_color(palette.on_accent)
-                                .when(busy || can_send, |button| {
-                                    let hovered = state
-                                        .background(&palette)
-                                        .blend(palette.on_accent.opacity(0.15));
-                                    button
-                                        .hover(move |style| style.bg(hovered))
-                                        .active(|style| style.opacity(0.8))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if busy {
-                                                this.stop(cx);
-                                            } else {
-                                                this.send(cx);
-                                            }
-                                        }))
-                                })
-                                .with_animation(
-                                    ("send-state", state as usize),
-                                    Animation::new(SEND_FADE).with_easing(ease_out_quint()),
-                                    move |button, delta| {
-                                        let icon = if state == SendState::Busy {
-                                            svg().path(STOP_ICON).size(px(10.))
-                                        } else {
-                                            svg().path(SEND_ICON).size(px(14.))
-                                        };
-                                        // The icon fades in only when it changes.
-                                        let swapped =
-                                            (state == SendState::Busy) != (from == SendState::Busy);
+                                    .id("send")
+                                    .size(px(26.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(7.))
+                                    .text_color(palette.on_accent)
+                                    .when(busy || can_send, |button| {
+                                        let hovered = state
+                                            .background(&palette)
+                                            .blend(palette.on_accent.opacity(0.15));
                                         button
-                                            .bg(from
-                                                .background(&palette)
-                                                .blend(state.background(&palette).opacity(delta)))
-                                            .child(
-                                                icon.text_color(palette.on_accent)
-                                                    .opacity(if swapped { delta } else { 1. }),
-                                            )
-                                    },
-                                ),
-                        ),
-                ),
-        )
+                                            .hover(move |style| style.bg(hovered))
+                                            .active(|style| style.opacity(0.8))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if busy {
+                                                    this.stop(cx);
+                                                } else {
+                                                    this.send(cx);
+                                                }
+                                            }))
+                                    })
+                                    .with_animation(
+                                        ("send-state", state as usize),
+                                        Animation::new(SEND_FADE).with_easing(ease_out_quint()),
+                                        move |button, delta| {
+                                            let icon = if state == SendState::Busy {
+                                                svg().path(STOP_ICON).size(px(10.))
+                                            } else {
+                                                svg().path(SEND_ICON).size(px(14.))
+                                            };
+                                            // The icon fades in only when it changes.
+                                            let swapped = (state == SendState::Busy)
+                                                != (from == SendState::Busy);
+                                            button
+                                                .bg(from.background(&palette).blend(
+                                                    state.background(&palette).opacity(delta),
+                                                ))
+                                                .child(
+                                                    icon.text_color(palette.on_accent)
+                                                        .opacity(if swapped { delta } else { 1. }),
+                                                )
+                                        },
+                                    ),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -1608,6 +1604,9 @@ fn message_style(theme: &Theme) -> MarkupStyle {
     style.code_padding = px(10.);
     style.zoomed(theme.zoom)
 }
+
+/// The corner radius of the composer and the quote stack above it.
+const COMPOSER_RADIUS: gpui::Pixels = px(10.);
 
 /// The composer's input: the UI font at chat size.
 fn composer_style(palette: &Palette) -> EditorStyle {
