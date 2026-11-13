@@ -1,10 +1,14 @@
 //! A scripted app for workflow tests: a store in a temporary directory, the
-//! core state the app keeps, a fake clock and a fake editor.
+//! session the app keeps, a fake clock, a fake editor and the autosave timer.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
-use draftmux_core::history::{EditLog, Recorded, Turns};
+use draftmux_core::history::{EditLog, Recorded};
+use draftmux_core::session::{Effect, Epoch, Outcome, Session};
 use draftmux_core::text::normalize_line_endings;
 use draftmux_storage::{History, NewDraft, Store, Target};
 use tempfile::TempDir;
@@ -12,12 +16,19 @@ use tempfile::TempDir;
 pub struct Script {
     root: TempDir,
     pub store: Store,
-    pub turns: Turns,
-    /// The selected draft and its loaded log.
-    pub selected: Option<String>,
+    pub session: Session,
+    /// The selected draft's loaded log.
     pub log: EditLog,
     pub editor: FakeEditor,
+    /// The armed autosave timer: the selection it was armed in, and when it
+    /// fires.
+    pub timer: Option<(Epoch, Instant)>,
+    /// Prompts sent to the agent.
+    pub prompts: Vec<(String, Result<String, String>)>,
+    /// `meta.json` as it was before [`Script::break_meta`].
+    saved_meta: Option<Vec<u8>>,
     t0: DateTime<Utc>,
+    i0: Instant,
     elapsed: Duration,
 }
 
@@ -39,28 +50,82 @@ impl Script {
         let store = Store::new(root.path());
         Self {
             root,
+            session: Session::new(store.clone()),
             store,
-            turns: Turns::default(),
-            selected: None,
             log: EditLog::default(),
             editor: FakeEditor::default(),
+            timer: None,
+            prompts: Vec::new(),
+            saved_meta: None,
             t0: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            i0: Instant::now(),
             elapsed: Duration::zero(),
         }
     }
 
-    /// The fake clock.
+    /// The fake clock, for history timestamps.
     pub fn at(&self) -> DateTime<Utc> {
         self.t0 + self.elapsed
     }
 
-    pub fn advance(&mut self, by: Duration) {
-        self.elapsed += by;
+    /// The fake clock, for the autosave debounce.
+    pub fn now(&self) -> Instant {
+        self.i0 + self.elapsed.to_std().unwrap()
     }
 
-    /// Creates a draft holding `text` and returns its id.
+    /// Lets `by` pass, firing the autosave timer whenever it comes due.
+    pub fn advance(&mut self, by: Duration) {
+        let end = self.elapsed + by;
+        while let Some((epoch, due)) = self.timer
+            && due <= self.i0 + end.to_std().unwrap()
+        {
+            self.timer = None;
+            self.elapsed = Duration::from_std(due - self.i0).unwrap().max(self.elapsed);
+            let outcome = self.session.wake(epoch, self.now());
+            self.apply(outcome);
+        }
+        self.elapsed = end;
+    }
+
+    /// Carries out `outcome` as the app does: the effects in order, then the
+    /// autosave timer armed for its deadline.
+    pub fn apply(&mut self, outcome: Outcome) {
+        for effect in outcome.effects {
+            match effect {
+                Effect::LoadText { epoch, text } => {
+                    self.editor.load(&text);
+                    self.session.loaded(epoch, &self.editor.text);
+                }
+                Effect::Prompt { text, saved } => self.prompts.push((text, saved)),
+            }
+        }
+        if let Some(deadline) = outcome.deadline {
+            self.timer = Some((self.session.epoch(), deadline));
+        }
+    }
+
+    /// The selected draft's id.
+    pub fn selected(&self) -> Option<String> {
+        self.session.drafts().current_id().map(str::to_owned)
+    }
+
+    /// The user types: the editor's text becomes `text`.
+    pub fn type_text(&mut self, text: &str) {
+        self.editor.text = text.to_owned();
+        let outcome = self.session.edited(text.to_owned(), self.now());
+        self.apply(outcome);
+    }
+
+    /// The window loses focus, which saves the pending edit.
+    pub fn leave_window(&mut self) -> anyhow::Result<()> {
+        self.session.flush()
+    }
+
+    /// Creates a draft holding `text`, as `draftmux open` does, and lists
+    /// it as the app does on its next refresh. Returns its id.
     pub fn draft(&mut self, text: &str) -> String {
-        self.store
+        let id = self
+            .store
             .create(NewDraft {
                 target: Target::Github,
                 title: String::new(),
@@ -72,27 +137,37 @@ impl Script {
                 text: text.to_owned(),
             })
             .unwrap()
-            .id
+            .id;
+        self.session.drafts_mut().refresh();
+        id
     }
 
     /// Selects draft `id`: loads its text into the editor and its log.
     pub fn select(&mut self, id: &str) {
-        self.editor.load(&self.store.read_text(id).unwrap());
+        self.try_select(id).unwrap();
+    }
+
+    /// Selects draft `id`, unless the draft being left can't be saved.
+    pub fn try_select(&mut self, id: &str) -> anyhow::Result<()> {
+        let outcome = self.session.select(id)?;
+        self.timer = None;
+        self.apply(outcome);
         self.log = EditLog::load(&self.store, id);
-        self.selected = Some(id.to_owned());
+        Ok(())
     }
 
     pub fn deselect(&mut self) {
-        self.editor = FakeEditor::default();
+        let outcome = self.session.deselect();
+        self.timer = None;
+        self.apply(outcome);
         self.log = EditLog::default();
-        self.selected = None;
     }
 
     /// The user sends `message` to the selected draft's agent, which starts
-    /// from the editor's text.
+    /// from the saved text.
     pub fn send(&mut self, message: &str) {
-        let id = self.selected.clone().expect("a selected draft");
-        self.turns.started(&id, self.editor.text.clone(), message);
+        let outcome = self.session.send(message.to_owned(), message);
+        self.apply(outcome);
     }
 
     /// The agent writes `text` to draft `id`'s file, and the app hasn't
@@ -105,13 +180,20 @@ impl Script {
     /// records the turn, then shows the text if the draft is selected.
     pub fn observe_write(&mut self, id: &str) -> anyhow::Result<Recorded> {
         let text = std::fs::read_to_string(self.draft_path(id)).unwrap();
-        let current = self.selected.as_deref() == Some(id);
+        let current = self.selected().as_deref() == Some(id);
         let at = self.at();
-        let recorded =
-            self.turns
-                .agent_wrote(&self.store, id, &text, at, current.then_some(&mut self.log));
+        let recorded = self.session.turns_mut().agent_wrote(
+            &self.store,
+            id,
+            &text,
+            at,
+            current.then_some(&mut self.log),
+        );
         if current {
+            self.session.drafts_mut().adopt(text.clone());
             self.editor.load(&text);
+            let epoch = self.session.epoch();
+            self.session.loaded(epoch, &self.editor.text);
         }
         recorded
     }
@@ -124,10 +206,35 @@ impl Script {
 
     /// Archives draft `id`, selecting nothing if it was selected.
     pub fn archive(&mut self, id: &str) {
-        self.store.archive(id).unwrap();
-        if self.selected.as_deref() == Some(id) {
+        self.try_archive(id).unwrap();
+    }
+
+    /// Archives draft `id` as the sidebar does, unless it is selected and
+    /// can't be saved.
+    pub fn try_archive(&mut self, id: &str) -> anyhow::Result<()> {
+        let was_current = self.selected().as_deref() == Some(id);
+        self.session.archive(id)?;
+        if was_current {
             self.deselect();
         }
+        Ok(())
+    }
+
+    /// Changes draft `id`'s file the way a program outside the app would.
+    pub fn write_outside(&self, id: &str, text: &str) {
+        std::fs::write(self.draft_path(id), text).unwrap();
+    }
+
+    /// Makes saving draft `id` fail after its text is written, by making
+    /// its `meta.json` unreadable.
+    pub fn break_meta(&mut self, id: &str) {
+        self.saved_meta = Some(std::fs::read(self.meta_path(id)).unwrap());
+        std::fs::write(self.meta_path(id), "{").unwrap();
+    }
+
+    pub fn fix_meta(&mut self, id: &str) {
+        let meta = self.saved_meta.take().expect("a broken meta.json");
+        std::fs::write(self.meta_path(id), meta).unwrap();
     }
 
     /// Makes saving draft `id`'s history fail by putting a directory where
@@ -153,8 +260,10 @@ impl Script {
     /// Drops everything the app holds in memory and reopens the same store.
     pub fn crash(&mut self) {
         self.store = Store::new(self.root.path());
-        self.turns = Turns::default();
-        self.deselect();
+        self.session = Session::new(self.store.clone());
+        self.editor = FakeEditor::default();
+        self.log = EditLog::default();
+        self.timer = None;
     }
 
     pub fn text(&self, id: &str) -> String {
@@ -172,6 +281,10 @@ impl Script {
 
     fn draft_path(&self, id: &str) -> PathBuf {
         self.root.path().join(id).join("draft.md")
+    }
+
+    fn meta_path(&self, id: &str) -> PathBuf {
+        self.root.path().join(id).join("meta.json")
     }
 
     fn history_path(&self, id: &str) -> PathBuf {

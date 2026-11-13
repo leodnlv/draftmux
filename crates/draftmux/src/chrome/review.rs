@@ -158,7 +158,7 @@ impl Chrome {
     /// Loads the selected draft's history and leaves review.
     pub(super) fn load_changes(&mut self, cx: &mut Context<Self>) {
         self.changes = Changes {
-            log: match self.drafts.current_id() {
+            log: match self.session.drafts().current_id() {
                 Some(id) => EditLog::load(&self.store, id),
                 None => EditLog::default(),
             },
@@ -171,10 +171,11 @@ impl Chrome {
     /// Records the edit an agent turn made with its first write to draft
     /// `id`, which now reads `text`.
     pub(super) fn record_edit(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
-        let current = self.drafts.current_id() == Some(id);
+        let current = self.session.drafts().current_id() == Some(id);
         let log = current.then_some(&mut self.changes.log);
         match self
-            .turns
+            .session
+            .turns_mut()
             .agent_wrote(&self.store, id, text, Utc::now(), log)
         {
             Ok(Recorded::Added) => {}
@@ -194,7 +195,7 @@ impl Chrome {
     }
 
     fn save_kept(&self) {
-        let Some(id) = self.drafts.current_id() else {
+        let Some(id) = self.session.drafts().current_id() else {
             return;
         };
         if let Err(err) = self.changes.log.save(&self.store, id) {
@@ -215,7 +216,11 @@ impl Chrome {
                 .filter(|hunk| !self.changes.is_kept(hunk))
                 .count()
         });
-        let target = self.drafts.current().map(|draft| draft.meta.target);
+        let target = self
+            .session
+            .drafts()
+            .current()
+            .map(|draft| draft.meta.target);
         let sides = match (&mut self.review, compared, target) {
             (Some(review), Some(compared), Some(target)) => {
                 let count = compared.comparison.hunks.len();
@@ -335,7 +340,7 @@ impl Chrome {
     }
 
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changes.log.edits().is_empty() || self.drafts.current().is_none() {
+        if self.changes.log.edits().is_empty() || self.session.drafts().current().is_none() {
             return;
         }
         self.show_preview = true;

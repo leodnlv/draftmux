@@ -218,7 +218,9 @@ fn an_lf_write_equal_to_a_crlf_baseline_records_nothing() {
     let mut s = Script::new();
     let id = s.draft("One\nTwo\n");
     s.select(&id);
-    s.turns.started(&id, "One\r\nTwo\r\n".into(), "Leave it");
+    s.session
+        .turns_mut()
+        .started(&id, "One\r\nTwo\r\n".into(), "Leave it");
 
     assert_eq!(
         s.agent_writes(&id, "One\nTwo\n").unwrap(),

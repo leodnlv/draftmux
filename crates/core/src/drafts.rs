@@ -178,7 +178,7 @@ impl Drafts {
     /// Makes `id` the selected draft and returns its text, rewriting a
     /// Slack draft written in mrkdwn as Markdown. Saves the previous draft
     /// first and stays on it if that fails.
-    pub fn select(&mut self, id: &str) -> Result<String> {
+    pub(crate) fn select(&mut self, id: &str) -> Result<String> {
         self.flush()?;
         let mut draft = self.store.load(id)?;
         let converted = convert_mrkdwn(&self.store, &mut draft)?;
@@ -202,7 +202,7 @@ impl Drafts {
     /// Records the text the editor holds after loading the selected draft,
     /// which may differ from the file in line endings, so loading isn't saved
     /// as an edit.
-    pub fn loaded(&mut self, text: &str) {
+    pub(crate) fn loaded(&mut self, text: &str) {
         if let Some(current) = &mut self.current {
             current.autosave.reset(text.to_owned());
         }
@@ -226,7 +226,7 @@ impl Drafts {
     }
 
     /// Reports the editor text after a user edit.
-    pub fn edited(&mut self, text: &str, now: Instant) {
+    pub(crate) fn edited(&mut self, text: &str, now: Instant) {
         if let Some(current) = &mut self.current {
             current.autosave.edited(text.to_owned(), now);
         }
@@ -238,7 +238,7 @@ impl Drafts {
     }
 
     /// Saves the pending edit if it is due.
-    pub fn poll(&mut self, now: Instant) -> Result<()> {
+    pub(crate) fn poll(&mut self, now: Instant) -> Result<()> {
         let Some(current) = &mut self.current else {
             return Ok(());
         };
@@ -247,7 +247,7 @@ impl Drafts {
     }
 
     /// Saves the pending edit now.
-    pub fn flush(&mut self) -> Result<()> {
+    pub(crate) fn flush(&mut self) -> Result<()> {
         let Some(current) = &mut self.current else {
             return Ok(());
         };

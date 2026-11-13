@@ -144,10 +144,10 @@ impl Chrome {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        let rows = self.drafts.rows();
+        let rows = self.session.drafts().rows();
         let current = rows
             .iter()
-            .position(|row| Some(row.draft.id.as_str()) == self.drafts.current_id());
+            .position(|row| Some(row.draft.id.as_str()) == self.session.drafts().current_id());
         if let Some(index) = adjacent_row(current, rows.len(), forward) {
             let id = rows[index].draft.id.clone();
             self.select(&id, window, cx).ok();
@@ -162,10 +162,11 @@ impl Chrome {
         }
         window.focus(&self.sidebar_focus, cx);
         if let Some(index) = self
-            .drafts
+            .session
+            .drafts()
             .rows()
             .iter()
-            .position(|row| Some(row.draft.id.as_str()) == self.drafts.current_id())
+            .position(|row| Some(row.draft.id.as_str()) == self.session.drafts().current_id())
         {
             self.sidebar_scroll.scroll_to_item(index);
         }
@@ -174,7 +175,7 @@ impl Chrome {
     }
 
     fn archive_sidebar_selection(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.drafts.current_id().map(str::to_owned) {
+        if let Some(id) = self.session.drafts().current_id().map(str::to_owned) {
             self.archive(&id, window, cx);
             self.focus_sidebar(window, cx);
         }
@@ -190,7 +191,7 @@ impl Chrome {
         let now = Utc::now();
         let home = std::env::home_dir();
         let rows = self.fold_rows(
-            self.drafts.rows(),
+            self.session.drafts().rows(),
             &self.seen_rows,
             &self.leaving_rows,
             false,
@@ -201,7 +202,7 @@ impl Chrome {
             cx,
         );
         let archived = self.archived_section(now, home.as_deref(), &palette, window, cx);
-        let listed = !self.drafts.rows().is_empty() || archived.is_some();
+        let listed = !self.session.drafts().rows().is_empty() || archived.is_some();
 
         sidebar_column(&palette)
             .h_full()
@@ -327,7 +328,7 @@ impl Chrome {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let section = &self.archived_section;
-        let archived = self.drafts.archived();
+        let archived = self.session.drafts().archived();
         if archived.is_empty() && section.leaving.is_empty() {
             return None;
         }
@@ -442,7 +443,7 @@ impl Chrome {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let palette = *palette;
-        let current = self.drafts.current_id();
+        let current = self.session.drafts().current_id();
         let id = row.draft.id.clone();
         let selected = !archived && current == Some(id.as_str());
         let menu_open = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
@@ -625,7 +626,8 @@ impl Chrome {
                 heading: false,
             },
             if self
-                .drafts
+                .session
+                .drafts()
                 .archived()
                 .iter()
                 .any(|row| row.draft.id == menu.id)
@@ -680,10 +682,11 @@ impl Chrome {
             }
             RowAction::Reveal => {
                 if let Some(row) = self
-                    .drafts
+                    .session
+                    .drafts()
                     .rows()
                     .iter()
-                    .chain(self.drafts.archived())
+                    .chain(self.session.drafts().archived())
                     .find(|row| row.draft.id == id)
                 {
                     cx.reveal_path(&row.draft.dir);
@@ -696,21 +699,22 @@ impl Chrome {
     }
 
     fn archive(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        let was_current = self.drafts.current_id() == Some(id);
+        let was_current = self.session.drafts().current_id() == Some(id);
         let leaving = self
-            .drafts
+            .session
+            .drafts()
             .rows()
             .iter()
             .position(|row| row.draft.id == id)
             .map(|index| LeavingRow {
                 index,
                 row: Row {
-                    draft: self.drafts.rows()[index].draft.clone(),
-                    title: self.drafts.rows()[index].title.clone(),
+                    draft: self.session.drafts().rows()[index].draft.clone(),
+                    title: self.session.drafts().rows()[index].title.clone(),
                 },
                 since: Instant::now(),
             });
-        let next = match self.drafts.archive(id) {
+        let next = match self.session.archive(id) {
             Ok(next) => next,
             Err(err) => {
                 self.show_error(format!("Couldn't archive the draft: {err:#}"), cx);
@@ -738,7 +742,7 @@ impl Chrome {
 
     fn undo_archive(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.toast = None;
-        if self.unarchive(id, cx) && self.drafts.current().is_none() {
+        if self.unarchive(id, cx) && self.session.drafts().current().is_none() {
             self.select(id, window, cx).ok();
         }
         cx.notify();
@@ -755,7 +759,7 @@ impl Chrome {
     /// Unarchives `id`, folding its row in the Archived section shut. Shows
     /// the error and returns false if that fails.
     fn unarchive(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let archived = self.drafts.archived();
+        let archived = self.session.drafts().archived();
         let leaving = archived
             .iter()
             .take(self.archived_section.shown(archived.len()))
@@ -768,7 +772,7 @@ impl Chrome {
                 },
                 since: Instant::now(),
             });
-        if let Err(err) = self.drafts.unarchive(id) {
+        if let Err(err) = self.session.drafts_mut().unarchive(id) {
             self.show_error(format!("Couldn't restore the draft: {err:#}"), cx);
             return false;
         }

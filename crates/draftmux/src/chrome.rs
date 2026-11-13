@@ -21,8 +21,8 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use draftmux_core::history::Turns;
-use draftmux_storage::{Conflict, Store, Target};
+use draftmux_core::session::{Effect, Outcome, Session};
+use draftmux_storage::{Store, Target};
 use editor::{Editor, EditorEvent, Redo, Undo};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, BoxShadow, Context, CursorStyle, DragMoveEvent,
@@ -36,7 +36,7 @@ use crate::app_settings::AppSettings;
 use crate::assets::{EDITOR_PANE_ICON, PREVIEW_ICON};
 use crate::chat::{Chat, ChatEvent};
 use crate::copy::{self, Copy};
-use crate::drafts::{self, Drafts, tilde};
+use crate::drafts::{self, tilde};
 use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
@@ -101,7 +101,8 @@ pub struct Chrome {
     /// Set on toolbar mouse-down; the first mouse-move then hands the drag to
     /// the window server, so a plain click never starts a move.
     should_move: bool,
-    drafts: Drafts,
+    /// The selected draft, its saving and its agent turns.
+    session: Session,
     store: Store,
     chat_width: Pixels,
     save_chat_width: Task<()>,
@@ -139,8 +140,6 @@ pub struct Chrome {
     /// The editor was collapsed for a narrow window rather than by the user,
     /// so widening the window shows it again.
     collapsed_for_width: bool,
-    /// Why the selected draft's last save failed; cleared by the next save.
-    save_error: Option<SharedString>,
     toast: Option<sidebar::Toast>,
     /// The update button's card, while it is open.
     update_card: Option<update_offer::UpdateCard>,
@@ -151,9 +150,6 @@ pub struct Chrome {
     /// Holds the focus during review, so its single-key shortcuts don't
     /// reach a text field.
     review_focus: FocusHandle,
-    /// Each draft's latest agent turn, until its first write is recorded
-    /// as an edit.
-    turns: Turns,
     /// The Copy button shows a checkmark while this is set, with a serial
     /// so each copy replays it; the task clears it.
     copied: Option<(usize, Task<()>)>,
@@ -221,7 +217,7 @@ impl Render for Chrome {
         let preview_width = (preview_open < 1.).then(|| open_width(&preview_slide, &editor_slide));
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let reviewing = self.review.is_some();
-        let content = if self.drafts.current().is_some() {
+        let content = if self.session.drafts().current().is_some() {
             div()
                 .flex_1()
                 .min_w_0()
@@ -316,7 +312,7 @@ impl Render for Chrome {
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.zoom(1., cx)))
             .on_action(cx.listener(|this, _: &Format, _, cx| {
-                if this.drafts.current().is_some() {
+                if this.session.drafts().current().is_some() {
                     this.formatter
                         .update(cx, |formatter, cx| formatter.format(Wrap::Keep, cx));
                 }
@@ -472,14 +468,14 @@ impl Chrome {
             // failure in the window.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
-                    this.drafts.refresh();
+                    this.session.drafts_mut().refresh();
                 } else {
-                    this.flush().ok();
+                    this.session.flush().ok();
                 }
                 cx.notify();
             }),
             cx.on_app_quit(|this, _| {
-                this.flush().ok();
+                this.session.flush().ok();
                 async {}
             }),
             cx.observe(&Updater::global(cx), |_, _, cx| cx.notify()),
@@ -543,7 +539,7 @@ impl Chrome {
         before_preview.update(cx, |before, _| before.partner = Some(preview.downgrade()));
         let mut chrome = Self {
             should_move: false,
-            drafts: Drafts::new(store.clone()),
+            session: Session::new(store.clone()),
             store,
             chat_width,
             save_chat_width: Task::ready(()),
@@ -565,13 +561,11 @@ impl Chrome {
             show_preview: true,
             narrow: false,
             collapsed_for_width: false,
-            save_error: None,
             toast: None,
             update_card: None,
             changes: Default::default(),
             review: None,
             review_focus: cx.focus_handle(),
-            turns: Default::default(),
             copied: None,
             row_menu: None,
             seen_rows: RefCell::default(),
@@ -598,12 +592,20 @@ impl Chrome {
         ));
         if let Some(home) = std::env::home_dir() {
             let settings = AppSettings::global(cx).read(cx).settings.clone();
-            if let Err(err) = drafts::first_launch_sample(&mut chrome.drafts, &settings, &home) {
+            if let Err(err) =
+                drafts::first_launch_sample(chrome.session.drafts_mut(), &settings, &home)
+            {
                 eprintln!("draftmux: creating the sample draft: {err:#}");
             }
         }
         window.focus(&chrome.content_focus, cx);
-        if let Some(id) = chrome.drafts.rows().first().map(|row| row.draft.id.clone()) {
+        if let Some(id) = chrome
+            .session
+            .drafts()
+            .rows()
+            .first()
+            .map(|row| row.draft.id.clone())
+        {
             chrome.select(&id, window, cx).ok();
         }
         chrome
@@ -614,7 +616,7 @@ impl Chrome {
         let settings = AppSettings::global(cx).read(cx).settings.clone();
         let created = std::env::home_dir()
             .ok_or_else(|| anyhow::anyhow!("no home directory"))
-            .and_then(|home| drafts::create_sample(&mut self.drafts, &settings, &home));
+            .and_then(|home| drafts::create_sample(self.session.drafts_mut(), &settings, &home));
         match created {
             Ok(id) => {
                 self.select(&id, window, cx).ok();
@@ -670,8 +672,14 @@ impl Chrome {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        self.drafts.refresh();
-        if !self.drafts.rows().iter().any(|row| row.draft.id == id) {
+        self.session.drafts_mut().refresh();
+        if !self
+            .session
+            .drafts()
+            .rows()
+            .iter()
+            .any(|row| row.draft.id == id)
+        {
             anyhow::bail!("draft {id} isn't in the drafts list");
         }
         self.select(id, window, cx)?;
@@ -683,32 +691,29 @@ impl Chrome {
     /// On failure, including failing to save the draft being left, shows the
     /// error and stays put.
     fn select(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
-        if self.drafts.current_id() == Some(id) {
+        if self.session.drafts().current_id() == Some(id) {
             return Ok(());
         }
-        let text = match self.drafts.select(id) {
-            Ok(text) => text,
+        let outcome = match self.session.select(id) {
+            Ok(outcome) => outcome,
             Err(err) => {
                 self.show_error(format!("Couldn't open the draft: {err:#}"), cx);
                 return Err(err);
             }
         };
-        self.save_error = None;
         self.autosave = Task::ready(());
         self.preview_work.invalidate();
         self.set_preview(None, cx);
-        if let Some(draft) = self.drafts.current() {
+        if let Some(draft) = self.session.drafts().current() {
             let (dir, target) = (draft.dir.clone(), draft.meta.target);
             self.formatter
                 .update(cx, |formatter, cx| formatter.set_draft_dir(dir, cx));
             self.set_target_markup(target, cx);
         }
         self.sync_selection_draft(cx);
-        self.editor
-            .update(cx, |editor, cx| editor.set_text(&text, cx));
-        self.drafts.loaded(self.editor.read(cx).text());
+        self.apply(outcome, cx);
         self.load_changes(cx);
-        let draft = self.drafts.current().cloned();
+        let draft = self.session.drafts().current().cloned();
         self.chat
             .update(cx, |chat, cx| chat.set_draft(draft.as_ref(), cx));
         self.preview_scroll.set_offset(Point::default());
@@ -730,7 +735,7 @@ impl Chrome {
     /// Selection actions fork the selected draft's session and write for its
     /// target.
     fn sync_selection_draft(&self, cx: &mut Context<Self>) {
-        let draft = self.drafts.current().cloned();
+        let draft = self.session.drafts().current().cloned();
         self.selection
             .update(cx, |selection, cx| selection.set_draft(draft, cx));
     }
@@ -763,7 +768,7 @@ impl Chrome {
         self.show_sidebar = !self.show_sidebar;
         self.row_menu = None;
         if !self.show_sidebar && self.sidebar_focus.contains_focused(window, cx) {
-            if self.show_editor && self.drafts.current().is_some() {
+            if self.show_editor && self.session.drafts().current().is_some() {
                 window.focus(&self.editor.focus_handle(cx), cx);
             } else {
                 window.focus(&self.content_focus, cx);
@@ -836,7 +841,8 @@ impl Chrome {
         self.preview_work.invalidate();
         self.autosave = Task::ready(());
         self.set_preview(None, cx);
-        self.editor.update(cx, |editor, cx| editor.set_text("", cx));
+        let outcome = self.session.deselect();
+        self.apply(outcome, cx);
         self.load_changes(cx);
         self.chat.update(cx, |chat, cx| chat.set_draft(None, cx));
         self.sync_selection_draft(cx);
@@ -845,24 +851,15 @@ impl Chrome {
     fn chat_event(&mut self, event: &ChatEvent, cx: &mut Context<Self>) {
         match event {
             ChatEvent::Send(text) => {
-                // pi reads the draft from disk.
-                let saved = self
-                    .flush()
-                    .map(|()| self.editor.read(cx).text().to_owned())
-                    .map_err(|err| format!("{err:#}"));
-                if let (Ok(before), Some(id)) = (&saved, self.drafts.current_id()) {
-                    self.turns
-                        .started(id, before.clone(), crate::chat::message(text));
-                }
-                let text = text.clone();
-                self.chat
-                    .update(cx, |chat, cx| chat.prompt(text, saved, cx));
+                debug_assert_eq!(self.session.text(), self.editor.read(cx).text());
+                let outcome = self.session.send(text.clone(), crate::chat::message(text));
+                self.apply(outcome, cx);
             }
             ChatEvent::FirstDraft(text) => {
-                let Some(id) = self.drafts.current_id().map(str::to_owned) else {
+                let Some(id) = self.session.drafts().current_id().map(str::to_owned) else {
                     return;
                 };
-                if let Err(err) = self.drafts.first_draft_requested(&id) {
+                if let Err(err) = self.session.drafts_mut().first_draft_requested(&id) {
                     eprintln!("draftmux: recording the first-draft request: {err:#}");
                 }
                 // Text the user typed while pi was starting is kept, and the
@@ -872,6 +869,7 @@ impl Chrome {
                     self.chat.update(cx, |chat, cx| chat.offer(&text, cx));
                 } else {
                     let saved = self
+                        .session
                         .flush()
                         .map(|()| self.editor.read(cx).text().to_owned())
                         .map_err(|err| format!("{err:#}"));
@@ -882,11 +880,11 @@ impl Chrome {
             }
             ChatEvent::DraftWritten { id, text } => {
                 self.record_edit(id, text, cx);
-                if self.drafts.current_id() == Some(id.as_str()) {
+                if self.session.drafts().current_id() == Some(id.as_str()) {
                     // Shown now rather than on the next poll. Nothing is
                     // pending while the agent runs, so there's no conflict.
                     self.reload_outside_edit(cx);
-                } else if let Err(err) = self.drafts.touched(id, text) {
+                } else if let Err(err) = self.session.drafts_mut().touched(id, text) {
                     eprintln!("draftmux: recording the agent's edit: {err:#}");
                 }
             }
@@ -894,7 +892,8 @@ impl Chrome {
                 let running = *running;
                 let writing = running
                     || self
-                        .drafts
+                        .session
+                        .drafts()
                         .current()
                         .is_some_and(|draft| draft.meta.first_draft_pending);
                 self.preview.update(cx, |preview, cx| {
@@ -920,11 +919,16 @@ impl Chrome {
 
     fn edited(&mut self, text: String, cx: &mut Context<Self>) {
         let _timing = editor::timing::span("edit-subscribers");
-        let Some(target) = self.drafts.current().map(|draft| draft.meta.target) else {
+        let Some(target) = self
+            .session
+            .drafts()
+            .current()
+            .map(|draft| draft.meta.target)
+        else {
             return;
         };
-        self.drafts.edited(&text, Instant::now());
-        self.schedule_save(cx);
+        let outcome = self.session.edited(text.clone(), Instant::now());
+        self.apply(outcome, cx);
         self.sync_review(cx);
         self.preview_selection
             .update(cx, |selection, cx| selection.clear(cx));
@@ -967,7 +971,11 @@ impl Chrome {
     }
 
     fn set_preview(&mut self, preview: Option<Document>, cx: &mut Context<Self>) {
-        let target = self.drafts.current().map(|draft| draft.meta.target);
+        let target = self
+            .session
+            .drafts()
+            .current()
+            .map(|draft| draft.meta.target);
         self.preview_source = if preview.is_some() {
             self.editor.read(cx).text().to_owned()
         } else {
@@ -1107,13 +1115,13 @@ impl Chrome {
     /// as activity, and loads it into the editor when no edit is pending.
     /// Returns the file's text when an edit is pending instead.
     fn reload_outside_edit(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let id = self.drafts.current_id()?.to_owned();
+        let id = self.session.drafts().current_id()?.to_owned();
         // A file that can't be read is reported by the next save.
-        let disk = self.drafts.changed_on_disk().ok().flatten()?;
-        if let Err(err) = self.drafts.touched(&id, &disk) {
+        let disk = self.session.drafts().changed_on_disk().ok().flatten()?;
+        if let Err(err) = self.session.drafts_mut().touched(&id, &disk) {
             eprintln!("draftmux: recording the outside edit: {err:#}");
         }
-        if self.drafts.deadline().is_some() {
+        if self.session.drafts().deadline().is_some() {
             return Some(disk);
         }
         self.load_outside_edit(disk, cx);
@@ -1122,12 +1130,13 @@ impl Chrome {
     }
 
     fn load_outside_edit(&mut self, disk: String, cx: &mut Context<Self>) {
-        self.drafts.adopt(disk.clone());
+        self.session.drafts_mut().adopt(disk.clone());
         self.editor.update(cx, |editor, cx| {
             crate::changes::replace_all(editor, &disk, cx)
         });
         // The file already holds the text, so loading isn't an edit to save.
-        self.drafts.loaded(self.editor.read(cx).text());
+        let epoch = self.session.epoch();
+        self.session.loaded(epoch, self.editor.read(cx).text());
     }
 
     /// Reloads an outside change to the selected draft, or asks which
@@ -1139,7 +1148,7 @@ impl Chrome {
         let Some(disk) = self.reload_outside_edit(cx) else {
             return;
         };
-        let Some(id) = self.drafts.current_id().map(str::to_owned) else {
+        let Some(id) = self.session.drafts().current_id().map(str::to_owned) else {
             return;
         };
         self.asking_outside_edit = true;
@@ -1163,17 +1172,18 @@ impl Chrome {
                 // The answer is about these edits to this draft and this
                 // version of it. If a retried save wrote the edits meanwhile,
                 // or the file changed again, the next poll starts over.
-                if this.drafts.current_id() != Some(id.as_str())
-                    || this.drafts.deadline().is_none()
-                    || this.drafts.changed_on_disk().ok().flatten().as_ref() != Some(&disk)
+                let drafts = this.session.drafts();
+                if drafts.current_id() != Some(id.as_str())
+                    || drafts.deadline().is_none()
+                    || drafts.changed_on_disk().ok().flatten().as_ref() != Some(&disk)
                 {
                     return;
                 }
                 match answer {
                     Some(0) => this.load_outside_edit(disk, cx),
                     Some(1) => {
-                        this.drafts.adopt(disk);
-                        this.flush().ok();
+                        this.session.drafts_mut().adopt(disk);
+                        this.session.flush().ok();
                     }
                     _ => {}
                 }
@@ -1185,54 +1195,43 @@ impl Chrome {
         cx.notify();
     }
 
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        let Some(deadline) = self.drafts.deadline() else {
+    /// Carries out `outcome`'s effects in order, then arms the autosave
+    /// timer for its deadline.
+    fn apply(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
+        for effect in outcome.effects {
+            match effect {
+                Effect::LoadText { epoch, text } => {
+                    self.editor
+                        .update(cx, |editor, cx| editor.set_text(&text, cx));
+                    self.session.loaded(epoch, self.editor.read(cx).text());
+                }
+                Effect::Prompt { text, saved } => {
+                    self.chat
+                        .update(cx, |chat, cx| chat.prompt(text, saved, cx));
+                }
+            }
+        }
+        let Some(deadline) = outcome.deadline else {
             return;
         };
+        let epoch = self.session.epoch();
         self.autosave = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(deadline.saturating_duration_since(Instant::now()))
                 .await;
-            this.update(cx, |this, cx| this.poll_save(cx)).ok();
+            this.update(cx, |this, cx| {
+                let outcome = this.session.wake(epoch, Instant::now());
+                this.apply(outcome, cx);
+                cx.notify();
+            })
+            .ok();
         });
-    }
-
-    fn poll_save(&mut self, cx: &mut Context<Self>) {
-        match self.drafts.poll(Instant::now()) {
-            Ok(()) => self.save_error = None,
-            Err(err) => {
-                self.save_failed(&err);
-                // The text stays pending; try again after another delay.
-                let text = self.editor.read(cx).text().to_owned();
-                self.drafts.edited(&text, Instant::now());
-                self.schedule_save(cx);
-            }
-        }
-        cx.notify();
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        let result = self.drafts.flush();
-        match &result {
-            Ok(()) => self.save_error = None,
-            Err(err) => self.save_failed(err),
-        }
-        result
-    }
-
-    fn save_failed(&mut self, err: &anyhow::Error) {
-        // Not a failure to report: the user is asked which version to keep.
-        if err.is::<Conflict>() {
-            return;
-        }
-        eprintln!("draftmux: saving draft: {err:#}");
-        self.save_error = Some(format!("Couldn't save: {err:#}").into());
     }
 
     /// Saves before the window closes or the app quits. On failure, shows the
     /// error and returns false so the unsaved text stays in the editor.
     pub fn flush_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
-        match self.flush() {
+        match self.session.flush() {
             Ok(()) => true,
             Err(_) => {
                 cx.notify();
@@ -1242,7 +1241,7 @@ impl Chrome {
     }
 
     fn set_target(&mut self, target: Target, cx: &mut Context<Self>) {
-        if let Err(err) = self.drafts.set_target(target) {
+        if let Err(err) = self.session.drafts_mut().set_target(target) {
             self.show_error(format!("Couldn't change the target: {err:#}"), cx);
             return;
         }
@@ -1267,7 +1266,12 @@ impl Chrome {
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.drafts.current().map(|draft| draft.meta.target) else {
+        let Some(target) = self
+            .session
+            .drafts()
+            .current()
+            .map(|draft| draft.meta.target)
+        else {
             return;
         };
         let text = self.editor.read(cx).text().to_owned();
@@ -1288,18 +1292,19 @@ impl Chrome {
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
-        let current = self.drafts.current();
+        let current = self.session.drafts().current();
         let title: SharedString = match current {
             Some(draft) => self
-                .drafts
+                .session
+                .drafts()
                 .rows()
                 .iter()
                 .find(|row| row.draft.id == draft.id)
                 .map_or_else(|| "Untitled draft".into(), |row| row.title.clone().into()),
             None => "Draftmux".into(),
         };
-        let subtitle = match (&self.save_error, current) {
-            (Some(error), _) => Some((error.clone(), palette.danger)),
+        let subtitle = match (self.session.save_error(), current) {
+            (Some(error), _) => Some((SharedString::from(error.to_owned()), palette.danger)),
             // The sample's directory is just where it was created.
             (None, Some(draft)) if draft.meta.is_sample() => None,
             (None, Some(draft)) => Some((
