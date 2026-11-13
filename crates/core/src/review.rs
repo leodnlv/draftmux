@@ -8,6 +8,7 @@
 
 use std::rc::Rc;
 
+use crate::decorations::{Decoration, decorations};
 use crate::diff::{self, Comparison, Hunk};
 use crate::history::{ChangeKey, EditLog};
 
@@ -16,6 +17,8 @@ pub struct Compared {
     pub base: String,
     pub text: String,
     pub comparison: Comparison,
+    /// Where each change shows in `base` and `text`.
+    pub decorations: Vec<Decoration>,
 }
 
 /// Which edit made a change: an agent edit, by its index in the history, or
@@ -68,8 +71,10 @@ impl ReviewState {
         let compared = match &self.compared {
             Some(compared) if compared.base == *base && compared.text == text => compared.clone(),
             _ => {
+                let comparison = diff::compare(base, text);
                 let compared = Rc::new(Compared {
-                    comparison: diff::compare(base, text),
+                    decorations: decorations(&comparison),
+                    comparison,
                     base: base.clone(),
                     text: text.to_owned(),
                 });
