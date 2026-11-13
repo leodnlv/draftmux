@@ -537,10 +537,14 @@ impl SelectionPopover {
 
     fn close_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.panel.take() {
-            panel
-                .handle
-                .update(cx, |_, window, _| window.remove_window())
-                .ok();
+            // Deferred, since the panel's own events close it, and a window
+            // can't be updated while it handles one.
+            cx.defer(move |cx| {
+                panel
+                    .handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .ok();
+            });
         }
     }
 
