@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs CI before publishing.
+  workflow_call:
 
+# A called workflow sees its caller's name in github.workflow, which keeps a
+# release's CI from cancelling, or being cancelled by, CI for the same ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -26,6 +30,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo machete
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::all
+      - run: cargo check --locked -p draftmux --features capture
       - run: cargo test --locked --workspace
       - run: just test-scripts
 

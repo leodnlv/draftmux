@@ -17,6 +17,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Nothing is published unless CI passes on the tagged commit.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   macos:
     runs-on: macos-15
     timeout-minutes: 120
@@ -99,7 +103,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [macos, linux]
+    needs: [ci, macos, linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
