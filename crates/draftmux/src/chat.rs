@@ -1351,7 +1351,11 @@ impl Chat {
                                 .rounded(px(7.))
                                 .text_color(palette.on_accent)
                                 .when(busy || can_send, |button| {
+                                    let hovered = state
+                                        .background(&palette)
+                                        .blend(palette.on_accent.opacity(0.15));
                                     button
+                                        .hover(move |style| style.bg(hovered))
                                         .active(|style| style.opacity(0.8))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if busy {
