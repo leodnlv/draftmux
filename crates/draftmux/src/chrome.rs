@@ -457,12 +457,16 @@ impl Chrome {
             // app, so it reports appearance changes for every window.
             cx.observe_window_appearance(window, |_, window, cx| theme::sync_window(window, cx)),
             // Drafts created or archived by the CLI while the app was in the
-            // background.
+            // background. Leaving the window saves pending edits, so the CLI
+            // reads them without waiting for autosave; `flush` reports a
+            // failure in the window.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.drafts.refresh();
-                    cx.notify();
+                } else {
+                    this.flush().ok();
                 }
+                cx.notify();
             }),
             cx.on_app_quit(|this, _| {
                 this.flush().ok();
