@@ -13,14 +13,17 @@
 //! With `--review` the fixtures are pairs, `<name>.before.md` and
 //! `<name>.after.md`, and each is drawn as review's two columns: the
 //! before text with its deletions marked beside the after text with its
-//! insertions marked. A `<name>-review.txt` beside the images spells out
-//! the marks, `[-n:…-]` deleted and `{+n:…+}` inserted for hunk `n`, with
-//! `|` for a point.
+//! insertions marked, each under its frontmatter's fields. A
+//! `<name>-review.txt` beside the images spells out the marks on each text
+//! drawn, `[-n:…-]` deleted and `{+n:…+}` inserted for hunk `n`, and
+//! `<n|>` for a point.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use draftmux_core::decorations::{Side, decorations};
+use draftmux_core::diff::compare;
 use draftmux_storage::Target;
 use gpui::{
     App, AsyncApp, Bounds, Context, Render, Window, WindowBounds, WindowOptions, div, point,
@@ -29,9 +32,8 @@ use gpui::{
 use markup::Document;
 
 use crate::assets;
-use crate::compare::{self, Mark, Run, Side};
-use crate::inline_text::MarkHandlers;
-use crate::markup_view::{self, MarkupStyle, Redline, RedlineColors};
+use crate::inline_text::{MarkHandlers, Segment};
+use crate::markup_view::{self, Marks, MarkupStyle, Redline, RedlineColors};
 use crate::theme::Palette;
 
 /// Padding around the body in the image, matching the reference captures.
@@ -40,7 +42,7 @@ const PAD: f32 = 16.;
 /// Render fixture drafts to PNGs (development tool).
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Target whose preview style to use: github, slack or rich.
+    /// Target whose preview style to use: github, slack, rich or plain.
     #[arg(long)]
     target: String,
     /// Directory of `.md` fixture drafts.
@@ -61,6 +63,7 @@ pub fn main(args: Args) -> u8 {
         "github" => Target::Github,
         "slack" => Target::Slack,
         "rich" => Target::Rich,
+        "plain" => Target::Plain,
         other => {
             eprintln!("draftmux capture: unknown target {other}");
             return 2;
@@ -168,19 +171,41 @@ async fn capture_reviews(
         let Some(after) = text(&format!("{name}.after")) else {
             bail!("{name}.before.md has no {name}.after.md");
         };
-        let comparison = compare::compare(before, after);
-        let [(old_side, old_doc), (new_side, new_doc)] = [Side::Before, Side::After]
-            .map(|side| markup_view::redlined(&comparison, side, target));
-        let sides = [old_side, new_side];
-        let docs = [old_doc, new_doc];
+        let comparison = compare(before, after);
+        let decorations = decorations(&comparison);
+        let sides = [(Side::Before, before), (Side::After, after)].map(|(side, text)| {
+            let mapped = markup_view::preview_mapped(target, text);
+            let redlined = markup_view::redline(&mapped, &decorations, side);
+            (side, mapped.fields, redlined)
+        });
+        let redline = |marks: &std::rc::Rc<Marks>, palette: &Palette| Redline {
+            marks: marks.clone(),
+            selected: None,
+            hovered: None,
+            kept: vec![false; comparison.hunks.len()],
+            colors: RedlineColors::new(palette),
+            handlers: std::rc::Rc::new(MarkHandlers {
+                click: std::rc::Rc::new(|_, _, _| {}),
+                hover: std::rc::Rc::new(|_, _| {}),
+                placed: std::rc::Rc::new(|_, _| {}),
+            }),
+        };
+        let spelled = sides.each_ref().map(|(side, fields, redlined)| {
+            let mut style = markup_view::style(target, false);
+            style.redline = Some(std::rc::Rc::new(redline(
+                &redlined.marks,
+                &Palette::light(),
+            )));
+            readable(*side, fields, &redlined.marks, &redlined.document, &style)
+        });
         let path = out.join(format!("{name}-review.txt"));
         std::fs::write(
             &path,
             format!(
                 "{} hunks\n\n--- before\n{}\n--- after\n{}",
                 comparison.hunks.len(),
-                readable(&sides[0]),
-                readable(&sides[1])
+                spelled[0],
+                spelled[1]
             ),
         )?;
         println!("{}", path.display());
@@ -190,22 +215,18 @@ async fn capture_reviews(
             } else {
                 Palette::light()
             };
-            let style = |doc: &Document| {
+            let columns = sides.each_ref().map(|(_, fields, redlined)| {
                 let mut style = markup_view::style(target, dark);
-                style.redline = Some(std::rc::Rc::new(Redline {
-                    selected: None,
-                    hovered: None,
-                    kept: vec![false; comparison.hunks.len()],
-                    colors: RedlineColors::new(&palette),
-                    handlers: std::rc::Rc::new(MarkHandlers {
-                        click: std::rc::Rc::new(|_, _, _| {}),
-                        hover: std::rc::Rc::new(|_, _| {}),
-                        placed: std::rc::Rc::new(|_, _| {}),
-                    }),
-                }));
-                (doc.clone(), style)
-            };
-            let columns = [style(&docs[0]), style(&docs[1])];
+                let line = std::rc::Rc::new(redline(&redlined.marks, &palette));
+                style.redline = Some(line.clone());
+                Column {
+                    doc: (*redlined.document).clone(),
+                    style,
+                    fields: fields.clone(),
+                    redline: line,
+                    muted: palette.muted,
+                }
+            });
             let rule = palette.hairline;
             let image = snapshot(2. * (width + 2. * PAD) + 1., cx, move |cx| {
                 cx.new(|_| ReviewCapture {
@@ -224,33 +245,78 @@ async fn capture_reviews(
     Ok(())
 }
 
-/// Marked text with its marks spelled out: `[-n:…-]` deleted, `{+n:…+}`
-/// inserted, `|` a point.
-fn readable(marked: &str) -> String {
-    let mut open = None;
+/// What one side of a review draws, with its marks spelled out: each
+/// changed field as `key: value`, then each text drawn, one per line.
+fn readable(
+    side: Side,
+    fields: &markup::frontmatter::Fields,
+    marks: &Marks,
+    doc: &Document,
+    style: &MarkupStyle,
+) -> String {
     let mut out = String::new();
-    let mut last: Option<Mark> = None;
-    let close = |out: &mut String, mark: Mark| out.push_str(if mark.deleted { "-]" } else { "+}" });
-    for (mark, run) in compare::split_marks(marked, &mut open) {
-        if mark != last {
-            if let Some(last) = last {
-                close(&mut out, last);
-            }
-            if let Some(mark) = mark {
-                let open = if mark.deleted { "[-" } else { "{+" };
-                out.push_str(&format!("{open}{}:", mark.hunk));
+    for (ix, (key, value)) in fields.iter().enumerate() {
+        let mut segment = Segment {
+            text: value.clone().into(),
+            ..Segment::default()
+        };
+        let mut points = Vec::new();
+        for mark in marks.field(ix) {
+            let drawn = crate::inline_text::SegmentMark {
+                hunk: mark.hunk,
+                background: (!mark.point).then(gpui::transparent_black),
+                ring: None,
+                underline: None,
+                bar: None,
+            };
+            if mark.point {
+                points.push(Segment {
+                    text: markup_view::POINT.into(),
+                    mark: Some(drawn),
+                    ..Segment::default()
+                });
+            } else {
+                segment.mark = Some(drawn);
             }
         }
-        out.push_str(match run {
-            Run::Text(text) => text,
-            Run::Point => "|",
-        });
-        last = mark;
+        let segments: Vec<Segment> = std::iter::once(segment).chain(points).collect();
+        out.push_str(&format!("{key}: {}\n", spell(side, &segments)));
     }
-    if let Some(last) = last {
-        close(&mut out, last);
+    for (path, segments) in markup_view::drawn(doc, style) {
+        out.push_str(&format!("{path:?} {}\n", spell(side, &segments)));
     }
     out
+}
+
+/// `segments` with their marks spelled out. A mark without a background is
+/// a point.
+fn spell(side: Side, segments: &[Segment]) -> String {
+    let deleted = side == Side::Before;
+    let close = if deleted { "-]" } else { "+}" };
+    let mut out = String::new();
+    let mut open: Option<usize> = None;
+    for segment in segments {
+        let mark = segment.mark.as_ref();
+        let point = mark.filter(|mark| mark.background.is_none());
+        let now = mark.filter(|_| point.is_none()).map(|mark| mark.hunk);
+        if now != open {
+            if open.is_some() {
+                out.push_str(close);
+            }
+            if let Some(hunk) = now {
+                out.push_str(&format!("{}{hunk}:", if deleted { "[-" } else { "{+" }));
+            }
+            open = now;
+        }
+        match point {
+            Some(point) => out.push_str(&format!("<{}|>", point.hunk)),
+            None => out.push_str(&segment.text),
+        }
+    }
+    if open.is_some() {
+        out.push_str(close);
+    }
+    out.replace('\n', "\\n")
 }
 
 /// Draws the view `build` makes in an offscreen window `width` wide and
@@ -324,33 +390,52 @@ impl Render for Capture {
     }
 }
 
+/// One of review's columns: its fields over its redline.
+struct Column {
+    doc: Document,
+    style: MarkupStyle,
+    fields: markup::frontmatter::Fields,
+    redline: std::rc::Rc<Redline>,
+    muted: gpui::Hsla,
+}
+
 /// Review's before and after columns side by side.
 struct ReviewCapture {
-    columns: [(Document, MarkupStyle); 2],
+    columns: [Column; 2],
     rule: gpui::Hsla,
     width: f32,
 }
 
 impl Render for ReviewCapture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let [(before, before_style), (after, after_style)] = &self.columns;
-        let column = |doc: &Document, style: &MarkupStyle, id: &'static str| {
+        let [before, after] = &self.columns;
+        let column = |column: &Column, id: &'static str| {
+            let fields = column.fields.iter().enumerate().map(|(ix, (key, value))| {
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .child(div().w(px(64.)).text_color(column.muted).child(key.clone()))
+                    .child(markup_view::field_value(value, ix, &column.redline))
+            });
             div().p(px(PAD)).child(
                 div()
                     .w(px(self.width))
-                    .child(markup_view::render(doc, style, id, None)),
+                    .font_family(column.style.font_family.clone())
+                    .text_color(column.style.text_color)
+                    .children(fields)
+                    .when(!column.fields.is_empty(), |this| {
+                        this.child(div().h(px(PAD)))
+                    })
+                    .child(markup_view::render(&column.doc, &column.style, id, None)),
             )
         };
         // The rule only spans the columns, so the image crops below them.
-        div().size_full().bg(before_style.background).child(
+        div().size_full().bg(before.style.background).child(
             div()
                 .flex()
-                .child(column(before, before_style, "before"))
-                .child(
-                    column(after, after_style, "after")
-                        .border_l_1()
-                        .border_color(self.rule),
-                ),
+                .child(column(before, "before"))
+                .child(column(after, "after").border_l_1().border_color(self.rule)),
         )
     }
 }

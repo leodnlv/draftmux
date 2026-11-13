@@ -1,5 +1,6 @@
 //! Measured top-level markdown blocks. After measurement, unchanged offscreen
 //! blocks reuse their height and text without building or laying out elements.
+//! A block with different redline marks counts as changed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -12,9 +13,13 @@ use gpui::{
 };
 use markup::Block;
 
+use crate::markup_view::{Marks, TextMark};
+
 /// Measurements, selection text and scroll state shared by all frames of a block.
 pub struct CachedBlock {
     pub block: Block,
+    /// The redline's marks on the block.
+    pub marks: Vec<TextMark>,
     height: Cell<Option<Pixels>>,
     /// Where the block's top was in the window when last laid out.
     top: Cell<Option<Pixels>>,
@@ -23,9 +28,10 @@ pub struct CachedBlock {
 }
 
 impl CachedBlock {
-    fn new(block: Block) -> Self {
+    fn new(block: Block, marks: Vec<TextMark>) -> Self {
         Self {
             block,
+            marks,
             height: Cell::new(None),
             top: Cell::new(None),
             texts: Default::default(),
@@ -55,26 +61,30 @@ impl BlockCache {
         self.width = None;
     }
 
-    pub fn prepare(&mut self, blocks: &[Block], width: Pixels) {
+    /// Keeps the blocks that are still in `blocks` with the same `marks`.
+    pub fn prepare(&mut self, blocks: &[Block], marks: Option<&Marks>, width: Pixels) {
+        let marks = |ix: usize| marks.map_or(&[][..], |marks| marks.block(ix));
+        let same = |cached: &CachedBlock, ix: usize| {
+            cached.block == blocks[ix] && cached.marks == marks(ix)
+        };
         let prefix = self
             .blocks
             .iter()
-            .zip(blocks)
-            .take_while(|(a, b)| a.block == **b)
+            .take(blocks.len())
+            .enumerate()
+            .take_while(|(ix, cached)| same(cached, *ix))
             .count();
         if prefix != self.blocks.len() || prefix != blocks.len() {
             let suffix = self.blocks[prefix..]
                 .iter()
                 .rev()
-                .zip(blocks[prefix..].iter().rev())
-                .take_while(|(a, b)| a.block == **b)
+                .zip((prefix..blocks.len()).rev())
+                .take_while(|(cached, ix)| same(cached, *ix))
                 .count();
             let mut next = self.blocks[..prefix].to_vec();
             next.extend(
-                blocks[prefix..blocks.len() - suffix]
-                    .iter()
-                    .cloned()
-                    .map(|block| Rc::new(CachedBlock::new(block))),
+                (prefix..blocks.len() - suffix)
+                    .map(|ix| Rc::new(CachedBlock::new(blocks[ix].clone(), marks(ix).to_vec()))),
             );
             next.extend_from_slice(&self.blocks[self.blocks.len() - suffix..]);
             // An unchanged suffix can acquire a different preceding margin.
@@ -93,10 +103,10 @@ impl BlockCache {
 
     /// Where the first block matching `find` was in the window when last
     /// laid out, on screen or not.
-    pub fn top_of(&self, find: impl Fn(&Block) -> bool) -> Option<Pixels> {
+    pub fn top_of(&self, find: impl Fn(&CachedBlock) -> bool) -> Option<Pixels> {
         self.blocks
             .iter()
-            .find(|block| find(&block.block))
+            .find(|block| find(block))
             .and_then(|block| block.top.get())
     }
 
@@ -236,7 +246,7 @@ mod tests {
 
     fn measured(names: &[&str]) -> BlockCache {
         let mut cache = BlockCache::default();
-        cache.prepare(&blocks(names), px(400.));
+        cache.prepare(&blocks(names), None, px(400.));
         for (i, block) in cache.blocks.iter().enumerate() {
             block.height.set(Some(px((i + 1) as f32 * 10.)));
         }
@@ -254,7 +264,7 @@ mod tests {
     #[test]
     fn retains_unchanged_heights_and_remeasures_changed_neighbor() {
         let mut cache = measured(&["a", "b", "c", "d"]);
-        cache.prepare(&blocks(&["a", "changed", "c", "d"]), px(400.));
+        cache.prepare(&blocks(&["a", "changed", "c", "d"]), None, px(400.));
         assert_eq!(
             heights(&cache),
             vec![Some(px(10.)), None, None, Some(px(40.))]
@@ -262,25 +272,55 @@ mod tests {
     }
 
     #[test]
+    fn a_block_whose_marks_change_is_measured_again() {
+        use crate::markup_view::Mark;
+        let mut cache = measured(&["a", "b", "c"]);
+        let mark = |hunk| TextMark {
+            path: vec![1],
+            text: 0..1,
+            mark: Mark {
+                hunk,
+                deleted: false,
+                point: false,
+            },
+        };
+        let marks = |hunk| Marks {
+            blocks: vec![Vec::new(), vec![mark(hunk)]],
+            fields: Vec::new(),
+        };
+        cache.prepare(&blocks(&["a", "b", "c"]), Some(&marks(0)), px(400.));
+        assert_eq!(heights(&cache), vec![Some(px(10.)), None, None]);
+        cache.blocks[1].height.set(Some(px(20.)));
+        cache.blocks[2].height.set(Some(px(30.)));
+        cache.prepare(&blocks(&["a", "b", "c"]), Some(&marks(0)), px(400.));
+        assert_eq!(
+            heights(&cache),
+            vec![Some(px(10.)), Some(px(20.)), Some(px(30.))]
+        );
+        cache.prepare(&blocks(&["a", "b", "c"]), Some(&marks(1)), px(400.));
+        assert_eq!(heights(&cache), vec![Some(px(10.)), None, None]);
+    }
+
+    #[test]
     fn preserves_suffix_heights_across_insertions_and_deletions() {
         let mut cache = measured(&["a", "b", "c", "d"]);
-        cache.prepare(&blocks(&["a", "new", "b", "c", "d"]), px(400.));
+        cache.prepare(&blocks(&["a", "new", "b", "c", "d"]), None, px(400.));
         assert_eq!(
             heights(&cache),
             vec![Some(px(10.)), None, None, Some(px(30.)), Some(px(40.))]
         );
-        cache.prepare(&blocks(&["c", "d"]), px(400.));
+        cache.prepare(&blocks(&["c", "d"]), None, px(400.));
         assert_eq!(heights(&cache), vec![None, Some(px(40.))]);
-        cache.prepare(&[], px(400.));
+        cache.prepare(&[], None, px(400.));
         assert!(cache.blocks.is_empty());
     }
 
     #[test]
     fn appending_preserves_all_existing_heights() {
         let mut cache = measured(&["a", "b"]);
-        cache.prepare(&blocks(&["a", "b", "new"]), px(400.));
+        cache.prepare(&blocks(&["a", "b", "new"]), None, px(400.));
         assert_eq!(heights(&cache), vec![Some(px(10.)), Some(px(20.)), None]);
-        cache.prepare(&blocks(&["a", "b"]), px(400.));
+        cache.prepare(&blocks(&["a", "b"]), None, px(400.));
         assert_eq!(heights(&cache), vec![Some(px(10.)), Some(px(20.))]);
     }
 
@@ -290,11 +330,11 @@ mod tests {
         let scroll = ScrollHandle::new();
         scroll.set_offset(point(px(-30.), px(0.)));
         cache.blocks[0].scrolls.borrow_mut().insert(1, scroll);
-        cache.prepare(&blocks(&["a", "b"]), px(500.));
+        cache.prepare(&blocks(&["a", "b"]), None, px(500.));
         assert_eq!(heights(&cache), vec![None, None]);
         cache.blocks[0].height.set(Some(px(40.)));
         cache.clear();
-        cache.prepare(&blocks(&["a", "b"]), px(500.));
+        cache.prepare(&blocks(&["a", "b"]), None, px(500.));
         assert_eq!(heights(&cache), vec![None, None]);
         assert_eq!(cache.blocks[0].scrolls.borrow()[&1].offset().x, px(-30.));
     }
@@ -314,7 +354,7 @@ mod tests {
         scroll.set_offset(point(px(-30.), px(0.)));
         cache.blocks[1].scrolls.borrow_mut().insert(1, scroll);
 
-        cache.prepare(&blocks(&["new", "a", "b"]), px(400.));
+        cache.prepare(&blocks(&["new", "a", "b"]), None, px(400.));
         assert_eq!(
             cache.texts().keys().copied().collect::<Vec<_>>(),
             vec![(1, 1), (2, 1)]
@@ -322,7 +362,7 @@ mod tests {
         assert_eq!(cache.texts()[&(2, 1)].as_ref(), "last 世界");
         assert_eq!(cache.blocks[2].scrolls.borrow()[&1].offset().x, px(-30.));
 
-        cache.prepare(&blocks(&["b"]), px(400.));
+        cache.prepare(&blocks(&["b"]), None, px(400.));
         assert_eq!(
             cache.texts().keys().copied().collect::<Vec<_>>(),
             vec![(0, 1)]
@@ -356,7 +396,7 @@ mod tests {
     fn identical_documents_keep_the_same_cached_blocks() {
         let mut cache = measured(&["a", "b"]);
         let first = cache.blocks[0].clone();
-        cache.prepare(&blocks(&["a", "b"]), px(400.));
+        cache.prepare(&blocks(&["a", "b"]), None, px(400.));
         assert!(Rc::ptr_eq(&first, &cache.blocks[0]));
     }
 }

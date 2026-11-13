@@ -16,7 +16,8 @@ use draftmux_core::history::EditLog;
 use draftmux_core::review::ReviewState;
 use draftmux_storage::{Edit, History};
 
-use crate::compare::{self, Side};
+use draftmux_core::decorations::Side;
+use draftmux_core::diff::compare;
 
 fn measure(name: &str, mut work: impl FnMut()) -> (f64, f64) {
     for _ in 0..5 {
@@ -202,7 +203,7 @@ fn typing_positions(base: &str, text: &str) -> [(&'static str, usize); 3] {
     let middle = text[text.len() / 2..]
         .find("\n")
         .map_or(text.len(), |at| text.len() / 2 + at);
-    let comparison = compare::compare(base, text);
+    let comparison = compare(base, text);
     let change = comparison
         .hunks
         .iter()
@@ -255,7 +256,7 @@ fn review_typing() {
             ("light", lightly_edited(&text)),
             ("heavy", heavily_rewritten(&text)),
         ] {
-            let hunks = compare::compare(&base, &text).hunks.len();
+            let hunks = compare(&base, &text).hunks.len();
             eprintln!(
                 "{size_name}/{base_name}: {} bytes, base {} bytes, {hunks} changes",
                 text.len(),
@@ -274,38 +275,47 @@ fn review_typing() {
                     black_box(sync_closed(text, &mut review));
                 });
                 // What the open review adds on each keystroke once the
-                // comparison is done: both columns' redlines, as `marked`
-                // alone and with the parse, and their element trees.
-                let comparison = compare::compare(&base, &text);
-                let marked = measure(&format!("{name}/marked"), || {
-                    for side in [Side::Before, Side::After] {
-                        black_box(compare::marked(&comparison, side, &[]));
-                    }
+                // comparison is done: the After column's parse, which the
+                // preview takes when review closes (the Before column's is
+                // parsed once per baseline); both columns' marks; and their
+                // element trees.
+                let compared = review.compare(&text).unwrap();
+                let before = crate::markup_view::preview_mapped(target, &base);
+                let parse = measure(&format!("{name}/after-parse"), || {
+                    black_box(crate::markup_view::preview_mapped(target, &text));
                 });
-                let redline = measure(&format!("{name}/redline"), || {
-                    for side in [Side::Before, Side::After] {
-                        black_box(crate::markup_view::redline(&comparison, side, target));
-                    }
+                let after = crate::markup_view::preview_mapped(target, &text);
+                let redline =
+                    |side, mapped| crate::markup_view::redline(mapped, &compared.decorations, side);
+                let marks = measure(&format!("{name}/marks"), || {
+                    black_box(redline(Side::Before, &before));
+                    black_box(redline(Side::After, &after));
                 });
-                let documents = [Side::Before, Side::After]
-                    .map(|side| crate::markup_view::redline(&comparison, side, target));
-                let mut style = crate::markup_view::style(target, false);
-                style.redline = Some(Rc::new(crate::markup_view::Redline {
-                    selected: None,
-                    hovered: None,
-                    kept: vec![false; comparison.hunks.len()],
-                    colors: crate::markup_view::RedlineColors::new(&palette),
-                    handlers: Rc::new(crate::inline_text::MarkHandlers {
-                        click: Rc::new(|_, _, _| {}),
-                        hover: Rc::new(|_, _| {}),
-                        placed: Rc::new(|_, _| {}),
-                    }),
-                }));
+                let columns = [redline(Side::Before, &before), redline(Side::After, &after)];
+                let styled = |marks| {
+                    let mut style = crate::markup_view::style(target, false);
+                    style.redline = Some(Rc::new(crate::markup_view::Redline {
+                        marks,
+                        selected: None,
+                        hovered: None,
+                        kept: vec![false; compared.comparison.hunks.len()],
+                        colors: crate::markup_view::RedlineColors::new(&palette),
+                        handlers: Rc::new(crate::inline_text::MarkHandlers {
+                            click: Rc::new(|_, _, _| {}),
+                            hover: Rc::new(|_, _| {}),
+                            placed: Rc::new(|_, _| {}),
+                        }),
+                    }));
+                    style
+                };
+                let styles = columns
+                    .each_ref()
+                    .map(|column| styled(column.marks.clone()));
                 let tree = measure(&format!("{name}/element-tree"), || {
-                    for document in &documents {
+                    for (column, style) in columns.iter().zip(&styles) {
                         black_box(crate::markup_view::render(
-                            document,
-                            &style,
+                            &column.document,
+                            style,
                             "benchmark",
                             None,
                         ));
@@ -318,32 +328,34 @@ fn review_typing() {
                     text.insert(*at, typed.next().unwrap());
                     *at += 1;
                     black_box(sync_closed(text, &mut review));
-                    let comparison = review.comparison().unwrap();
-                    for side in [Side::Before, Side::After] {
-                        let document = crate::markup_view::redline(comparison, side, target);
+                    let compared = review.compare(text).unwrap();
+                    let after = crate::markup_view::preview_mapped(target, text);
+                    for (side, mapped) in [(Side::Before, &before), (Side::After, &after)] {
+                        let column =
+                            crate::markup_view::redline(mapped, &compared.decorations, side);
                         black_box(crate::markup_view::render(
-                            &document,
-                            &style,
+                            &column.document,
+                            &styled(column.marks),
                             "benchmark",
                             None,
                         ));
                     }
                 });
-                rows.push((name, closed, marked, redline, tree, open));
+                rows.push((name, closed, parse, marks, tree, open));
             }
         }
     }
     eprintln!(
-        "\n| Draft | Closed: compare + count | Open: marked | Open: redline docs | Open: element trees | Open: total |"
+        "\n| Draft | Closed: compare + count | Open: after parse | Open: marks | Open: element trees | Open: total |"
     );
     eprintln!("| --- | --- | --- | --- | --- | --- |");
-    for (name, closed, marked, redline, tree, open) in rows {
+    for (name, closed, parse, marks, tree, open) in rows {
         let cell = |(median, p95): (f64, f64)| format!("{median:.2} / {p95:.2}");
         eprintln!(
             "| {name} | {} | {} | {} | {} | {} |",
             cell(closed),
-            cell(marked),
-            cell(redline),
+            cell(parse),
+            cell(marks),
             cell(tree),
             cell(open)
         );

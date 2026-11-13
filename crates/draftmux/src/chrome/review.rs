@@ -12,6 +12,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
+use draftmux_core::decorations::Side;
+use draftmux_core::diff::Hunk;
 use draftmux_core::review::{Compared, Origin};
 use draftmux_core::session::Outcome;
 use draftmux_storage::Target;
@@ -20,14 +22,12 @@ use gpui::{
     Pixels, Point, SharedString, StyleRefinement, Task, Transformation, Window, actions, anchored,
     deferred, div, linear_color_stop, linear_gradient, percentage, point, prelude::*, px, svg,
 };
-use markup::Document;
 
 use super::preview::{Preview, PreviewRedline};
 use super::{Chrome, shadow};
 use crate::assets::CHEVRON_ICON;
-use crate::compare::{Hunk, Side};
 use crate::drafts::relative_time;
-use crate::markup_view;
+use crate::markup_view::{self, Mapped, Redlined};
 use crate::menu::{MenuItem, menu_panel};
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::theme::Palette;
@@ -81,15 +81,63 @@ pub(super) struct Review {
     reveal: Option<(usize, u64)>,
     /// Both columns' documents and what they were made from.
     documents: Option<Documents>,
+    /// The text before the compared edits, parsed for the target. It
+    /// changes only with the baseline.
+    before: Option<Parsed>,
+    /// The draft parsed for the target, which the preview shows when
+    /// review closes.
+    after: Option<Parsed>,
+}
+
+/// A text parsed for a target.
+#[derive(Clone)]
+struct Parsed {
+    text: String,
+    target: Target,
+    mapped: Rc<Mapped>,
+}
+
+impl Parsed {
+    /// `text` parsed for `target`, reusing `last` if it is that.
+    fn reuse(last: &mut Option<Parsed>, text: &str, target: Target) -> Rc<Mapped> {
+        match last {
+            Some(parsed) if parsed.target == target && parsed.text == text => parsed.mapped.clone(),
+            _ => {
+                let mapped = Rc::new(markup_view::preview_mapped(target, text));
+                *last = Some(Parsed {
+                    text: text.to_owned(),
+                    target,
+                    mapped: mapped.clone(),
+                });
+                mapped
+            }
+        }
+    }
 }
 
 /// The two columns: the text before the compared edits, and now.
 #[derive(Clone)]
 pub(super) struct Documents {
-    before: Rc<Document>,
-    after: Rc<Document>,
+    before: Column,
+    after: Column,
     compared: Rc<Compared>,
     target: Target,
+}
+
+/// One column's redline and frontmatter.
+#[derive(Clone)]
+struct Column {
+    redlined: Rc<Redlined>,
+    fields: markup::frontmatter::Fields,
+}
+
+impl Column {
+    fn new(mapped: &Mapped, compared: &Compared, side: Side) -> Self {
+        Self {
+            redlined: Rc::new(markup_view::redline(mapped, &compared.decorations, side)),
+            fields: mapped.fields.clone(),
+        }
+    }
 }
 
 /// How both columns draw the changes.
@@ -137,12 +185,11 @@ impl Chrome {
                         documents.clone()
                     }
                     _ => {
-                        let side = |side| {
-                            Rc::new(markup_view::redline(&compared.comparison, side, target))
-                        };
+                        let before = Parsed::reuse(&mut review.before, &compared.base, target);
+                        let after = Parsed::reuse(&mut review.after, &compared.text, target);
                         let documents = Documents {
-                            before: side(Side::Before),
-                            after: side(Side::After),
+                            before: Column::new(&before, &compared, Side::Before),
+                            after: Column::new(&after, &compared, Side::After),
                             compared: compared.clone(),
                             target,
                         };
@@ -183,7 +230,7 @@ impl Chrome {
 
     fn preview_redline(
         &self,
-        document: Rc<Document>,
+        column: Column,
         marks: &Marks,
         cx: &mut Context<Self>,
     ) -> PreviewRedline {
@@ -204,7 +251,9 @@ impl Chrome {
             )
         };
         PreviewRedline {
-            document,
+            document: column.redlined.document.clone(),
+            marks: column.redlined.marks.clone(),
+            fields: column.fields,
             selected: marks.selected,
             hovered: marks.hovered,
             kept: marks.kept.clone(),
@@ -245,9 +294,10 @@ impl Chrome {
     }
 
     pub(super) fn close_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.review.take().is_none() {
+        let Some(review) = self.review.take() else {
             return;
-        }
+        };
+        self.catch_up_preview(review.after, cx);
         self.session.review_mut().select(None);
         self.editor
             .update(cx, |editor, cx| editor.set_marked(None, cx));
@@ -259,6 +309,30 @@ impl Chrome {
             }
         }
         self.sync_review(cx);
+    }
+
+    /// Gives the preview the text edited while review showed in its place,
+    /// from review's parse of it when that is current.
+    fn catch_up_preview(&mut self, parsed: Option<Parsed>, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).text();
+        let Some(target) = self
+            .session
+            .drafts()
+            .current()
+            .map(|draft| draft.meta.target)
+        else {
+            return;
+        };
+        if self.preview_source == text && self.preview.read(cx).target == Some(target) {
+            return;
+        }
+        let document = match parsed {
+            Some(parsed) if parsed.text == text && parsed.target == target => {
+                (*parsed.mapped.document).clone()
+            }
+            _ => markup_view::preview(target, text),
+        };
+        self.set_preview(Some(document), cx);
     }
 
     /// Selects change `selected`, or nothing, in the redline and the editor.

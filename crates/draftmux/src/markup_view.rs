@@ -9,16 +9,20 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
+use draftmux_core::decorations::{Decoration, DecorationKind, Side};
 use draftmux_storage::Target;
 use gpui::{
     AnyElement, App, Bounds, Div, ElementId, Entity, FontWeight, HighlightStyle, Hsla, Pixels,
     Point, ScrollHandle, SharedString, StyledText, Task, Window, div, point, prelude::*, px,
     relative, rgba, svg,
 };
+use markup::frontmatter::{FieldMap, Fields};
 use markup::slack::{CodeLanguage, DiffRole};
+use markup::source_map::SourceMap;
 use markup::{AlertKind, Alignment, Block, Document, List, Span, Table};
 
 use crate::assets::{
@@ -26,7 +30,6 @@ use crate::assets::{
     LINK_ICON, SLACK_COPY_ICON,
 };
 use crate::block_cache::BlockCache;
-use crate::compare::{self, Mark};
 use crate::inline_text::{Chip, Icon, InlineText, MarkHandlers, Segment, SegmentMark, is_emoji};
 use crate::selectable::{Select, TextRegistry, TextSelection};
 use crate::theme::Palette;
@@ -119,8 +122,8 @@ pub struct MarkupStyle {
     /// Colors of the footnotes [`render_preview`] puts on blocks Slack posts
     /// differently; `None` hides them.
     pub notes: Option<NoteColors>,
-    /// Draws the changes marked in a redline ([`compare::marked`]); `None`
-    /// for text without marks.
+    /// Draws a review's changes on the text ([`redline`]); `None` outside
+    /// review.
     pub redline: Option<Rc<Redline>>,
 }
 
@@ -128,9 +131,11 @@ pub struct MarkupStyle {
 /// insertions on a green tint, deletions struck through on a red one. Kept
 /// changes lose the tint, insertions underlined and deletions faded; the
 /// selected change is outlined, and the hovered one more faintly. Where
-/// a change has no text on this side ([`compare::POINT`]), a bar marks its
-/// place while it is selected or hovered.
+/// a change has no text on this side, a bar ([`POINT`]) marks its place
+/// while it is selected or hovered.
 pub struct Redline {
+    /// Where the document's changes are.
+    pub marks: Rc<Marks>,
     pub selected: Option<usize>,
     pub hovered: Option<usize>,
     /// Whether each hunk is kept.
@@ -165,8 +170,57 @@ impl RedlineColors {
     }
 }
 
+/// What a point is drawn on: a hair space, shown as a bar.
+pub const POINT: &str = "\u{200A}";
+
+/// A change drawn on text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    /// The change, by index in the comparison's hunks.
+    pub hunk: usize,
+    /// Drawn as removed text rather than added text.
+    pub deleted: bool,
+    /// A bar where the change's text is missing, rather than the text.
+    pub point: bool,
+}
+
+/// A mark on part of the text of the node at `path` in a document's
+/// [`SourceMap`]. An empty `text` is a point between two characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextMark {
+    pub path: Vec<usize>,
+    pub text: Range<usize>,
+    pub mark: Mark,
+}
+
+/// Where a redline's changes show: on the text of each block the preview
+/// draws, and on the frontmatter's fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// By top-level block; each mark's path starts with the block's index.
+    pub blocks: Vec<Vec<TextMark>>,
+    /// By field index, in text order.
+    pub fields: Vec<(usize, Mark)>,
+}
+
+impl Marks {
+    /// The marks on top-level block `ix`.
+    pub fn block(&self, ix: usize) -> &[TextMark] {
+        self.blocks.get(ix).map_or(&[], Vec::as_slice)
+    }
+
+    /// The marks on field `ix`.
+    pub fn field(&self, ix: usize) -> impl Iterator<Item = Mark> + '_ {
+        self.fields
+            .iter()
+            .filter(move |(field, _)| *field == ix)
+            .map(|(_, mark)| *mark)
+    }
+}
+
 impl Redline {
-    fn style(&self, segment: &mut Segment, mark: Mark, point: bool) {
+    fn style(&self, segment: &mut Segment, mark: Mark) {
+        let point = mark.point;
         let colors = self.colors;
         let kept = self.kept.get(mark.hunk).copied().unwrap_or(false);
         let (color, background) = if mark.deleted {
@@ -735,17 +789,17 @@ pub fn render(
     select: Option<SelectBody>,
 ) -> AnyElement {
     let mut renderer = Renderer::new(style, select);
-    let blocks = if style.slack_fallbacks {
-        let posted = markup::slack::posted(doc);
-        renderer.decorated_blocks(
-            posted.iter().map(|(block, _)| block),
-            style.block_gap,
-            |_, block| block,
-        )
-    } else {
-        renderer.blocks(&doc.blocks, style.block_gap)
-    };
+    let blocks = renderer.body(doc);
     root(style).id(id).children(blocks).into_any_element()
+}
+
+/// The text [`render`] draws for `doc`: each text's path in the
+/// document's [`SourceMap`] and its segments, with any redline marks.
+#[cfg(any(test, feature = "capture"))]
+pub fn drawn(doc: &Document, style: &MarkupStyle) -> Vec<(Vec<usize>, Vec<Segment>)> {
+    let mut renderer = Renderer::new(style, None);
+    renderer.body(doc);
+    renderer.drawn
 }
 
 /// Renders `doc` like [`render`], with a numbered footnote on each block
@@ -773,7 +827,7 @@ pub fn render_preview(
         } else {
             &doc.blocks
         };
-        cache.prepare(blocks, width);
+        cache.prepare(blocks, redline_marks(&style), width);
         let renderer = Renderer::new(&style, None);
         let blocks = blocks
             .iter()
@@ -802,7 +856,7 @@ pub fn render_preview(
         .filter_map(|(ix, (_, note))| note.map(|note| (ix, note)))
         .collect();
     let posted: Vec<Block> = posted.into_iter().map(|(block, _)| block).collect();
-    cache.prepare(&posted, width);
+    cache.prepare(&posted, redline_marks(&style), width);
     let renderer = Renderer::new(&style, None);
     let blocks = posted
         .iter()
@@ -936,6 +990,11 @@ pub fn render_preview(
         .into_any_element()
 }
 
+/// The marks `style` draws, if it draws a redline.
+fn redline_marks(style: &MarkupStyle) -> Option<&Marks> {
+    style.redline.as_ref().map(|redline| &*redline.marks)
+}
+
 /// Each cached top-level block owns a selection body and local element ids.
 fn cached_block(
     cache: &BlockCache,
@@ -954,6 +1013,8 @@ fn cached_block(
         });
         let mut renderer = Renderer::new(&style, select);
         renderer.scrolls = Some(entry.scrolls.clone());
+        renderer.path = vec![index];
+        renderer.marks = &entry.marks;
         let block = renderer.block(&entry.block);
         entry
             .scrolls
@@ -1053,35 +1114,150 @@ pub fn preview(target: Target, text: &str) -> Document {
     }
 }
 
-/// One side of a comparison parsed for `target` with its changes marked
-/// ([`redlined`]).
-pub fn redline(comparison: &compare::Comparison, side: compare::Side, target: Target) -> Document {
-    redlined(comparison, side, target).1
+/// A draft parsed for previewing on a target, with where its text came
+/// from.
+pub struct Mapped {
+    pub document: Rc<Document>,
+    pub fields: Fields,
+    /// The map of the blocks the preview draws: for Slack, of what Slack
+    /// posts ([`markup::slack::posted_mapped`]).
+    map: SourceMap,
+    field_map: FieldMap,
+    /// Where the body starts in the draft, after its frontmatter.
+    body_offset: usize,
 }
 
-/// One side of a comparison with its changes marked ([`compare::marked`]),
-/// and the document it parses to for `target`. A change whose marks that
-/// document wouldn't show, such as one only in a heading's marker or in
-/// frontmatter, is marked with a point instead, and only then is the text
-/// parsed again.
-pub fn redlined(
-    comparison: &compare::Comparison,
-    side: compare::Side,
-    target: Target,
-) -> (String, Document) {
-    let text = compare::marked(comparison, side, &[]);
-    let doc = preview(target, &text);
-    let unseen: Vec<usize> = compare::shown_hunks(&doc.blocks, comparison.hunks.len())
-        .into_iter()
-        .enumerate()
-        .filter_map(|(hunk, shown)| (!shown).then_some(hunk))
-        .collect();
-    if unseen.is_empty() {
-        return (text, doc);
+/// [`preview`], with its source maps. Mapping costs about a third more
+/// than parsing, so only a review asks for it.
+pub fn preview_mapped(target: Target, text: &str) -> Mapped {
+    let _timing = editor::timing::span("preview-parse");
+    let (draft, field_map) = markup::frontmatter::parse_mapped(text);
+    let body = draft.body;
+    let (document, map) = match target {
+        Target::Github => markup::github::parse_mapped(body),
+        Target::Slack => {
+            let (document, map) = markup::slack::parse_mapped(body);
+            let map = markup::slack::posted_mapped(&document, &map).1;
+            (document, map)
+        }
+        Target::Rich => {
+            let (document, map) = markup::github::parse_mapped(body);
+            markup::rich_text::pasted_mapped(&document, &map)
+        }
+        Target::Plain => markup::plain::parse_mapped(body),
+    };
+    Mapped {
+        document: Rc::new(document),
+        fields: draft.fields,
+        map,
+        field_map,
+        body_offset: draft.body_offset,
     }
-    let text = compare::marked(comparison, side, &unseen);
-    let doc = preview(target, &text);
-    (text, doc)
+}
+
+/// One side of a review: the side's document, and where its changes show.
+pub struct Redlined {
+    /// The side's [`Mapped::document`], with an empty paragraph at the end
+    /// to hold the points that have no text to stand by.
+    pub document: Rc<Document>,
+    pub marks: Rc<Marks>,
+}
+
+/// Finds where `side`'s decorations show in `mapped`, that side's text
+/// parsed for the preview. A change in the frontmatter marks the fields it
+/// touches; one in the body marks the text its source map finds there, or
+/// a point where it has no text, such as a heading's level or a link's URL.
+pub fn redline(mapped: &Mapped, decorations: &[Decoration], side: Side) -> Redlined {
+    let offset = mapped.body_offset;
+    let mut marks = Marks {
+        blocks: vec![Vec::new(); mapped.map.blocks.len()],
+        fields: Vec::new(),
+    };
+    let mut alone = Vec::new();
+    for decoration in decorations
+        .iter()
+        .filter(|decoration| decoration.side == side)
+    {
+        let range = decoration.range.clone();
+        let mark = Mark {
+            hunk: decoration.hunk,
+            // A point shows where the other side's text is.
+            deleted: match decoration.kind {
+                DecorationKind::Deleted => true,
+                DecorationKind::Inserted => false,
+                DecorationKind::Point => side == Side::After,
+            },
+            point: decoration.kind == DecorationKind::Point,
+        };
+        for field in mapped.field_map.locate(range.clone()) {
+            marks.fields.push((field, mark));
+        }
+        if range.end <= offset && !(range.is_empty() && range.start >= offset) {
+            continue;
+        }
+        let body = range.start.max(offset) - offset..range.end.max(offset) - offset;
+        let fragments = mapped.map.locate(body);
+        if fragments.is_empty() {
+            alone.push(mark);
+        }
+        for fragment in fragments {
+            let mark = Mark {
+                point: mark.point || fragment.text.is_empty(),
+                ..mark
+            };
+            marks.blocks[fragment.path[0]].push(TextMark {
+                path: fragment.path,
+                text: fragment.text,
+                mark,
+            });
+        }
+    }
+    let document = if alone.is_empty() {
+        mapped.document.clone()
+    } else {
+        let mut document = (*mapped.document).clone();
+        let ix = document.blocks.len();
+        document.blocks.push(Block::Paragraph(Vec::new()));
+        marks.blocks.resize(ix, Vec::new());
+        marks.blocks.push(
+            alone
+                .into_iter()
+                .map(|mark| TextMark {
+                    path: vec![ix],
+                    text: 0..0,
+                    mark,
+                })
+                .collect(),
+        );
+        Rc::new(document)
+    };
+    Redlined {
+        document,
+        marks: Rc::new(marks),
+    }
+}
+
+/// Field `index`'s `value` with the review's changes to it drawn: the whole
+/// value as changed, and a bar after it where the other side has text.
+pub fn field_value(value: &str, index: usize, redline: &Redline) -> InlineText {
+    let mut segment = Segment {
+        text: SharedString::from(value.to_owned()),
+        ..Segment::default()
+    };
+    let marks: Vec<Mark> = redline.marks.field(index).collect();
+    if let Some(&mark) = marks.iter().find(|mark| !mark.point) {
+        redline.style(&mut segment, mark);
+    }
+    let points = marks.iter().filter(|mark| mark.point).map(|&mark| {
+        let mut point = Segment {
+            text: POINT.into(),
+            ..Segment::default()
+        };
+        redline.style(&mut point, mark);
+        point
+    });
+    let segments = std::iter::once(segment).chain(points).collect();
+    InlineText::new(segments).marks(Some(redline.handlers.clone()))
 }
 
 /// The preview style for `target` in the light or dark appearance.
@@ -1109,8 +1285,98 @@ struct Renderer<'a> {
     select: Option<SelectBody>,
     /// Selectable paragraphs rendered so far, which numbers the next.
     paragraphs: usize,
-    /// The redline mark open at the end of the text rendered so far.
-    open_mark: Option<Mark>,
+    /// The node being rendered, as a path in the document's
+    /// [`SourceMap`].
+    path: Vec<usize>,
+    /// The redline's marks on the top-level block being rendered.
+    marks: &'a [TextMark],
+    /// Each text's path and segments, as drawn.
+    #[cfg(any(test, feature = "capture"))]
+    drawn: Vec<(Vec<usize>, Vec<Segment>)>,
+}
+
+/// A segment, and the part of its node's text it shows.
+struct Placed {
+    segment: Segment,
+    source: Range<usize>,
+    /// The node's text where the segment shows something else for it, as a
+    /// curled quote for a straight one. Equal in characters.
+    replaced: Option<String>,
+    /// Shows something other than its text, such as a mention's name, so a
+    /// mark takes it whole.
+    whole: bool,
+}
+
+impl Placed {
+    fn new(segment: Segment, source: Range<usize>) -> Self {
+        Self {
+            segment,
+            source,
+            replaced: None,
+            whole: false,
+        }
+    }
+
+    /// Where `at`, an offset in the node's text inside this segment, is in
+    /// the segment's text.
+    fn local(&self, at: usize) -> usize {
+        let at = at - self.source.start;
+        match &self.replaced {
+            None => at,
+            Some(text) => {
+                let chars = text[..at].chars().count();
+                let shown = &self.segment.text;
+                shown
+                    .char_indices()
+                    .nth(chars)
+                    .map_or(shown.len(), |(ix, _)| ix)
+            }
+        }
+    }
+}
+
+/// The characters `segments` show as written, by where they are in the
+/// node's text.
+fn shown_chars(segments: &[Placed]) -> Vec<(usize, char)> {
+    segments
+        .iter()
+        .filter(|placed| placed.replaced.is_none() && !placed.whole)
+        .flat_map(|placed| {
+            placed
+                .segment
+                .text
+                .char_indices()
+                .map(|(at, c)| (placed.source.start + at, c))
+        })
+        .collect()
+}
+
+/// `range` without the whitespace that ends it, unless that is all of it.
+fn trim_end(shown: &[(usize, char)], range: Range<usize>) -> Range<usize> {
+    let mut end = range.end;
+    while let Some(&(at, _)) = shown
+        .iter()
+        .find(|(at, c)| at + c.len_utf8() == end && *at >= range.start)
+        .filter(|(_, c)| c.is_whitespace())
+    {
+        end = at;
+    }
+    match range.start < end {
+        true => range.start..end,
+        false => range,
+    }
+}
+
+/// Where `at`, an offset in `shown`, is in `text`, which has as many
+/// characters.
+fn unreplaced(text: &str, shown: &str, at: usize) -> usize {
+    if text.len() == shown.len() {
+        return at;
+    }
+    let chars = shown[..at].chars().count();
+    text.char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(ix, _)| ix)
 }
 
 impl<'a> Renderer<'a> {
@@ -1124,7 +1390,21 @@ impl<'a> Renderer<'a> {
             heading_size: None,
             select,
             paragraphs: 0,
-            open_mark: None,
+            path: Vec::new(),
+            marks: &[],
+            #[cfg(any(test, feature = "capture"))]
+            drawn: Vec::new(),
+        }
+    }
+
+    /// `doc`'s blocks, or for Slack what Slack posts.
+    fn body(&mut self, doc: &Document) -> Vec<AnyElement> {
+        let gap = self.style.block_gap;
+        if self.style.slack_fallbacks {
+            let posted = markup::slack::posted(doc);
+            self.decorated_blocks(posted.iter().map(|(block, _)| block), gap, |_, block| block)
+        } else {
+            self.blocks(&doc.blocks, gap)
         }
     }
 
@@ -1142,36 +1422,121 @@ impl<'a> Renderer<'a> {
 
     /// `text` in the surrounding style, selectable like other paragraphs.
     fn plain(&mut self, text: &str) -> InlineText {
-        self.inline(vec![Segment {
+        let segment = Segment {
             text: SharedString::from(text.to_owned()),
             ..Segment::default()
-        }])
-        .selectable(self.select())
+        };
+        self.inline(vec![Placed::new(segment, 0..text.len())])
+            .selectable(self.select())
     }
 
-    /// `segments` as inline text, with any redline marks in them drawn.
-    fn inline(&mut self, segments: Vec<Segment>) -> InlineText {
-        let Some(redline) = self.style.redline.clone() else {
-            return InlineText::new(segments);
+    /// The text of the node being rendered, in `segments`, with the
+    /// redline's marks on it drawn.
+    fn inline(&mut self, segments: Vec<Placed>) -> InlineText {
+        let all = self.marks;
+        let marks: Vec<&TextMark> = all.iter().filter(|mark| mark.path == self.path).collect();
+        let segments = self.marked(segments, &marks);
+        #[cfg(any(test, feature = "capture"))]
+        self.drawn.push((self.path.clone(), segments.clone()));
+        let handlers = self
+            .style
+            .redline
+            .as_ref()
+            .map(|redline| redline.handlers.clone());
+        InlineText::new(segments).marks(handlers)
+    }
+
+    /// `segments` split where `marks` start and end, with each part a mark
+    /// covers drawn as that mark, and a [`POINT`] at each empty mark. A mark
+    /// with visible text leaves the whitespace that ends it untinted.
+    fn marked(&self, segments: Vec<Placed>, marks: &[&TextMark]) -> Vec<Segment> {
+        let Some(redline) = self.style.redline.as_deref().filter(|_| !marks.is_empty()) else {
+            return segments.into_iter().map(|placed| placed.segment).collect();
         };
-        let mut marked = Vec::with_capacity(segments.len());
-        for segment in segments {
-            for (mark, run) in compare::split_marks(&segment.text, &mut self.open_mark) {
-                let text = match run {
-                    compare::Run::Text(text) => text,
-                    compare::Run::Point => compare::POINT,
-                };
-                let mut piece = Segment {
-                    text: text.to_owned().into(),
-                    ..segment.clone()
-                };
-                if let Some(mark) = mark {
-                    redline.style(&mut piece, mark, run == compare::Run::Point);
+        let (mut points, ranges): (Vec<&TextMark>, Vec<&TextMark>) =
+            marks.iter().partition(|mark| mark.text.is_empty());
+        let shown = shown_chars(&segments);
+        let ranges: Vec<TextMark> = ranges
+            .into_iter()
+            .map(|mark| TextMark {
+                text: trim_end(&shown, mark.text.clone()),
+                ..mark.clone()
+            })
+            .collect();
+        points.sort_by_key(|point| point.text.start);
+        let mut points = points.into_iter().peekable();
+        let point = |base: &Segment, mark: Mark| {
+            let mut segment = Segment {
+                text: POINT.into(),
+                strike: false,
+                chip: None,
+                link: None,
+                ..base.clone()
+            };
+            redline.style(
+                &mut segment,
+                Mark {
+                    point: true,
+                    ..mark
+                },
+            );
+            segment
+        };
+        let covering = |range: Range<usize>| {
+            ranges
+                .iter()
+                .find(|mark| mark.text.start <= range.start && range.end <= mark.text.end)
+                .map(|mark| mark.mark)
+        };
+        let mut out = Vec::with_capacity(segments.len() + marks.len() * 2);
+        for placed in segments {
+            let source = placed.source.clone();
+            while let Some(at) = points.next_if(|point| point.text.start <= source.start) {
+                out.push(point(&placed.segment, at.mark));
+            }
+            if placed.whole {
+                let mut segment = placed.segment;
+                let touched = ranges
+                    .iter()
+                    .find(|mark| mark.text.start < source.end && source.start < mark.text.end);
+                if let Some(mark) = touched {
+                    redline.style(&mut segment, mark.mark);
                 }
-                marked.push(piece);
+                out.push(segment);
+                continue;
+            }
+            let mut cuts: Vec<usize> = ranges
+                .iter()
+                .flat_map(|mark| [mark.text.start, mark.text.end])
+                .chain(points.clone().map(|point| point.text.start))
+                .filter(|&at| source.start < at && at < source.end)
+                .collect();
+            cuts.sort_unstable();
+            cuts.dedup();
+            let mut start = source.start;
+            for end in cuts.into_iter().chain([source.end]) {
+                if start < end || source.is_empty() {
+                    let text = &placed.segment.text[placed.local(start)..placed.local(end)];
+                    let mut segment = Segment {
+                        text: text.to_owned().into(),
+                        ..placed.segment.clone()
+                    };
+                    if let Some(mark) = covering(start..end) {
+                        redline.style(&mut segment, mark);
+                    }
+                    out.push(segment);
+                }
+                if end < source.end {
+                    while let Some(at) = points.next_if(|point| point.text.start <= end) {
+                        out.push(point(&placed.segment, at.mark));
+                    }
+                }
+                start = end;
             }
         }
-        InlineText::new(marked).marks(Some(redline.handlers.clone()))
+        let base = out.last().cloned().unwrap_or_default();
+        out.extend(points.map(|at| point(&base, at.mark)));
+        out
     }
 
     fn id(&mut self) -> ElementId {
@@ -1230,13 +1595,19 @@ impl<'a> Renderer<'a> {
         mut decorate: impl FnMut(usize, AnyElement) -> AnyElement,
     ) -> Vec<AnyElement> {
         let mut prev: Option<&Block> = None;
+        let top = self.path.is_empty();
         blocks
             .into_iter()
             .enumerate()
             .map(|(ix, block)| {
                 let gap = self.gap_before(block, prev, gap);
                 prev = Some(block);
+                if top && let Some(redline) = self.style.redline.as_deref() {
+                    self.marks = redline.marks.block(ix);
+                }
+                self.path.push(ix);
                 let block = self.block(block);
+                self.path.pop();
                 div()
                     .w_full()
                     .pt(gap)
@@ -1410,6 +1781,56 @@ impl<'a> Renderer<'a> {
                 .text_color(colors.line_number)
                 .children((1..=lines.len()).map(|n| line().child(n.to_string())))
         });
+        let all = self.marks;
+        let marks: Vec<&TextMark> = all.iter().filter(|mark| mark.path == self.path).collect();
+        let mut at = 0;
+        let mut code_lines = Vec::with_capacity(lines.len());
+        for text in &lines {
+            let source = at..at + text.len();
+            at = source.end + 1;
+            // A line with changes shows them, without its diff colors.
+            let on_line: Vec<&TextMark> = marks
+                .iter()
+                .filter(|mark| match mark.text.is_empty() {
+                    true => source.contains(&mark.text.start) || mark.text.start == source.end,
+                    false => mark.text.start < source.end && source.start < mark.text.end,
+                })
+                .copied()
+                .collect();
+            if !on_line.is_empty() {
+                let segment = Segment {
+                    text: SharedString::from(text.to_string()),
+                    ..Segment::default()
+                };
+                let segments = self.marked(vec![Placed::new(segment, source)], &on_line);
+                #[cfg(any(test, feature = "capture"))]
+                self.drawn.push((self.path.clone(), segments.clone()));
+                let handlers = style
+                    .redline
+                    .as_ref()
+                    .map(|redline| redline.handlers.clone());
+                code_lines.push(line().child(InlineText::new(segments).marks(handlers)));
+                continue;
+            }
+            #[cfg(any(test, feature = "capture"))]
+            self.drawn.push((
+                self.path.clone(),
+                vec![Segment {
+                    text: SharedString::from(text.to_string()),
+                    ..Segment::default()
+                }],
+            ));
+            let highlights = if lang == "diff" {
+                markup::slack::diff_line(text)
+                    .into_iter()
+                    .map(|(range, role)| (range, colors.highlight(role)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            code_lines
+                .push(line().child(StyledText::new(text.to_string()).with_highlights(highlights)));
+        }
         let code = div()
             .flex_none()
             .pr(px(20.))
@@ -1418,22 +1839,7 @@ impl<'a> Renderer<'a> {
             } else {
                 colors.text
             })
-            .children(lines.iter().map(|text| {
-                // Slack's code boxes don't show a redline's marks.
-                let text = match style.redline {
-                    Some(_) => compare::strip_marks(text),
-                    None => text.to_string(),
-                };
-                let highlights = if lang == "diff" {
-                    markup::slack::diff_line(&text)
-                        .into_iter()
-                        .map(|(range, role)| (range, colors.highlight(role)))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                line().child(StyledText::new(text).with_highlights(highlights))
-            }));
+            .children(code_lines);
         let header = div()
             .h(px(40.))
             .pl(px(12.))
@@ -1536,18 +1942,14 @@ impl<'a> Renderer<'a> {
                         .into_any_element(),
                     (None, None) => bullet(&style.bullet, bullet_kind, style.text_color),
                 };
+                self.path.push(ix);
+                let blocks = self.blocks(&item.blocks, inner_gap);
+                self.path.pop();
                 div()
                     .when(ix > 0, |this| this.pt(item_gap))
                     .flex()
                     .child(div().w(style.list_indent).flex_none().child(marker))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .children(self.blocks(&item.blocks, inner_gap)),
-                    )
+                    .child(div().flex_1().min_w_0().flex().flex_col().children(blocks))
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -1619,7 +2021,9 @@ impl<'a> Renderer<'a> {
                     Some(Alignment::Right) => cell.text_right(),
                     _ => cell,
                 };
+                self.path.extend([row_ix, col_ix]);
                 cells.push(cell.child(self.text(spans)));
+                self.path.truncate(self.path.len() - 2);
             }
         }
         div()
@@ -1644,16 +2048,29 @@ impl<'a> Renderer<'a> {
     /// Inline content as one wrapped paragraph; web and mail links open on
     /// click.
     fn text(&mut self, spans: &[Span]) -> AnyElement {
+        let segments = self.segments(spans);
+        self.inline(segments)
+            .blank_line(self.style.blank_line)
+            .selectable(self.select())
+            .into_any_element()
+    }
+
+    /// How `spans` show, each part placed in their text.
+    fn segments(&self, spans: &[Span]) -> Vec<Placed> {
         let style = self.style;
         let curled;
-        let spans = if style.smart_quotes {
+        let shown = if style.smart_quotes {
             curled = smart_quotes(spans);
             &curled
         } else {
             spans
         };
         let mut segments = Vec::new();
-        for span in spans {
+        let mut at = 0;
+        for (span, shown) in spans.iter().zip(shown) {
+            let source = at..at + span.text.len();
+            at = source.end;
+            let replaced = (shown.text != span.text).then(|| span.text.clone());
             let base = Segment {
                 weight: span.style.strong.then_some(style.strong_weight),
                 italic: span.style.emph,
@@ -1685,46 +2102,68 @@ impl<'a> Renderer<'a> {
                         ..style.inline_code.chip.clone()
                     },
                 });
-                segments.push(Segment {
+                let segment = Segment {
                     family: Some(style.mono_family.clone()),
                     ..boxed(
                         heading_code.as_ref().unwrap_or(&style.inline_code),
-                        span.text.clone(),
+                        shown.text.clone(),
                     )
+                };
+                segments.push(Placed {
+                    replaced,
+                    ..Placed::new(segment, source)
                 });
-            } else if let Some(url) = &span.link {
+            } else if let Some(url) = &shown.link {
                 match &style.url_slug {
-                    Some(slug) if span.text == *url => {
-                        segments.push(boxed(slug, url_label(url)));
-                    }
-                    _ => segments.push(Segment {
-                        text: span.text.clone().into(),
-                        color: Some(style.link_color),
-                        underline: style.link_underline,
-                        ..base
+                    Some(slug) if shown.text == *url => segments.push(Placed {
+                        whole: true,
+                        ..Placed::new(boxed(slug, url_label(url)), source)
+                    }),
+                    _ => segments.push(Placed {
+                        replaced,
+                        ..Placed::new(
+                            Segment {
+                                text: shown.text.clone().into(),
+                                color: Some(style.link_color),
+                                underline: style.link_underline,
+                                ..base
+                            },
+                            source,
+                        )
                     }),
                 }
             } else {
-                for (run, kind) in runs(&span.text, style.mention.is_some()) {
+                for (run, kind) in runs(&shown.text, style.mention.is_some()) {
+                    let start = run.as_ptr() as usize - shown.text.as_ptr() as usize;
+                    let run_source = source.start + unreplaced(&span.text, &shown.text, start)
+                        ..source.start + unreplaced(&span.text, &shown.text, start + run.len());
+                    let replaced = replaced.as_ref().map(|_| {
+                        span.text[run_source.start - source.start..run_source.end - source.start]
+                            .to_owned()
+                    });
+                    let placed = |segment| Placed {
+                        replaced,
+                        ..Placed::new(segment, run_source)
+                    };
                     segments.push(match kind {
-                        Run::Text => Segment {
+                        Run::Text => placed(Segment {
                             text: run.to_owned().into(),
                             ..base.clone()
-                        },
-                        Run::Emoji => Segment {
+                        }),
+                        Run::Emoji => placed(Segment {
                             text: run.to_owned().into(),
                             scale: Some(style.emoji_scale),
                             ..base.clone()
+                        }),
+                        Run::Mention => Placed {
+                            whole: true,
+                            ..placed(boxed(style.mention.as_ref().unwrap(), mention_label(run)))
                         },
-                        Run::Mention => boxed(style.mention.as_ref().unwrap(), mention_label(run)),
                     });
                 }
             }
         }
-        self.inline(segments)
-            .blank_line(style.blank_line)
-            .selectable(self.select())
-            .into_any_element()
+        segments
     }
 }
 
@@ -2015,8 +2454,14 @@ mod tests {
         }
     }
 
+    use std::rc::Rc;
+
     use super::Numbering::{Alpha, Decimal, Roman};
-    use super::{Run, is_openable, mention_label, ordered_marker, reveal, runs, url_label};
+    use super::{
+        Run, Segment, is_openable, mention_label, ordered_marker, reveal, runs, url_label,
+    };
+    use draftmux_core::decorations::Side;
+    use draftmux_storage::Target;
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -2171,120 +2616,144 @@ mod tests {
             .collect()
     }
 
-    /// `blocks` with `edit` applied to every text in them: spans, code and
-    /// HTML. Spans left empty are dropped.
-    fn map_text(blocks: &[markup::Block], edit: &dyn Fn(&str) -> String) -> Vec<markup::Block> {
-        use markup::{Block, Span};
-        let spans = |spans: &[Span]| -> Vec<Span> {
-            spans
-                .iter()
-                .map(|span| Span {
-                    text: edit(&span.text),
-                    ..span.clone()
-                })
-                .filter(|span| !span.text.is_empty())
-                .collect()
-        };
-        blocks
-            .iter()
-            .map(|block| match block {
-                Block::Paragraph(text) => Block::Paragraph(spans(text)),
-                Block::Heading { level, spans: text } => Block::Heading {
-                    level: *level,
-                    spans: spans(text),
-                },
-                Block::List(list) => Block::List(markup::List {
-                    items: list
-                        .items
-                        .iter()
-                        .map(|item| markup::ListItem {
-                            task: item.task,
-                            blocks: map_text(&item.blocks, edit),
-                        })
-                        .collect(),
-                    ..list.clone()
-                }),
-                Block::Quote(inner) => Block::Quote(map_text(inner, edit)),
-                Block::Alert { kind, blocks } => Block::Alert {
-                    kind: *kind,
-                    blocks: map_text(blocks, edit),
-                },
-                Block::Code { lang, text } => Block::Code {
-                    lang: lang.clone(),
-                    text: edit(text),
-                },
-                Block::Html(text) => Block::Html(edit(text)),
-                Block::Table(table) => Block::Table(markup::Table {
-                    alignments: table.alignments.clone(),
-                    header: table.header.iter().map(|cell| spans(cell)).collect(),
-                    rows: table
-                        .rows
-                        .iter()
-                        .map(|row| row.iter().map(|cell| spans(cell)).collect())
-                        .collect(),
-                }),
-                Block::Rule => Block::Rule,
-            })
-            .collect()
+    /// A redline style for `target` drawing `marks`, nothing kept or
+    /// selected.
+    fn redline_style(target: Target, marks: Rc<super::Marks>, hunks: usize) -> super::MarkupStyle {
+        use super::{Redline, RedlineColors};
+        use crate::inline_text::MarkHandlers;
+        let mut style = super::style(target, false);
+        style.redline = Some(Rc::new(Redline {
+            marks,
+            selected: None,
+            hovered: None,
+            kept: vec![false; hunks],
+            colors: RedlineColors::new(&crate::theme::Palette::light()),
+            handlers: Rc::new(MarkHandlers {
+                click: Rc::new(|_, _, _| {}),
+                hover: Rc::new(|_, _| {}),
+                placed: Rc::new(|_, _| {}),
+            }),
+        }));
+        style
     }
 
-    /// A point keeps the spaces before it in its line, which the text
-    /// without it loses, so neither side keeps a span's trailing space.
-    fn trim_span_end(text: &str) -> String {
-        text.strip_suffix(' ').unwrap_or(text).to_owned()
+    /// Whether `segment` is a point: marked, with no tint, while nothing is
+    /// kept.
+    fn is_point(segment: &Segment) -> bool {
+        segment
+            .mark
+            .as_ref()
+            .is_some_and(|mark| mark.background.is_none())
     }
 
-    #[test]
-    fn redlines_parse_like_the_text_they_mark() {
-        use crate::compare::{self, Side};
-        use draftmux_storage::Target;
-        let mut failures = Vec::new();
+    /// Each side of every review fixture on every target: the side's text,
+    /// what the preview shows for it, and its redline.
+    fn review_sides(
+        mut each: impl FnMut(&str, Target, Side, &str, &super::Mapped, &super::Redlined, usize),
+    ) {
         for (name, before, after) in review_fixtures() {
-            let comparison = compare::compare(&before, &after);
-            for target in [Target::Github, Target::Slack] {
+            let comparison = draftmux_core::diff::compare(&before, &after);
+            let decorations = draftmux_core::decorations::decorations(&comparison);
+            for target in Target::ALL.iter().copied() {
                 for (side, text) in [(Side::Before, &before), (Side::After, &after)] {
-                    let marked = super::redline(&comparison, side, target);
-                    // The redline shows what parses as a sentinel as U+FFFD.
-                    let plain = super::preview(target, &compare::neutralize(text));
-                    // Nothing else in a draft parses as one.
-                    let reserved = std::cell::Cell::new(false);
-                    map_text(&plain.blocks, &|text| {
-                        reserved.set(reserved.get() || compare::strip_marks(text) != text);
-                        String::new()
-                    });
-                    if reserved.get() {
-                        failures.push(format!("{name} {side:?} {target:?}: a sentinel parsed"));
-                    }
-                    // An empty side shows only a point, in a paragraph of its
-                    // own.
-                    if plain.blocks.is_empty() && marked.blocks.len() == 1 {
-                        continue;
-                    }
-                    // Only the marked side loses anything besides trailing
-                    // spaces: the marks the redline added.
-                    let marked = map_text(&marked.blocks, &|text| {
-                        trim_span_end(&compare::strip_marks(text))
-                    });
-                    let plain = map_text(&plain.blocks, &trim_span_end);
-                    if marked != plain {
-                        failures.push(format!(
-                            "{name} {side:?} {target:?}:\n  marked {marked:?}\n  plain  {plain:?}"
-                        ));
-                    }
+                    let mapped = super::preview_mapped(target, text);
+                    let redlined = super::redline(&mapped, &decorations, side);
+                    each(
+                        &name,
+                        target,
+                        side,
+                        text,
+                        &mapped,
+                        &redlined,
+                        comparison.hunks.len(),
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn redlines_draw_the_text_they_decorate() {
+        let mut failures = Vec::new();
+        review_sides(|name, target, side, text, mapped, redlined, hunks| {
+            let at = format!("{name} {side:?} {target:?}");
+            let plain = super::preview(target, text);
+            if *mapped.document != plain {
+                failures.push(format!("{at}: the mapped parse isn't the preview's"));
+            }
+            let style = redline_style(target, redlined.marks.clone(), hunks);
+            let marked: Vec<(Vec<usize>, String)> = super::drawn(&redlined.document, &style)
+                .into_iter()
+                // The paragraph holding points with no text to stand by.
+                .filter(|(path, _)| path[0] < plain.blocks.len())
+                .map(|(path, segments)| {
+                    let text = segments
+                        .iter()
+                        .filter(|segment| !is_point(segment))
+                        .map(|segment| segment.text.as_ref())
+                        .collect();
+                    (path, text)
+                })
+                .collect();
+            let unmarked: Vec<(Vec<usize>, String)> =
+                super::drawn(&plain, &super::style(target, false))
+                    .into_iter()
+                    .map(|(path, segments)| {
+                        (
+                            path,
+                            segments
+                                .iter()
+                                .map(|segment| segment.text.as_ref())
+                                .collect(),
+                        )
+                    })
+                    .collect();
+            if marked != unmarked {
+                failures.push(format!(
+                    "{at}:\n  marked   {marked:?}\n  unmarked {unmarked:?}"
+                ));
+            }
+        });
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn redlines_draw_every_change_on_both_sides() {
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        review_sides(|name, target, side, _, mapped, redlined, hunks| {
+            let style = redline_style(target, redlined.marks.clone(), hunks);
+            let mut shown = vec![false; hunks];
+            for (_, segments) in super::drawn(&redlined.document, &style) {
+                for mark in segments.iter().filter_map(|segment| segment.mark.as_ref()) {
+                    shown[mark.hunk] = true;
+                }
+            }
+            // The fields card draws every field.
+            if !mapped.fields.is_empty() {
+                for (field, mark) in &redlined.marks.fields {
+                    assert!(*field < mapped.fields.len());
+                    shown[mark.hunk] = true;
+                }
+            }
+            for (hunk, shown) in shown.into_iter().enumerate() {
+                checked += 1;
+                if !shown {
+                    failures.push(format!("{name} {side:?} {target:?}: hunk {hunk}"));
+                }
+            }
+        });
+        assert!(checked > 500, "{checked} hunks checked");
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
     fn only_a_point_draws_a_bar() {
-        use super::{Redline, RedlineColors, Segment};
-        use crate::compare::{self, Mark};
+        use super::{Mark, Redline, RedlineColors, Segment};
         use crate::inline_text::MarkHandlers;
         use crate::theme::Palette;
-        use std::rc::Rc;
         let redline = Redline {
+            marks: Rc::default(),
             selected: Some(0),
             hovered: None,
             kept: vec![false],
@@ -2295,44 +2764,122 @@ mod tests {
                 placed: Rc::new(|_, _| {}),
             }),
         };
-        let mark = Mark {
-            hunk: 0,
-            deleted: true,
-        };
         let bar = |point| {
             let mut segment = Segment {
-                text: compare::POINT.into(),
+                text: super::POINT.into(),
                 ..Segment::default()
             };
-            redline.style(&mut segment, mark, point);
+            let mark = Mark {
+                hunk: 0,
+                deleted: true,
+                point,
+            };
+            redline.style(&mut segment, mark);
             (segment.mark.unwrap().bar.is_some(), segment.strike)
         };
         assert_eq!(bar(true), (true, false));
         assert_eq!(bar(false), (false, true));
     }
 
+    /// `after`'s side of its comparison with `before`, as drawn on
+    /// `target`: each text with its marks, `[…]` for a mark's text and `|`
+    /// for a point.
+    fn drawn_after(target: Target, before: &str, after: &str) -> Vec<String> {
+        let comparison = draftmux_core::diff::compare(before, after);
+        let decorations = draftmux_core::decorations::decorations(&comparison);
+        let mapped = super::preview_mapped(target, after);
+        let redlined = super::redline(&mapped, &decorations, Side::After);
+        let style = redline_style(target, redlined.marks.clone(), comparison.hunks.len());
+        super::drawn(&redlined.document, &style)
+            .into_iter()
+            .map(|(_, segments)| {
+                segments
+                    .iter()
+                    .map(|segment| match &segment.mark {
+                        None => segment.text.to_string(),
+                        Some(_) if is_point(segment) => "|".to_owned(),
+                        Some(_) => format!("[{}]", segment.text),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
-    fn redlines_show_every_change_on_both_sides() {
-        use crate::compare::{self, Side};
-        use draftmux_storage::Target;
-        let mut failures = Vec::new();
-        for (name, before, after) in review_fixtures() {
-            let comparison = compare::compare(&before, &after);
-            for target in [Target::Github, Target::Slack] {
-                for side in [Side::Before, Side::After] {
-                    let doc = super::redline(&comparison, side, target);
-                    for hunk in 0..comparison.hunks.len() {
-                        if !doc
-                            .blocks
-                            .iter()
-                            .any(|block| compare::block_has_hunk(block, hunk))
-                        {
-                            failures.push(format!("{name} {side:?} {target:?}: hunk {hunk}"));
-                        }
+    fn review_of_a_draft_with_noncharacters_shows_them_unchanged() {
+        let before = "One \u{FDD0}\u{FDE0} two &#xFDD1; three\n";
+        let after = "One \u{FDD0}\u{FDE0} two &#xFDD1; four\n";
+        assert_eq!(
+            drawn_after(Target::Github, before, after),
+            ["One \u{FDD0}\u{FDE0} two \u{FDD1} [four]"]
+        );
+        assert_eq!(
+            drawn_after(Target::Plain, before, after),
+            ["One \u{FDD0}\u{FDE0} two &#xFDD1; [four]"]
+        );
+    }
+
+    #[test]
+    fn slack_marks_curled_quotes_by_character_and_mentions_whole() {
+        assert_eq!(
+            drawn_after(
+                Target::Slack,
+                "Say \"hi there\" to all of the team, then <@U1> once more.\n",
+                "Say \"hey there\" to all of the team, then <@U2> once more.\n"
+            ),
+            ["Say [\u{201C}hey] there\u{201D} to all of the team, then [@Iris Lane] once more."]
+        );
+    }
+
+    #[test]
+    fn a_mark_leaves_the_space_after_its_words_untinted() {
+        assert_eq!(
+            drawn_after(Target::Github, "Run the tests.\n", "Run the full tests.\n"),
+            ["Run the [full] tests."]
+        );
+        // A change of only whitespace keeps it.
+        assert_eq!(
+            drawn_after(Target::Github, "Left right.\n", "Left  right.\n"),
+            ["Left|[  ]right."]
+        );
+    }
+
+    #[test]
+    fn slack_code_boxes_show_changes() {
+        let before = "```rust\nlet a = 1;\nlet b = 2;\n```\n";
+        let after = "```rust\nlet a = 1;\nlet b = 3;\n```\n";
+        assert_eq!(
+            drawn_after(Target::Slack, before, after),
+            ["let a = 1;", "let b = [3;]"]
+        );
+    }
+
+    #[test]
+    fn an_empty_side_shows_a_point_on_its_own() {
+        assert_eq!(drawn_after(Target::Github, "Hello\n", ""), ["|"]);
+    }
+
+    #[test]
+    fn a_frontmatter_change_marks_its_field() {
+        let before = "---\ntitle: Old\nto: a@b.c\n---\nBody\n";
+        let after = "---\ntitle: New\nto: a@b.c\n---\nBody\n";
+        let comparison = draftmux_core::diff::compare(before, after);
+        let decorations = draftmux_core::decorations::decorations(&comparison);
+        for (side, text) in [(Side::Before, before), (Side::After, after)] {
+            let mapped = super::preview_mapped(Target::Github, text);
+            let redlined = super::redline(&mapped, &decorations, side);
+            assert_eq!(
+                redlined.marks.fields,
+                [(
+                    0,
+                    super::Mark {
+                        hunk: 0,
+                        deleted: side == Side::Before,
+                        point: false
                     }
-                }
-            }
+                )]
+            );
+            assert!(redlined.marks.blocks.iter().all(Vec::is_empty));
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

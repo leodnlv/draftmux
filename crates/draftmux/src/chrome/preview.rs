@@ -13,7 +13,7 @@ use markup::Document;
 
 use crate::block_cache::BlockCache;
 use crate::inline_text::{HunkClick, MarkHandlers};
-use crate::markup_view::{self, Redline, RedlineColors, SelectBody};
+use crate::markup_view::{self, Marks, Redline, RedlineColors, SelectBody};
 use crate::selectable::{self, TextSelection};
 use crate::theme;
 
@@ -60,10 +60,13 @@ pub(super) struct MarkState {
     pointer_inside: Rc<Cell<bool>>,
 }
 
-/// A redline of the draft ([`crate::compare::marked`]) parsed for the
-/// target, and how its changes are drawn.
+/// One side of a review parsed for the target ([`markup_view::redline`]),
+/// and how its changes are drawn.
 pub(super) struct PreviewRedline {
     pub document: Rc<Document>,
+    pub marks: Rc<Marks>,
+    /// The side's frontmatter, shown in place of the draft's.
+    pub fields: markup::frontmatter::Fields,
     pub selected: Option<usize>,
     pub hovered: Option<usize>,
     /// Whether each change is kept.
@@ -192,7 +195,7 @@ impl Preview {
             Some(_) => px(0.),
             None => match self
                 .cache
-                .top_of(|block| crate::compare::block_has_hunk(block, hunk))
+                .top_of(|block| block.marks.iter().any(|mark| mark.mark.hunk == hunk))
             {
                 Some(block) => top - block,
                 // Not in this version at all.
@@ -212,8 +215,15 @@ impl Preview {
         }
     }
 
+    /// The fields shown above the body: the review side's while reviewing.
+    fn shown_fields(&self) -> &markup::frontmatter::Fields {
+        self.redline
+            .as_ref()
+            .map_or(&self.fields, |redline| &redline.fields)
+    }
+
     fn copy_field(&mut self, key: &str, cx: &mut Context<Self>) {
-        let Some(value) = self.fields.get(key) else {
+        let Some(value) = self.shown_fields().get(key) else {
             return;
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.clone()));
@@ -232,13 +242,16 @@ impl Preview {
         cx.notify();
     }
 
-    fn fields_card(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        if self.fields.is_empty() {
+    /// The frontmatter's fields, each with its review changes drawn on its
+    /// value by `redline`.
+    fn fields_card(&self, redline: Option<&Redline>, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let fields = self.shown_fields();
+        if fields.is_empty() {
             return None;
         }
         let palette = theme::get(cx).palette;
-        let compact_label = self.fields.len() == 1
-            && (self.fields.contains_key("title") || self.fields.contains_key("subject"));
+        let compact_label =
+            fields.len() == 1 && (fields.contains_key("title") || fields.contains_key("subject"));
         Some(
             div()
                 .rounded(px(10.))
@@ -248,7 +261,7 @@ impl Preview {
                 .shadow(vec![super::shadow(palette.card_drop, 1., 3., 0.)])
                 .mx(px(-4.))
                 .mb(px(20.))
-                .children(self.fields.iter().enumerate().map(|(index, (key, value))| {
+                .children(fields.iter().enumerate().map(|(index, (key, value))| {
                     let group: gpui::SharedString = format!("field-{index}").into();
                     let copied = self.copied_field.as_ref() == Some(key);
                     let copy_key = key.clone();
@@ -287,7 +300,13 @@ impl Preview {
                                 .when(key == "title" || key == "subject", |value| {
                                     value.font_weight(gpui::FontWeight::SEMIBOLD)
                                 })
-                                .child(value.clone()),
+                                .child(match redline {
+                                    Some(redline) => {
+                                        markup_view::field_value(value, index, redline)
+                                            .into_any_element()
+                                    }
+                                    None => value.clone().into_any_element(),
+                                }),
                         )
                         .child(
                             div()
@@ -355,26 +374,28 @@ impl Preview {
         // px_6 is 1.5 rem on each side of the scrolling viewport.
         let width = (bounds.size.width - window.rem_size() * 3.).max(px(0.));
         self.marks.placed.borrow_mut().clear();
+        let redline = self.redline.as_ref().map(|redline| {
+            let hit = self.marks.hit.clone();
+            let placed = self.marks.placed.clone();
+            Rc::new(Redline {
+                marks: redline.marks.clone(),
+                selected: redline.selected,
+                hovered: redline.hovered,
+                kept: redline.kept.clone(),
+                colors: RedlineColors::new(&theme.palette),
+                handlers: Rc::new(MarkHandlers {
+                    click: redline.on_click.clone(),
+                    hover: Rc::new(move |hunk, position| hit.set(Some((hunk, position)))),
+                    placed: Rc::new(move |hunk, bounds| {
+                        placed.borrow_mut().entry(hunk).or_insert(bounds);
+                    }),
+                }),
+            })
+        });
         let (body, background) = match (document, self.target) {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
                 let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
-                style.redline = self.redline.as_ref().map(|redline| {
-                    let hit = self.marks.hit.clone();
-                    let placed = self.marks.placed.clone();
-                    Rc::new(Redline {
-                        selected: redline.selected,
-                        hovered: redline.hovered,
-                        kept: redline.kept.clone(),
-                        colors: RedlineColors::new(&theme.palette),
-                        handlers: Rc::new(MarkHandlers {
-                            click: redline.on_click.clone(),
-                            hover: Rc::new(move |hunk, position| hit.set(Some((hunk, position)))),
-                            placed: Rc::new(move |hunk, bounds| {
-                                placed.borrow_mut().entry(hunk).or_insert(bounds);
-                            }),
-                        }),
-                    })
-                });
+                style.redline = redline.clone();
                 let style = Rc::new(style);
                 // A redline's text isn't the draft's, so it isn't selected
                 // for the editor.
@@ -430,7 +451,7 @@ impl Preview {
             .px_6()
             .pt_5()
             .pb_10()
-            .children(self.fields_card(cx))
+            .children(self.fields_card(redline.as_deref(), cx))
             .child(body)
             .child(canvas(|_, _, _| (), move |_, _, _, _| drop(frame)).absolute())
             .into_any_element()

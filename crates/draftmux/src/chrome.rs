@@ -920,6 +920,12 @@ impl Chrome {
         self.sync_review(cx);
         self.preview_selection
             .update(cx, |selection, cx| selection.clear(cx));
+        // Review shows its own parse of the text, which the preview takes
+        // when review closes.
+        if self.review.is_some() {
+            self.preview_work.invalidate();
+            return;
+        }
         if self.preview_work.request(target, text) {
             self.preview_task = cx.spawn(async move |this, cx| {
                 loop {
