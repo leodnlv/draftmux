@@ -298,8 +298,7 @@ impl Chrome {
                     }
                     _ => {
                         let side = |side| {
-                            let text = compare::marked(&compared.comparison, side);
-                            Rc::new(markup_view::preview(target, &text))
+                            Rc::new(markup_view::redline(&compared.comparison, side, target))
                         };
                         let documents = Documents {
                             before: side(Side::Before),

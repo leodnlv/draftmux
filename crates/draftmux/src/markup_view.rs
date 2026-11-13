@@ -151,6 +151,20 @@ pub struct RedlineColors {
     pub removed_point: Hsla,
 }
 
+impl RedlineColors {
+    pub fn new(palette: &Palette) -> Self {
+        Self {
+            added: palette.diff_added,
+            added_background: palette.added_bg,
+            removed: palette.diff_removed,
+            removed_background: palette.removed_bg,
+            selected: palette.accent,
+            added_point: palette.added,
+            removed_point: palette.removed,
+        }
+    }
+}
+
 impl Redline {
     fn style(&self, segment: &mut Segment, mark: Mark) {
         let colors = self.colors;
@@ -1037,6 +1051,36 @@ pub fn preview(target: Target, text: &str) -> Document {
         Target::Slack => markup::slack::parse(text),
         Target::Rich => markup::rich_text::pasted(&markup::github::parse(text)),
         Target::Plain => markup::plain::parse(text),
+    }
+}
+
+/// One side of a comparison parsed for `target` with its changes marked
+/// ([`redline_text`]).
+pub fn redline(comparison: &compare::Comparison, side: compare::Side, target: Target) -> Document {
+    preview(target, &redline_text(comparison, side, target))
+}
+
+/// One side of a comparison with its changes marked ([`compare::marked`]).
+/// A change whose marks the document parsed for `target` wouldn't show,
+/// such as one only in a heading's marker or in frontmatter, is marked
+/// with a point instead.
+pub fn redline_text(
+    comparison: &compare::Comparison,
+    side: compare::Side,
+    target: Target,
+) -> String {
+    let text = compare::marked(comparison, side, &[]);
+    let doc = preview(target, &text);
+    let unseen: Vec<usize> = (0..comparison.hunks.len())
+        .filter(|&hunk| {
+            !doc.blocks
+                .iter()
+                .any(|block| compare::block_has_hunk(block, hunk))
+        })
+        .collect();
+    match unseen.is_empty() {
+        true => text,
+        false => compare::marked(comparison, side, &unseen),
     }
 }
 
@@ -2097,5 +2141,103 @@ mod tests {
         assert!(!is_openable("docs/design.md"));
         assert!(!is_openable("#section"));
         assert!(!is_openable("ht"));
+    }
+
+    /// The review fixtures: `<name>.before.md` and `<name>.after.md` pairs.
+    fn review_fixtures() -> Vec<(String, String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/review");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                name.strip_suffix(".before.md").map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        assert!(!names.is_empty());
+        names
+            .into_iter()
+            .map(|name| {
+                let read = |side: &str| {
+                    std::fs::read_to_string(dir.join(format!("{name}.{side}.md"))).unwrap()
+                };
+                let (before, after) = (read("before"), read("after"));
+                (name, before, after)
+            })
+            .collect()
+    }
+
+    /// A document's debug form without the redline's marks and points,
+    /// which `{:?}` writes as `\u{…}` escapes.
+    fn unmarked(doc: &markup::Document) -> String {
+        let text = format!("{doc:?}");
+        let mut out = String::new();
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("\\u{") {
+            out.push_str(&rest[..at]);
+            let end = rest[at..].find('}').unwrap() + at + 1;
+            let code = u32::from_str_radix(&rest[at + 3..end - 1], 16).unwrap();
+            if !((0xE000..=0xF8FF).contains(&code) || code == 0x200A) {
+                out.push_str(&rest[at..end]);
+            }
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out.replace(crate::compare::POINT, "")
+    }
+
+    #[test]
+    fn redlines_parse_like_the_text_they_mark() {
+        use crate::compare::{self, Side};
+        use draftmux_storage::Target;
+        let mut failures = Vec::new();
+        for (name, before, after) in review_fixtures() {
+            let comparison = compare::compare(&before, &after);
+            for target in [Target::Github, Target::Slack] {
+                for (side, text) in [(Side::Before, &before), (Side::After, &after)] {
+                    let marked = super::redline(&comparison, side, target);
+                    let plain = super::preview(target, text);
+                    // An empty side shows only a point, in a paragraph of its
+                    // own, and a point keeps the spaces before it in its line.
+                    let (marked, plain) = match plain.blocks.is_empty() {
+                        true if marked.blocks.len() == 1 => continue,
+                        _ => (unmarked(&marked), unmarked(&plain)),
+                    };
+                    let trim = |doc: String| doc.replace(" \", style", "\", style");
+                    let (marked, plain) = (trim(marked), trim(plain));
+                    if marked != plain {
+                        failures.push(format!(
+                            "{name} {side:?} {target:?}:\n  marked {marked}\n  plain  {plain}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn redlines_show_every_change_on_both_sides() {
+        use crate::compare::{self, Side};
+        use draftmux_storage::Target;
+        let mut failures = Vec::new();
+        for (name, before, after) in review_fixtures() {
+            let comparison = compare::compare(&before, &after);
+            for target in [Target::Github, Target::Slack] {
+                for side in [Side::Before, Side::After] {
+                    let doc = super::redline(&comparison, side, target);
+                    for hunk in 0..comparison.hunks.len() {
+                        if !doc
+                            .blocks
+                            .iter()
+                            .any(|block| compare::block_has_hunk(block, hunk))
+                        {
+                            failures.push(format!("{name} {side:?} {target:?}: hunk {hunk}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

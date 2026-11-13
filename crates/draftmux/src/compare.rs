@@ -236,8 +236,18 @@ fn words(text: &str) -> Vec<&str> {
 /// Whether replaced text shares at least half its words with its
 /// replacement, so a word diff reads as an edit rather than as a line swap.
 fn related(old: &str, new: &str, deadline: Instant) -> bool {
-    let old: Vec<&str> = old.split_whitespace().collect();
-    let new: Vec<&str> = new.split_whitespace().collect();
+    // Words match whatever their case or the punctuation around them.
+    let normal = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|word| {
+                word.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .collect()
+    };
+    let (old, new) = (normal(old), normal(new));
+    let old: Vec<&str> = old.iter().map(String::as_str).collect();
+    let new: Vec<&str> = new.iter().map(String::as_str).collect();
     if old.is_empty() && new.is_empty() {
         return false;
     }
@@ -294,12 +304,14 @@ pub enum Side {
 /// One version of the comparison with each change marked for
 /// [`split_marks`]. Marks open after any list, heading or quote marker so
 /// the block still parses, and close before the end of each line; fences,
-/// rules, table separators and blank lines stay bare.
-pub fn marked(comparison: &Comparison, side: Side) -> String {
+/// rules, table separators and blank lines stay bare. The changes in
+/// `unseen`, whose text this side doesn't show, such as a heading's level
+/// or a frontmatter value, get a point instead.
+pub fn marked(comparison: &Comparison, side: Side, unseen: &[usize]) -> String {
     let insert = (INS_OPEN, INS_CLOSE);
     let delete = (DEL_OPEN, DEL_CLOSE);
     // A point is marked as the change it stands in for.
-    let (shown, hidden, marks, point_marks) = match side {
+    let (shown, hidden, marks, other_marks) = match side {
         Side::Before => (Kind::Delete, Kind::Insert, delete, insert),
         Side::After => (Kind::Insert, Kind::Delete, insert, delete),
     };
@@ -309,62 +321,130 @@ pub fn marked(comparison: &Comparison, side: Side) -> String {
         Side::Before => hunk.is_addition(),
         Side::After => hunk.is_removal(),
     };
+    let text: String = comparison
+        .ops
+        .iter()
+        .filter(|op| op.kind == Kind::Equal || op.kind == shown)
+        .map(|op| op.text.as_str())
+        .collect();
+    let mut at = 0;
     let mut out = String::new();
-    // Points at the start of the text or of a block wait for the next
-    // line's text, after its block marker.
-    let mut pending: Vec<usize> = Vec::new();
-    let flush = |out: &mut String, pending: &mut Vec<usize>, text: &str| -> usize {
-        let Some(at) = point_at(text).filter(|_| !pending.is_empty()) else {
-            return 0;
-        };
-        out.push_str(&text[..at]);
-        for hunk in pending.drain(..) {
-            push_point(out, hunk, point_marks);
-        }
-        at
-    };
+    // Points wait here for a line that can hold them.
+    let mut pending: Vec<(usize, (char, char))> = Vec::new();
     for op in &comparison.ops {
         let hunk = op.hunk.unwrap_or_default();
-        if op.kind == Kind::Equal {
-            let at = flush(&mut out, &mut pending, &op.text);
-            out.push_str(&op.text[at..]);
-        } else if op.kind == shown {
-            let at = flush(&mut out, &mut pending, &op.text);
-            wrap(&mut out, &op.text[at..], marks, hunk);
+        let mut queue = None;
+        if op.kind == Kind::Equal || op.kind == shown {
+            let start = flush(&mut out, &mut pending, &op.text);
+            let rest = &op.text[start..];
+            let full = &text[at + start..];
+            match op.kind {
+                Kind::Equal => out.push_str(rest),
+                _ if unseen.contains(&hunk) => {
+                    out.push_str(rest);
+                    queue = Some((hunk, marks));
+                }
+                _ => wrap(&mut out, rest, full, marks, hunk),
+            }
+            at += op.text.len();
         } else if op.kind == hidden && comparison.hunks.get(hunk).is_some_and(points) {
-            if out.is_empty() || out.ends_with("\n\n") || !pending.is_empty() {
-                pending.push(hunk);
+            queue = Some((hunk, other_marks));
+        }
+        // At a line's end the point goes on that line; within a line it
+        // waits for the rest, which says whether it is still inside the
+        // line's block marker.
+        if let Some((hunk, marks)) = queue {
+            if pending.is_empty() && out.ends_with('\n') && holds_point(&out) {
+                point(&mut out, hunk, marks);
             } else {
-                point(&mut out, hunk, point_marks);
+                pending.push((hunk, marks));
             }
         }
     }
-    for hunk in pending {
-        point(&mut out, hunk, point_marks);
+    for (hunk, marks) in pending {
+        if holds_point(&out) {
+            point(&mut out, hunk, marks);
+        } else {
+            // Nothing before can hold it, so it stands on its own.
+            if !out.is_empty() {
+                out.push_str(if out.ends_with('\n') { "\n" } else { "\n\n" });
+            }
+            push_point(&mut out, hunk, marks);
+            out.push('\n');
+        }
     }
     out
 }
 
-/// Where a point goes in `text`: past any blank lines and the first line's
-/// block marker, or `None` when the text has no line to hold it.
-fn point_at(text: &str) -> Option<usize> {
+/// Writes the points waiting in `pending` into the first line of `text`
+/// that can hold one, after its block marker, and returns how much of
+/// `text` went before them; 0 when no line can.
+fn flush(out: &mut String, pending: &mut Vec<(usize, (char, char))>, text: &str) -> usize {
+    if pending.is_empty() {
+        return 0;
+    }
+    let mut frontmatter = in_frontmatter(out);
     let mut at = 0;
     for line in text.split_inclusive('\n') {
-        if !line.trim().is_empty() {
-            return Some(at + block_prefix(line));
+        let body = line.trim_end_matches('\n');
+        // Only a line that starts here, or continues one that can hold a
+        // point, takes one.
+        let start = at == 0 && !out.is_empty() && !out.ends_with('\n');
+        let full = match start {
+            true => format!("{}{body}", current_line(out)),
+            false => body.to_owned(),
+        };
+        let skip = frontmatter || full.trim().is_empty() || is_raw_line(&full) || alert_line(&full);
+        if frontmatter && full == "---" {
+            frontmatter = false;
+        }
+        if !skip {
+            let prefix = block_prefix(&full).saturating_sub(full.len() - body.len());
+            let point_at = at + prefix.min(body.len());
+            out.push_str(&text[..point_at]);
+            for (hunk, marks) in pending.drain(..) {
+                push_point(out, hunk, marks);
+            }
+            return point_at;
         }
         at += line.len();
     }
-    None
+    0
 }
 
-/// Marks where the other side's text is. A point at the start of a line
-/// would open a block of its own, so it goes at the end of the last line
-/// with text.
+/// Whether a point can go at the end of `out`'s last line with text: not
+/// past a blank line, where it would open a block of its own, nor on a
+/// fence, rule, alert marker or frontmatter line, which it would break.
+fn holds_point(out: &str) -> bool {
+    if out.is_empty() || out.ends_with("\n\n") {
+        return false;
+    }
+    let body = out.trim_end_matches('\n');
+    let line = current_line(body);
+    !(line.trim().is_empty()
+        || is_raw_line(line)
+        || alert_line(line)
+        || in_frontmatter(&body[..body.len() - line.len()]))
+}
+
+/// Marks where the other side's text is, at the end of the last line with
+/// text, inside a table row's last cell.
 fn point(out: &mut String, hunk: usize, marks: (char, char)) {
     let body = out.trim_end_matches('\n').len();
     let newlines = out.split_off(body);
+    let line = current_line(out);
+    let line_start = out.len() - line.len();
+    let cell = match line.trim_start().starts_with('|') {
+        true => line
+            .trim_end()
+            .strip_suffix('|')
+            .filter(|cell| !cell.ends_with('\\'))
+            .map(|cell| cell.trim_end().len()),
+        false => None,
+    };
+    let tail = cell.map(|cell| out.split_off(line_start + cell));
     push_point(out, hunk, marks);
+    out.push_str(tail.as_deref().unwrap_or_default());
     out.push_str(&newlines);
 }
 
@@ -373,6 +453,23 @@ fn push_point(out: &mut String, hunk: usize, (open, close): (char, char)) {
     out.push(tag(hunk));
     out.push_str(POINT);
     out.push(close);
+}
+
+/// The text after `out`'s last newline.
+fn current_line(out: &str) -> &str {
+    out.rsplit_once('\n').map_or(out, |(_, line)| line)
+}
+
+/// Whether text written after `out` is inside its frontmatter.
+fn in_frontmatter(out: &str) -> bool {
+    out.starts_with("---\n") && !out.get(3..).is_some_and(|rest| rest.contains("\n---\n"))
+}
+
+/// A quote line holding only an alert's `[!KIND]`, which a mark or point
+/// would turn into text.
+fn alert_line(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with('>') && line.contains("[!") && block_prefix(line) >= line.trim_end().len()
 }
 
 /// Whether `block` shows any of hunk `hunk`'s marks.
@@ -399,27 +496,36 @@ fn tag(hunk: usize) -> char {
     char::from_u32(code).expect("private use code points are chars")
 }
 
-fn wrap(out: &mut String, text: &str, (open, close): (char, char), hunk: usize) {
+fn wrap(out: &mut String, text: &str, full: &str, (open, close): (char, char), hunk: usize) {
+    let mut at = 0;
     for line in text.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
         let newline = &line[body.len()..];
-        let at_start = out.is_empty() || out.ends_with('\n');
-        if body.trim().is_empty() || (at_start && is_raw_line(body)) {
+        // The whole line, from what is already written to the end of the
+        // version's text, decides where a mark can open.
+        let before = current_line(out);
+        let after = full[at..].split('\n').next().unwrap_or_default();
+        let whole = format!("{before}{after}");
+        let reaches_end = body.len() == after.len();
+        at += line.len();
+        let marked_before = before.contains(is_sentinel);
+        if body.trim().is_empty() || (!marked_before && (is_raw_line(&whole) || alert_line(&whole)))
+        {
             out.push_str(line);
             continue;
         }
-        let in_frontmatter = out.starts_with("---\n")
-            && !out.get(3..).is_some_and(|rest| rest.contains("\n---\n"))
-            && body != "---";
-        let prefix = match at_start {
-            false => 0,
-            true if in_frontmatter => frontmatter_key(body),
-            true => block_prefix(body),
+        let line_prefix = match marked_before {
+            true => 0,
+            false if in_frontmatter(&out[..out.len() - before.len()]) && whole != "---" => {
+                frontmatter_key(&whole)
+            }
+            false => block_prefix(&whole),
         };
+        let prefix = line_prefix.saturating_sub(before.len()).min(body.len());
         let rest = &body[prefix..];
         let core = rest.trim_end();
         // A table row's mark stays inside its outer pipes.
-        let core = match at_start && body.trim_start().starts_with('|') {
+        let core = match reaches_end && whole.trim_start().starts_with('|') {
             true => core
                 .strip_suffix('|')
                 .filter(|core| !core.ends_with('\\'))
@@ -651,7 +757,7 @@ mod tests {
     /// One side with marks written as `{+…+}` and `[-…-]`, and a point as
     /// `|`.
     fn readable_side(old: &str, new: &str, side: Side) -> String {
-        let marked = marked(&compare(old, new), side).replace(POINT, "|");
+        let marked = marked(&compare(old, new), side, &[]).replace(POINT, "|");
         let mut open = None;
         let mut out = String::new();
         let mut last: Option<Mark> = None;
@@ -841,7 +947,7 @@ mod tests {
     #[test]
     fn finds_the_blocks_a_hunk_is_in() {
         let comparison = compare("# Title\n\nOld body.\n", "# Title\n\nNew body.\n");
-        let doc = markup::github::parse(&marked(&comparison, Side::After));
+        let doc = markup::github::parse(&marked(&comparison, Side::After, &[]));
         let found: Vec<bool> = doc
             .blocks
             .iter()
@@ -867,7 +973,7 @@ mod tests {
         );
         assert_eq!(
             readable("# Title\n", "## Better title\n"),
-            "# [-Title-]{+|+}\n/ ## [-|-]{+Better title+}\n"
+            "# [-Title-]\n/ ## {+Better title+}\n"
         );
         assert_eq!(
             readable("> [!NOTE]\n> Old\n", "> [!NOTE]\n> New\n"),
@@ -904,7 +1010,7 @@ mod tests {
 
     #[test]
     fn split_marks_carries_the_open_mark_across_calls() {
-        let marked = marked(&compare("a b\n", "a cd\n"), Side::After);
+        let marked = marked(&compare("a b\n", "a cd\n"), Side::After, &[]);
         let cut = marked.find('d').unwrap();
         let mut open = None;
         let first = split_marks(&marked[..cut], &mut open);

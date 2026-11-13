@@ -353,22 +353,13 @@ impl Preview {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
                 let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
                 style.redline = self.redline.as_ref().map(|redline| {
-                    let palette = &theme.palette;
                     let hit = self.marks.hit.clone();
                     let placed = self.marks.placed.clone();
                     Rc::new(Redline {
                         selected: redline.selected,
                         hovered: redline.hovered,
                         kept: redline.kept.clone(),
-                        colors: RedlineColors {
-                            added: palette.diff_added,
-                            added_background: palette.added_bg,
-                            removed: palette.diff_removed,
-                            removed_background: palette.removed_bg,
-                            selected: palette.accent,
-                            added_point: palette.added,
-                            removed_point: palette.removed,
-                        },
+                        colors: RedlineColors::new(&theme.palette),
                         handlers: Rc::new(MarkHandlers {
                             click: redline.on_click.clone(),
                             hover: Rc::new(move |hunk, position| hit.set(Some((hunk, position)))),
