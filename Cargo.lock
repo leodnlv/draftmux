@@ -1494,6 +1494,7 @@ dependencies = [
  "chrono",
  "draftmux-storage",
  "markup",
+ "similar",
  "tempfile",
 ]
 

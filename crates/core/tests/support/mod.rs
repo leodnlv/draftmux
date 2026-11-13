@@ -9,6 +9,7 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use draftmux_core::history::{EditLog, Recorded};
 use draftmux_core::outside::{Choice, Question};
+use draftmux_core::review::ReviewState;
 use draftmux_core::session::{Effect, Epoch, Outcome, Session};
 use draftmux_core::text::normalize_line_endings;
 use draftmux_storage::{History, NewDraft, Source, SourceKind, Store, Target};
@@ -103,11 +104,72 @@ impl Script {
                 Effect::Prompt { text, saved } => self.prompts.push((text, saved)),
                 Effect::AskOutsideEdit(question) => self.questions.push(question),
                 Effect::Offer(text) => self.offers.push(text),
+                Effect::ReplaceRange {
+                    epoch,
+                    revision,
+                    range,
+                    text,
+                } => {
+                    if self.session.is_current(epoch, revision) {
+                        let mut edited = self.editor.text.clone();
+                        edited.replace_range(range, &text);
+                        self.type_text(&edited);
+                    }
+                }
+                Effect::ReplaceAll {
+                    epoch,
+                    revision,
+                    text,
+                } => {
+                    if self.session.is_current(epoch, revision) {
+                        self.type_text(&text);
+                    }
+                }
             }
         }
         if let Some(deadline) = outcome.deadline {
             self.timer = Some((self.session.epoch(), deadline));
         }
+        // The review follows every change, as the app's does.
+        let text = self.editor.text.clone();
+        self.session.review_mut().compare(&text);
+    }
+
+    pub fn review(&self) -> &ReviewState {
+        self.session.review()
+    }
+
+    /// The user selects change `ix` in the review, or none.
+    pub fn select_change(&mut self, ix: Option<usize>) {
+        self.session.review_mut().select(ix);
+    }
+
+    /// The user keeps the selected change, or un-keeps it if it was kept.
+    /// Keeping moves on to the next change not kept, as the review bar
+    /// does.
+    pub fn keep_change(&mut self) -> anyhow::Result<()> {
+        let at = self.review().selected().expect("a selected change");
+        let kept = !self.review().is_kept(at);
+        let saved = self.session.keep(at, kept);
+        if let Some(next) = kept.then(|| self.review().next_unkept(at)).flatten() {
+            self.select_change(Some(next));
+        }
+        saved
+    }
+
+    /// The user reverts the selected change.
+    pub fn revert_change(&mut self) -> anyhow::Result<()> {
+        let at = self.review().selected().expect("a selected change");
+        let outcome = self.session.revert(at)?;
+        self.apply(outcome);
+        Ok(())
+    }
+
+    /// The user picks "Show Changes Since" edit `since`.
+    pub fn compare_since(&mut self, since: usize) {
+        self.session.review_mut().compare_since(since);
+        let text = self.editor.text.clone();
+        self.session.review_mut().compare(&text);
     }
 
     /// The selected draft's loaded log.

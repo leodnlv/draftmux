@@ -8,12 +8,13 @@
 #[allow(dead_code)]
 mod highlight;
 
-use std::collections::HashSet;
 use std::hint::black_box;
 use std::rc::Rc;
 use std::time::Instant;
 
-use draftmux_core::history::ChangeKey;
+use draftmux_core::history::EditLog;
+use draftmux_core::review::ReviewState;
+use draftmux_storage::{Edit, History};
 
 use crate::compare::{self, Side};
 
@@ -215,41 +216,26 @@ fn typing_positions(base: &str, text: &str) -> [(&'static str, usize); 3] {
     ]
 }
 
+/// A review of one agent edit that rewrote `base`, with nothing kept.
+fn review_of(base: &str) -> ReviewState {
+    ReviewState::new(EditLog::new(History {
+        edits: vec![Edit {
+            before: base.to_owned(),
+            at: chrono::Utc::now(),
+            prompt: String::new(),
+        }],
+        kept: Vec::new(),
+    }))
+}
+
 /// What `Chrome::sync_review` does on each edit while the review is closed:
-/// copy the editor's text, find the cached comparison stale, compare again,
-/// keep both texts for the next check, and count the unkept changes for the
-/// Changes button.
-fn sync_closed(
-    base: &str,
-    text: &str,
-    cached: &mut Option<Rc<(String, String, compare::Comparison)>>,
-    kept: &HashSet<String>,
-) -> usize {
+/// copy the editor's text, and have the review compare it again, keep both
+/// texts for the next check, and count the unkept changes for the Changes
+/// button.
+fn sync_closed(text: &str, review: &mut ReviewState) -> usize {
     let text = text.to_owned();
-    if let Some(cached) = cached
-        && cached.0 == base
-        && cached.1 == text
-    {
-        return 0;
-    }
-    let comparison = compare::compare(base, &text);
-    let compared = Rc::new((base.to_owned(), text, comparison));
-    let unreviewed = compared
-        .2
-        .hunks
-        .iter()
-        .filter(|hunk| {
-            let key = ChangeKey {
-                since: 0,
-                old_start: hunk.old.start,
-                removed: &hunk.removed,
-                added: &hunk.added,
-            };
-            !kept.contains(&key.to_string())
-        })
-        .count();
-    *cached = Some(compared);
-    unreviewed
+    review.compare(&text);
+    review.unreviewed()
 }
 
 #[test]
@@ -280,13 +266,12 @@ fn review_typing() {
                 let typed = "then quickly ".chars().cycle();
                 // Each sample is one keystroke, so the cache never hits.
                 let mut typing = (text.clone(), at, typed.clone());
-                let mut cached = None;
-                let kept = HashSet::new();
+                let mut review = review_of(&base);
                 let closed = measure(&format!("{name}/closed"), || {
                     let (text, at, typed) = &mut typing;
                     text.insert(*at, typed.next().unwrap());
                     *at += 1;
-                    black_box(sync_closed(&base, text, &mut cached, &kept));
+                    black_box(sync_closed(text, &mut review));
                 });
                 // What the open review adds on each keystroke once the
                 // comparison is done: both columns' redlines, as `marked`
@@ -327,13 +312,13 @@ fn review_typing() {
                     }
                 });
                 let mut typing = (text.clone(), at, typed);
-                let mut cached = None;
+                let mut review = review_of(&base);
                 let open = measure(&format!("{name}/open"), || {
                     let (text, at, typed) = &mut typing;
                     text.insert(*at, typed.next().unwrap());
                     *at += 1;
-                    black_box(sync_closed(&base, text, &mut cached, &kept));
-                    let comparison = &cached.as_ref().unwrap().2;
+                    black_box(sync_closed(text, &mut review));
+                    let comparison = review.comparison().unwrap();
                     for side in [Side::Before, Side::After] {
                         let document = crate::markup_view::redline(comparison, side, target);
                         black_box(crate::markup_view::render(

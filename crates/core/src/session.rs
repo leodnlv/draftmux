@@ -1,22 +1,24 @@
 //! The editing session: which draft is selected, the text the editor holds,
 //! when its pending edit is saved, how a failed save is reported, how
-//! changes to the draft's file from outside the editor reach it, and what
-//! the drafts' agents are doing to them.
+//! changes to the draft's file from outside the editor reach it, what the
+//! drafts' agents are doing to them, and the review of what they changed.
 //!
 //! The app reports what happens (a selection, an edit, its autosave timer
 //! firing, a prompt) and carries out the returned [`Outcome`]: the effects in
 //! order, then its autosave timer rearmed from [`Outcome::deadline`].
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use draftmux_storage::{Conflict, Store};
 
 use crate::drafts::Drafts;
 use crate::history::{EditLog, Recorded, Turns};
 use crate::outside::{Choice, Question};
+use crate::review::ReviewState;
 
 /// Identifies one stay on a selection. A new one starts on every select and
 /// deselect, so a load or timer meant for an earlier one is told apart even
@@ -53,6 +55,23 @@ pub enum Effect {
     },
     /// Leave `text` in the composer for the user to send.
     Offer(String),
+    /// Replace `range` of the editor's text with `text` as one edit the
+    /// user can undo, if the editor still holds the text of `epoch` and
+    /// `revision` ([`Session::is_current`]).
+    ReplaceRange {
+        epoch: Epoch,
+        revision: u64,
+        range: Range<usize>,
+        text: String,
+    },
+    /// Replace the editor's whole text with `text` as one edit the user can
+    /// undo, keeping the selection where the text around it is unchanged,
+    /// if the editor still holds the text of `epoch` and `revision`.
+    ReplaceAll {
+        epoch: Epoch,
+        revision: u64,
+        text: String,
+    },
 }
 
 pub struct Session {
@@ -60,13 +79,16 @@ pub struct Session {
     /// Each draft's latest agent turn, until its first write is recorded as
     /// an edit.
     turns: Turns,
-    /// The selected draft's edit history.
-    log: EditLog,
+    /// The selected draft's edit history and its review.
+    review: ReviewState,
     /// Why the selected draft's last save failed; cleared by the next save.
     save_error: Option<String>,
     epoch: Epoch,
     /// The text the editor holds, as last reported.
     text: String,
+    /// Counts the reports of the editor's text, so a change worked out from
+    /// one text isn't applied to another.
+    revision: u64,
     /// A [`Question`] is open. Only one is asked at a time.
     asking: bool,
     /// Why the autosave timer leaves the pending edit alone; see [`Held`].
@@ -99,10 +121,11 @@ impl Session {
         Self {
             drafts: Drafts::new(store),
             turns: Turns::default(),
-            log: EditLog::default(),
+            review: ReviewState::default(),
             save_error: None,
             epoch: Epoch::default(),
             text: String::new(),
+            revision: 0,
             asking: false,
             held: None,
             running: HashSet::new(),
@@ -128,11 +151,18 @@ impl Session {
 
     /// The selected draft's edit history, loaded when it was selected.
     pub fn log(&self) -> &EditLog {
-        &self.log
+        self.review.log()
     }
 
-    pub fn log_mut(&mut self) -> &mut EditLog {
-        &mut self.log
+    /// The review of the selected draft's edits.
+    pub fn review(&self) -> &ReviewState {
+        &self.review
+    }
+
+    /// The review, for comparing and selecting changes. Keeping and
+    /// reverting go through the session.
+    pub fn review_mut(&mut self) -> &mut ReviewState {
+        &mut self.review
     }
 
     pub fn epoch(&self) -> Epoch {
@@ -143,6 +173,17 @@ impl Session {
     /// [`edited`](Self::edited) or [`loaded`](Self::loaded).
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Changes with every report of the editor's text.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether the editor still holds the text it held in `epoch` at
+    /// `revision`.
+    pub fn is_current(&self, epoch: Epoch, revision: u64) -> bool {
+        epoch == self.epoch && revision == self.revision
     }
 
     /// Why the selected draft's last save failed. A save refused because
@@ -159,7 +200,7 @@ impl Session {
         self.save_error = None;
         self.held = None;
         self.epoch.0 += 1;
-        self.log = EditLog::load(self.drafts.store(), id);
+        self.review = ReviewState::new(EditLog::load(self.drafts.store(), id));
         Ok(self.load(text))
     }
 
@@ -167,7 +208,7 @@ impl Session {
     pub fn deselect(&mut self) -> Outcome {
         self.held = None;
         self.epoch.0 += 1;
-        self.log = EditLog::default();
+        self.review = ReviewState::default();
         self.load(String::new())
     }
 
@@ -191,6 +232,7 @@ impl Session {
         }
         self.drafts.loaded(text);
         text.clone_into(&mut self.text);
+        self.revision += 1;
     }
 
     /// Reports the editor text after a user edit, and restarts the
@@ -198,6 +240,7 @@ impl Session {
     pub fn edited(&mut self, text: String, now: Instant) -> Outcome {
         self.drafts.edited(&text, now);
         self.text = text;
+        self.revision += 1;
         self.due()
     }
 
@@ -381,8 +424,11 @@ impl Session {
             id,
             text,
             at,
-            current.then_some(&mut self.log),
+            current.then_some(self.review.log_mut()),
         );
+        if current && matches!(recorded, Ok(Recorded::Added)) {
+            self.review.edit_added();
+        }
         if !current {
             if let Err(err) = self.drafts.touched(id, text) {
                 eprintln!("draftmux: recording the agent's edit: {err:#}");
@@ -508,6 +554,78 @@ impl Session {
         if let Err(err) = self.drafts.first_draft_requested(id) {
             eprintln!("draftmux: recording the first-draft request: {err:#}");
         }
+    }
+
+    /// Keeps change `ix` of the review's comparison, or un-keeps it, and
+    /// saves the history.
+    pub fn keep(&mut self, ix: usize, kept: bool) -> Result<()> {
+        if !self.review.keep(ix, kept) {
+            return Ok(());
+        }
+        self.save_kept()
+    }
+
+    /// Keeps every change in the review's comparison and saves the history.
+    pub fn finish(&mut self) -> Result<()> {
+        self.review.keep_all();
+        self.save_kept()
+    }
+
+    fn save_kept(&self) -> Result<()> {
+        let Some(id) = self.drafts.current_id() else {
+            return Ok(());
+        };
+        self.review.log().save(self.drafts.store(), id)
+    }
+
+    /// Asks for change `ix` of the review's comparison to be undone in the
+    /// editor. Reverting rejects the change, so it is un-kept first and is
+    /// asked about again if it comes back. Refused while the agent runs.
+    pub fn revert(&mut self, ix: usize) -> Result<Outcome> {
+        let Some(hunk) = self.review.hunks().get(ix).cloned() else {
+            return Ok(Outcome::default());
+        };
+        self.refuse_while_running()?;
+        if self.review.is_kept(ix) {
+            self.review.keep(ix, false);
+            if let Err(err) = self.save_kept() {
+                eprintln!("draftmux: saving the reviewed changes: {err:#}");
+            }
+        }
+        Ok(Outcome {
+            effects: vec![Effect::ReplaceRange {
+                epoch: self.epoch,
+                revision: self.revision,
+                range: hunk.new,
+                text: hunk.removed,
+            }],
+            deadline: None,
+        })
+    }
+
+    /// Asks for the editor to go back to the text the review compares with,
+    /// dropping every edit since, the agent's and the user's. Refused while
+    /// the agent runs.
+    pub fn restore_before(&mut self) -> Result<Outcome> {
+        let Some(base) = self.review.base().map(str::to_owned) else {
+            return Ok(Outcome::default());
+        };
+        self.refuse_while_running()?;
+        Ok(Outcome {
+            effects: vec![Effect::ReplaceAll {
+                epoch: self.epoch,
+                revision: self.revision,
+                text: base,
+            }],
+            deadline: None,
+        })
+    }
+
+    fn refuse_while_running(&self) -> Result<()> {
+        if self.editor_read_only() {
+            bail!("Wait for the agent to finish before reverting.");
+        }
+        Ok(())
     }
 
     fn due(&self) -> Outcome {

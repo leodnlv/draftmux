@@ -146,8 +146,6 @@ pub struct Chrome {
     toast: Option<sidebar::Toast>,
     /// The update button's card, while it is open.
     update_card: Option<update_offer::UpdateCard>,
-    /// The selected draft's agent edits and the changes being compared.
-    changes: review::Changes,
     /// Review of those changes, while it is open.
     review: Option<review::Review>,
     /// Holds the focus during review, so its single-key shortcuts don't
@@ -563,7 +561,6 @@ impl Chrome {
             collapsed_for_width: false,
             toast: None,
             update_card: None,
-            changes: Default::default(),
             review: None,
             review_focus: cx.focus_handle(),
             copied: None,
@@ -1178,6 +1175,28 @@ impl Chrome {
                         .as_deref_mut()
                         .expect("a question is asked only with the window");
                     self.ask_outside_edit(question, window, cx);
+                }
+                Effect::ReplaceRange {
+                    epoch,
+                    revision,
+                    range,
+                    text,
+                } => {
+                    if self.session.is_current(epoch, revision) {
+                        // One undoable edit, as if typed.
+                        self.editor
+                            .update(cx, |editor, cx| editor.replace_range(range, &text, cx));
+                    }
+                }
+                Effect::ReplaceAll {
+                    epoch,
+                    revision,
+                    text,
+                } => {
+                    if self.session.is_current(epoch, revision) {
+                        self.editor
+                            .update(cx, |editor, cx| editor.replace_all(&text, cx));
+                    }
                 }
             }
         }
