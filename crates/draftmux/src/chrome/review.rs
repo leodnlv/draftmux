@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+use anyhow::{Result, bail};
 use chrono::Utc;
 use draftmux_storage::{Edit, History, Store, Target};
 use gpui::{
@@ -99,6 +100,9 @@ pub(super) struct Changes {
     compared: Option<Rc<Compared>>,
     /// Changes in the comparison that aren't kept.
     unreviewed: usize,
+    /// The saved history couldn't be read, so `history` is empty and must
+    /// not be saved over it.
+    unreadable: bool,
 }
 
 /// The draft compared with the text before an edit.
@@ -110,16 +114,34 @@ pub(super) struct Compared {
 
 impl Changes {
     fn load(store: &Store, id: &str) -> Self {
-        let history = store.history(id).unwrap_or_else(|err| {
-            eprintln!("draftmux: reading the edit history: {err:#}");
-            History::default()
-        });
+        match store.history(id) {
+            Ok(history) => Self::new(history),
+            Err(err) => {
+                eprintln!("draftmux: reading the edit history: {err:#}");
+                Self {
+                    unreadable: true,
+                    ..Self::default()
+                }
+            }
+        }
+    }
+
+    fn new(history: History) -> Self {
         Self {
             kept: history.kept.iter().cloned().collect(),
             since: history.edits.len().saturating_sub(1),
             history,
             ..Self::default()
         }
+    }
+
+    /// Saves the history as draft `id`'s, unless the saved one couldn't be
+    /// read.
+    fn save(&self, store: &Store, id: &str) -> Result<()> {
+        if self.unreadable {
+            bail!("the saved edit history couldn't be read");
+        }
+        store.save_history(id, &self.history)
     }
 
     /// `text` compared with the text before edit [`Self::since`], reusing
@@ -168,6 +190,19 @@ impl Changes {
             format!("Last {} edits", count - self.since)
         }
     }
+}
+
+/// Adds `edit` to draft `id`'s saved history and returns the history.
+/// `changes` is the draft's loaded history while it is selected; if that
+/// couldn't be read, the saved history is read again rather than replaced.
+fn save_edit(store: &Store, id: &str, changes: Option<&Changes>, edit: Edit) -> Result<History> {
+    let mut history = match changes {
+        Some(changes) if !changes.unreadable => changes.history.clone(),
+        _ => store.history(id)?,
+    };
+    history.edits.push(edit);
+    store.save_history(id, &history)?;
+    Ok(history)
 }
 
 /// Review, while it is open.
@@ -226,31 +261,29 @@ impl Chrome {
         if turn.recorded || turn.before == text || turn.before.trim().is_empty() {
             return;
         }
-        turn.recorded = true;
         let edit = Edit {
             before: turn.before.clone(),
             at: Utc::now(),
             prompt: turn.prompt.clone(),
         };
         let current = self.drafts.current_id() == Some(id);
-        let mut history = if current {
-            self.changes.history.clone()
-        } else {
-            match self.store.history(id) {
-                Ok(history) => history,
-                Err(err) => {
-                    eprintln!("draftmux: reading the edit history: {err:#}");
-                    return;
-                }
+        // Until it is saved, the edit is recorded again with the turn's
+        // next write.
+        let history = match save_edit(&self.store, id, current.then_some(&self.changes), edit) {
+            Ok(history) => history,
+            Err(err) => {
+                eprintln!("draftmux: saving the edit history: {err:#}");
+                return;
             }
         };
-        history.edits.push(edit);
-        if let Err(err) = self.store.save_history(id, &history) {
-            eprintln!("draftmux: saving the edit history: {err:#}");
-        }
+        turn.recorded = true;
         if current {
-            self.changes.since = history.edits.len() - 1;
-            self.changes.history = history;
+            if self.changes.unreadable {
+                self.changes = Changes::new(history);
+            } else {
+                self.changes.since = history.edits.len() - 1;
+                self.changes.history = history;
+            }
             if let Some(review) = &mut self.review {
                 review.selected = None;
                 review.menu_open = false;
@@ -263,7 +296,7 @@ impl Chrome {
         let Some(id) = self.drafts.current_id() else {
             return;
         };
-        if let Err(err) = self.store.save_history(id, &self.changes.history) {
+        if let Err(err) = self.changes.save(&self.store, id) {
             eprintln!("draftmux: saving the reviewed changes: {err:#}");
         }
     }
@@ -1211,13 +1244,56 @@ mod tests {
         assert_eq!(turn.prompt, "Tighten the summary");
     }
 
-    #[test]
-    fn range_names_count_back_from_the_newest_edit() {
-        let edit = || Edit {
+    fn edit() -> Edit {
+        Edit {
             before: String::new(),
             at: Utc::now(),
             prompt: String::new(),
-        };
+        }
+    }
+
+    fn draft(store: &Store) -> String {
+        store
+            .create(draftmux_storage::NewDraft {
+                target: Target::Slack,
+                title: String::new(),
+                source: None,
+                cwd: "/home/u/code/app".into(),
+                pi_agent_dir: "/tmp/.pi/agent".into(),
+                note: None,
+                settings: Default::default(),
+                text: String::new(),
+            })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn unreadable_history_is_never_saved_over() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let id = draft(&store);
+        let path = root.path().join(&id).join("history.json");
+        std::fs::write(&path, "{not json").unwrap();
+
+        let mut changes = Changes::load(&store, &id);
+        assert!(changes.unreadable);
+        changes.history.kept.push("key".into());
+        assert!(changes.save(&store, &id).is_err());
+        assert!(save_edit(&store, &id, Some(&changes), edit()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+
+        // Once the file reads again, the edit is added to what it holds.
+        let mut saved = History::default();
+        saved.edits.push(edit());
+        store.save_history(&id, &saved).unwrap();
+        let history = save_edit(&store, &id, Some(&changes), edit()).unwrap();
+        assert_eq!(history.edits.len(), 2);
+        assert_eq!(store.history(&id).unwrap().edits.len(), 2);
+    }
+
+    #[test]
+    fn range_names_count_back_from_the_newest_edit() {
         let mut changes = Changes {
             history: History {
                 edits: vec![edit(), edit(), edit()],
