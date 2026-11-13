@@ -11,6 +11,7 @@ mod chrome;
 mod copy;
 mod drafts;
 mod file_watch;
+mod fold;
 mod format;
 mod inline_text;
 mod ipc;

@@ -118,6 +118,8 @@ pub struct Chat {
     /// the editor's once they settle.
     shown: Vec<Range<usize>>,
     settle_shown: Task<()>,
+    /// The quotes the stack last showed, which it keeps while folding shut.
+    folding_quotes: RefCell<Vec<Quote>>,
     /// The send button's state and the one it is changing from.
     send_state: Cell<(SendState, SendState)>,
     style: MarkupStyle,
@@ -250,6 +252,7 @@ impl Chat {
             detached: None,
             shown: Vec::new(),
             settle_shown: Task::ready(()),
+            folding_quotes: RefCell::default(),
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
@@ -1022,13 +1025,6 @@ impl Chat {
                 .into_any_element()
         };
         let stats = tool.stats.filter(|_| !running);
-        // How far open the row is; the chevron turns and the body unfolds.
-        let turned = match turn.filter(|_| !crate::platform::reduce_motion()) {
-            Some(delta) if tool.expanded => delta,
-            Some(delta) => 1. - delta,
-            None if tool.expanded => 1.,
-            None => 0.,
-        };
         let row = div()
             .id(("tool", index))
             .group("tool-row")
@@ -1110,6 +1106,12 @@ impl Chat {
                             .size(px(10.))
                             .text_color(palette.faint);
                         // Collapsing turns it back while the row is hovered.
+                        let turned = match turn.filter(|_| !crate::platform::reduce_motion()) {
+                            Some(delta) if tool.expanded => delta,
+                            Some(delta) => 1. - delta,
+                            None if tool.expanded => 1.,
+                            None => 0.,
+                        };
                         if tool.expanded || turned > 0. {
                             chevron.with_transformation(Transformation::rotate(percentage(
                                 0.25 * turned,
@@ -1125,23 +1127,14 @@ impl Chat {
             .flex()
             .flex_col()
             .child(row)
-            .when(turned > 0., |column| {
-                let (body, height) = tool_body(tool, index, palette);
-                // Clips the body to a share of its height; the list
-                // remeasures visible rows each frame, so a tail it follows
-                // stays in view.
-                column.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .when(turned < 1., |clip| {
-                            clip.h(px(height * turned))
-                                .overflow_hidden()
-                                .opacity(turned)
-                        })
-                        .child(div().flex_none().child(body)),
-                )
-            })
+            .child(crate::fold::fold(
+                ("tool-fold", index),
+                tool.expanded,
+                false,
+                || tool_body(tool, index, palette).into_any_element(),
+                window,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -1291,10 +1284,9 @@ impl Chat {
             .pb(px(2.))
             .child(head)
             .children(rows)
-            .with_animation("quote-stack", entrance(), rise_in)
     }
 
-    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let busy = self.busy();
         let session = self.session();
@@ -1319,7 +1311,20 @@ impl Chat {
             1 => "Ask pi to change the selection, or ask about it…".into(),
             n => format!("Tell pi what to do with these {n} selections…").into(),
         };
-        let stack = (!quotes.is_empty()).then(|| self.quote_stack(&quotes, &palette, cx));
+        let open = !quotes.is_empty();
+        if open {
+            *self.folding_quotes.borrow_mut() = quotes.clone();
+        }
+        let shown = self.folding_quotes.borrow().clone();
+        let stack = (!shown.is_empty()).then(|| self.quote_stack(&shown, &palette, cx));
+        let stack = crate::fold::fold(
+            "quote-stack",
+            open,
+            true,
+            move || div().children(stack).into_any_element(),
+            window,
+            cx,
+        );
         div().flex_none().px(px(12.)).pt(px(8.)).pb(px(12.)).child(
             div()
                 .key_context(KEY_CONTEXT)
@@ -1329,7 +1334,7 @@ impl Chat {
                 .border_1()
                 .border_color(palette.line_strong)
                 .bg(palette.control)
-                .children(stack)
+                .child(stack)
                 .child(
                     div()
                         .h(px(58.))
@@ -1414,7 +1419,7 @@ impl Chat {
 }
 
 impl Render for Chat {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let log = match self.session() {
             Some(session) => {
@@ -1524,7 +1529,9 @@ impl Render for Chat {
             .flex_col()
             .child(self.header(&palette))
             .child(log)
-            .when(self.current.is_some(), |chat| chat.child(self.composer(cx)))
+            .when(self.current.is_some(), |chat| {
+                chat.child(self.composer(window, cx))
+            })
     }
 }
 
@@ -1624,23 +1631,6 @@ fn close_button(
                 .size(px(10.))
                 .text_color(palette.muted),
         )
-}
-
-fn entrance() -> Animation {
-    Animation::new(ENTRANCE).with_easing(ease_out_quint())
-}
-
-/// Fades an attached quote in as it rises into place.
-fn rise_in<E: Styled>(element: E, delta: f32) -> E {
-    let rise = if crate::platform::reduce_motion() {
-        0.
-    } else {
-        ENTRANCE_RISE
-    };
-    element
-        .relative()
-        .top(px(rise * (1. - delta)))
-        .opacity(delta)
 }
 
 /// The quote icon, the start of the selected text and its lines, on one
@@ -1825,14 +1815,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// The expanded row: output keeps its whitespace and scrolls sideways.
-/// Returns its height with margins, which its lines fix since none wrap.
-fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> (impl IntoElement, f32) {
-    const LINE_HEIGHT: f32 = 17.;
-    const PADDING: f32 = 8.;
-    const MARGIN: f32 = 4.;
-    const MAX_HEIGHT: f32 = 200.;
-    const COMMAND_GAP: f32 = 4.;
-    let mut extra = 0.;
+fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
     let lines: Vec<AnyElement> = match tool.diff() {
         Some(diff) => diff
             .into_iter()
@@ -1870,37 +1853,29 @@ fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> (impl IntoElement,
             .enumerate()
             .map(|(i, line)| {
                 let command = tool.name == "bash" && i == 0;
-                if command {
-                    extra += COMMAND_GAP;
-                }
                 div()
                     .px(px(10.))
                     .whitespace_nowrap()
-                    .when(command, |line| {
-                        line.text_color(palette.faint).mb(px(COMMAND_GAP))
-                    })
+                    .when(command, |line| line.text_color(palette.faint).mb(px(4.)))
                     .child(blank_as_space(line))
                     .into_any_element()
             })
             .collect(),
     };
-    let content = lines.len() as f32 * LINE_HEIGHT + extra + 2. * PADDING;
-    let height = content.min(MAX_HEIGHT) + 2. * MARGIN;
-    let body = div()
+    div()
         .id(("tool-body", index))
         .ml(px(24.))
-        .my(px(MARGIN))
-        .py(px(PADDING))
-        .max_h(px(MAX_HEIGHT))
+        .my(px(4.))
+        .py(px(8.))
+        .max_h(px(200.))
         .overflow_scroll()
         .rounded(px(7.))
         .bg(palette.tool_body)
         .font_family(MONO)
         .text_size(px(11.5))
-        .line_height(px(LINE_HEIGHT))
+        .line_height(px(17.))
         .text_color(palette.tool_text)
-        .child(div().flex().flex_col().min_w_full().children(lines));
-    (body, height)
+        .child(div().flex().flex_col().min_w_full().children(lines))
 }
 
 /// Empty lines would collapse to no height.
