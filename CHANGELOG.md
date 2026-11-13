@@ -8,6 +8,8 @@
 - The install script checks that it may replace both the app and the
   `draftmux` command before changing either, and puts the installed app back if
   moving the new one into place fails.
+- When a draft's earlier conversation fails to load, the chat says so and
+  offers Retry instead of looking like an empty conversation.
 - Change the text size of the editor, preview and chat with `⌘+` and `⌘−`
   (`Ctrl` on Linux), and reset it with `⌘0`. The size is remembered, and macOS
   gets a View menu with Zoom In, Zoom Out and Actual Size.

@@ -26,13 +26,22 @@ pub enum Item {
         doc: Document,
     },
     Tool(Box<Tool>),
-    /// A turn that failed, or that the user stopped (`error` is `None`).
-    /// `retry` is the prompt to send again.
+    /// A turn that failed, or that the user stopped (`error` is `None`),
+    /// or the session's history that didn't load.
     Failure {
         error: Option<String>,
-        retry: Option<String>,
+        retry: Option<Retry>,
     },
     Notice(String),
+}
+
+/// What a failure's Retry does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retry {
+    /// Sends the prompt again.
+    Prompt(String),
+    /// Requests the session's history again.
+    History,
 }
 
 pub struct Tool {
@@ -139,8 +148,28 @@ impl Transcript {
         self.busy = false;
         self.push(Item::Failure {
             error: Some(error),
-            retry: self.last_prompt.clone(),
+            retry: self.last_prompt.clone().map(Retry::Prompt),
         });
+    }
+
+    /// The session's history didn't load.
+    pub fn history_failed(&mut self, error: &str) {
+        self.push(Item::Failure {
+            error: Some(format!("Couldn't load this conversation: {error}")),
+            retry: Some(Retry::History),
+        });
+    }
+
+    /// Removes a history failure before its history is requested again.
+    pub fn retrying_history(&mut self) {
+        if let Some(Item::Failure {
+            retry: Some(Retry::History),
+            ..
+        }) = self.items.last()
+        {
+            self.items.pop();
+            self.touch(self.items.len());
+        }
     }
 
     /// pi took the prompt without starting a run.
@@ -149,12 +178,17 @@ impl Transcript {
     }
 
     /// Whether the failure at `index` can be retried now: only the latest
-    /// item, while nothing runs.
-    pub fn retry_at(&self, index: usize) -> Option<&str> {
+    /// item, while nothing runs. The history can be requested again only
+    /// while nothing else is shown, since pi's history would also contain
+    /// anything shown since and duplicate it.
+    pub fn retry_at(&self, index: usize) -> Option<&Retry> {
         match self.items.get(index) {
             Some(Item::Failure {
                 retry: Some(retry), ..
-            }) if !self.busy && index + 1 == self.items.len() => Some(retry),
+            }) if !self.busy && index + 1 == self.items.len() => match retry {
+                Retry::History if index > 0 => None,
+                retry => Some(retry),
+            },
             _ => None,
         }
     }
@@ -176,7 +210,7 @@ impl Transcript {
                 self.end_run();
                 self.push(Item::Failure {
                     error: Some(error.clone()),
-                    retry: failed_turn.clone(),
+                    retry: failed_turn.clone().map(Retry::Prompt),
                 });
             }
         }
@@ -191,7 +225,7 @@ impl Transcript {
                 if *aborted || error.is_some() {
                     self.push(Item::Failure {
                         error: error.filter(|_| !aborted),
-                        retry: self.last_prompt.clone(),
+                        retry: self.last_prompt.clone().map(Retry::Prompt),
                     });
                 }
             }
@@ -525,7 +559,7 @@ pub fn history(messages: &[Value]) -> (Vec<Item>, usize) {
                 if let Some(error) = failure {
                     transcript.push(Item::Failure {
                         error,
-                        retry: transcript.last_prompt.clone(),
+                        retry: transcript.last_prompt.clone().map(Retry::Prompt),
                     });
                 }
             }
@@ -759,9 +793,12 @@ mod tests {
         let last = transcript.items.len() - 1;
         assert!(matches!(
             &transcript.items[last],
-            Item::Failure { error: None, retry: Some(retry) } if retry == prompt
+            Item::Failure { error: None, retry: Some(Retry::Prompt(retry)) } if retry == prompt
         ));
-        assert_eq!(transcript.retry_at(last), Some(prompt));
+        assert_eq!(
+            transcript.retry_at(last),
+            Some(&Retry::Prompt(prompt.to_owned()))
+        );
         assert_eq!(transcript.retry_at(0), None);
     }
 
@@ -798,7 +835,10 @@ mod tests {
         assert!(
             matches!(&transcript.items[1], Item::Tool(tool) if tool.status == ToolStatus::Stopped)
         );
-        assert_eq!(transcript.retry_at(2), Some("go"));
+        assert_eq!(
+            transcript.retry_at(2),
+            Some(&Retry::Prompt("go".to_owned()))
+        );
     }
 
     #[test]
@@ -840,7 +880,10 @@ mod tests {
             })
             .collect();
         assert_eq!(failures, ["overloaded"]);
-        assert_eq!(transcript.retry_at(transcript.items.len() - 1), Some("go"));
+        assert_eq!(
+            transcript.retry_at(transcript.items.len() - 1),
+            Some(&Retry::Prompt("go".to_owned()))
+        );
     }
 
     #[test]
@@ -938,7 +981,7 @@ mod tests {
         );
         assert!(matches!(
             &items[4],
-            Item::Failure { error: None, retry: Some(retry) } if retry == "again"
+            Item::Failure { error: None, retry: Some(Retry::Prompt(retry)) } if retry == "again"
         ));
 
         let (items, earlier) = history(&messages[..2]);
@@ -968,13 +1011,51 @@ mod tests {
         }
         // pi's echo of the prompt adds no second bubble.
         assert!(matches!(&transcript.items[..], [user, Item::Failure { .. }] if is_quoted(user)));
-        assert_eq!(transcript.retry_at(1), Some(prompt.as_str()));
+        assert_eq!(transcript.retry_at(1), Some(&Retry::Prompt(prompt)));
 
         let (items, _) = history(&[
             user,
             serde_json::json!({"role": "custom", "customType": "draftmux-context", "content": "…"}),
         ]);
         assert!(matches!(&items[..], [user] if is_quoted(user)));
+    }
+
+    #[test]
+    fn history_failure_retries_while_nothing_else_is_shown() {
+        let mut transcript = Transcript::default();
+        transcript.history_failed("pi timed out");
+        assert!(matches!(
+            &transcript.items[..],
+            [Item::Failure { error: Some(error), retry: Some(Retry::History) }]
+                if error == "Couldn't load this conversation: pi timed out"
+        ));
+        assert_eq!(transcript.retry_at(0), Some(&Retry::History));
+
+        transcript.retrying_history();
+        assert!(transcript.items.is_empty());
+        assert_eq!(transcript.take_change(1), Some(0));
+        // Only a history failure is removed.
+        transcript.sent("go".into(), String::new());
+        transcript.send_failed("no reply".into());
+        transcript.retrying_history();
+        assert_eq!(transcript.items.len(), 2);
+    }
+
+    #[test]
+    fn history_failure_after_a_prompt_has_no_retry() {
+        // The prompt went out after the history request, so a new request
+        // would return it too.
+        let mut transcript = Transcript::default();
+        transcript.sent("go".into(), String::new());
+        transcript.history_failed("pi timed out");
+        assert_eq!(transcript.retry_at(1), None);
+        transcript.handled();
+        assert_eq!(transcript.retry_at(1), None);
+
+        let mut transcript = Transcript::default();
+        transcript.history_failed("pi timed out");
+        transcript.sent("go".into(), String::new());
+        assert_eq!(transcript.retry_at(0), None);
     }
 
     #[test]

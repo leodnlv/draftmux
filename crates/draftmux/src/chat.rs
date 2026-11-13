@@ -53,7 +53,7 @@ use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::selectable::{self, Scroller, TextSelection};
 use crate::theme::{self, MONO, Palette, Theme};
 use quote::Quote;
-use transcript::{DiffLine, Item, Tool, Transcript};
+use transcript::{DiffLine, Item, Retry, Tool, Transcript};
 
 actions!(chat, [Send, Stop]);
 
@@ -453,16 +453,40 @@ impl Chat {
             session.history_loaded = true;
             // Requested before any prompt can be sent, so the history pi
             // returns doesn't include it.
-            let messages = agent.get_messages();
-            let id = id.to_owned();
-            cx.spawn(async move |this, cx| {
-                let messages = messages.await;
-                this.update(cx, |this, cx| this.history_loaded(&id, messages, cx))
-                    .ok();
-            })
-            .detach();
+            Self::load_history(id, &agent, cx);
         }
         self.request_first_draft(id, cx);
+    }
+
+    fn load_history(id: &str, agent: &Agent, cx: &mut Context<Self>) {
+        let messages = agent.get_messages();
+        let id = id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let messages = messages.await;
+            this.update(cx, |this, cx| this.history_loaded(&id, messages, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Requests the history of the selected draft again after it failed to
+    /// load. The transcript offers this only before anything else is shown,
+    /// so the history still can't include a prompt.
+    fn retry_history(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let Some(Ok(agent)) = &session.agent else {
+            return;
+        };
+        let agent = agent.clone();
+        session.transcript.retrying_history();
+        session.history_ready = false;
+        Self::load_history(&id, &agent, cx);
+        self.sync_list(&id, cx);
     }
 
     /// Asks the owner to send the first-draft request for a handed-off
@@ -496,7 +520,7 @@ impl Chat {
         let messages = match messages {
             Ok(messages) => messages,
             Err(err) => {
-                eprintln!("draftmux: loading the chat history: {err}");
+                session.transcript.history_failed(&err.to_string());
                 self.sync_list(id, cx);
                 return;
             }
@@ -821,9 +845,11 @@ impl Chat {
         let retry = self
             .session()
             .and_then(|session| session.transcript.retry_at(index))
-            .map(str::to_owned);
-        if let Some(text) = retry {
-            cx.emit(ChatEvent::Send(text));
+            .cloned();
+        match retry {
+            Some(Retry::Prompt(text)) => cx.emit(ChatEvent::Send(text)),
+            Some(Retry::History) => self.retry_history(cx),
+            None => {}
         }
     }
 
