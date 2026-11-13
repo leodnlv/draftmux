@@ -1496,6 +1496,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "draftmux-claude-rpc"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "draftmux-core"
 version = "0.1.0"
 dependencies = [

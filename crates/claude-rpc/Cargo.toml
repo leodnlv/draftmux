@@ -1,0 +1,22 @@
+[package]
+name = "draftmux-claude-rpc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+futures = "0.3"
+libc = "0.2"
+serde_json = "1.0.154"
+
+# Scripted stand-in for claude used by the integration tests.
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"
+test = false
+doc = false
+
+[dev-dependencies]
+tempfile = "3.27.0"
+uuid = { version = "1.29.1", features = ["v4"] }
