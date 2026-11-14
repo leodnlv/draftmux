@@ -236,9 +236,12 @@ mod tests {
     fn cwd_filters_to_the_directory_and_below() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path());
-        let app = create(&store, "App", "/home/u/code/app", 0);
-        let sub = create(&store, "Sub", "/home/u/code/app/crates/x", 1);
-        create(&store, "Other", "/home/u/code/application", 2);
+        // As `open` records them: absolute, which on Windows adds the
+        // current drive.
+        let abs = |dir: &str| std::path::absolute(dir).unwrap().display().to_string();
+        let app = create(&store, "App", &abs("/home/u/code/app"), 0);
+        let sub = create(&store, "Sub", &abs("/home/u/code/app/crates/x"), 1);
+        create(&store, "Other", &abs("/home/u/code/application"), 2);
 
         let output = list(&store, &["--cwd", "/home/u/code/app"]);
         assert_eq!(ids(&output), [sub.id.as_str(), app.id.as_str()]);

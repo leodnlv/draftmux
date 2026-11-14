@@ -199,7 +199,9 @@ mod tests {
                 title: title.to_owned(),
                 source: Some(Source {
                     kind: SourceKind::Pi,
-                    path: source.into(),
+                    // As `open` records it: absolute, which on Windows
+                    // adds the current drive.
+                    path: std::path::absolute(source).unwrap(),
                 }),
                 cwd: "/tmp/repo".into(),
                 backend: draftmux_storage::Backend::pi("/tmp/.pi/agent"),
@@ -426,7 +428,10 @@ mod tests {
         let output = show(&store, &["--source", "/s/other.jsonl"]);
         assert_eq!(
             output.result.unwrap_err().to_string(),
-            "no draft from source /s/other.jsonl"
+            format!(
+                "no draft from source {}",
+                std::path::absolute("/s/other.jsonl").unwrap().display()
+            )
         );
 
         assert!(show(&store, &["../x"]).result.is_err());

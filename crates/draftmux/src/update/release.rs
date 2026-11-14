@@ -174,6 +174,8 @@ mod tests {
                 "Draftmux-1.2.3-linux-x86_64.sha256",
                 "Draftmux-1.2.3-linux-aarch64.tar.gz",
                 "Draftmux-1.2.3-linux-aarch64.sha256",
+                "Draftmux-1.2.3-windows-x86_64.zip",
+                "Draftmux-1.2.3-windows-x86_64.sha256",
             ],
         ))
         .unwrap();

@@ -85,7 +85,7 @@ mod tests {
                 title: String::new(),
                 source: Some(Source {
                     kind: SourceKind::Pi,
-                    path: "/s/a.jsonl".into(),
+                    path: std::path::absolute("/s/a.jsonl").unwrap(),
                 }),
                 cwd: "/tmp/repo".into(),
                 backend: Backend::pi("/tmp/.pi/agent"),

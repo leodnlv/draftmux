@@ -1107,10 +1107,14 @@ cat > /dev/null
 
         // Recognized as Claude Code, but without a complete message.
         let cut = tmp.path().join("cut.jsonl");
-        let line = format!(
-            r#"{{"type":"user","uuid":"1","sessionId":"s","cwd":"{}","message":{{"content":"hi"}}}}"#,
-            tmp.path().display()
-        );
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": "1",
+            "sessionId": "s",
+            "cwd": tmp.path(),
+            "message": {"content": "hi"},
+        })
+        .to_string();
         fs::write(&cut, line).unwrap();
         let args = parse(&[cut.to_str().unwrap(), "--backend", "claude"]);
         let err = create(&args, &store, &no_pi, &claude_ok, &Settings::default()).unwrap_err();
@@ -1134,7 +1138,8 @@ cat > /dev/null
             Some("/Users/me/.claude-work".into())
         );
         // Copied out of Claude's storage: the caller's, when absolute.
-        assert_eq!(config("/tmp/s.jsonl", Some("/cfg")), Some("/cfg".into()));
+        let cfg = std::path::absolute("/cfg").unwrap();
+        assert_eq!(config("/tmp/s.jsonl", cfg.to_str()), Some(cfg.clone()));
         assert_eq!(config("/tmp/s.jsonl", Some("cfg")), None);
         assert_eq!(config("/tmp/s.jsonl", Some("/Users/me/.claude")), None);
         assert_eq!(config("/tmp/s.jsonl", None), None);

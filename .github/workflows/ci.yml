@@ -63,7 +63,8 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::all
-      - run: cargo test --locked --workspace
+      # Reports every crate's failures, not just the first's.
+      - run: cargo test --locked --workspace --no-fail-fast
 
   lint:
     runs-on: ubuntu-24.04
