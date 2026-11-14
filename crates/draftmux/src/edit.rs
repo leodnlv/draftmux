@@ -10,9 +10,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use draftmux_settings::{DraftBackend, Settings};
+use draftmux_settings::{DraftBackend, Resolved, Settings};
 use draftmux_storage::{
-    Backend, ClaudeSession, Draft, LinkedFile, NewDraft, PiSession, Store, Target,
+    Backend, ClaudeSession, Draft, DraftSettings, LinkedFile, NewDraft, PiSession, Store, Target,
 };
 
 use crate::{ipc, open, source};
@@ -73,14 +73,13 @@ fn find_or_create(store: &Store, settings: &Settings, file: &Path, env: &Env) ->
 }
 
 fn create(store: &Store, settings: &Settings, path: PathBuf, env: &Env) -> Result<Draft> {
-    let home = env.home;
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let cwd = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?
         .to_owned();
-    let resolved = settings.resolve(&cwd, home);
+    let resolved = settings.resolve(&cwd, env.home);
     let target = if open::is_repository_markdown(&path) {
         Target::GithubFile
     } else {
@@ -90,19 +89,71 @@ fn create(store: &Store, settings: &Settings, path: PathBuf, env: &Env) -> Resul
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let file = Some(LinkedFile::new(&path, text.as_bytes()));
-    let on_claude = resolved.backend.value == DraftBackend::SameAsSource && (env.claude)().is_ok();
-    if on_claude {
-        let mut draft_settings = resolved.draft_settings();
+    let kind = if resolved.backend.value == DraftBackend::SameAsSource && (env.claude)().is_ok() {
+        AgentKind::Claude
+    } else {
+        AgentKind::Pi
+    };
+    let new = NewDraft {
+        target,
+        title,
+        source: None,
+        cwd: cwd.clone(),
+        // Replaced by the session's.
+        backend: Backend::pi(env.home),
+        note: None,
+        settings: session_settings(kind, &resolved),
+        file: Some(LinkedFile::new(&path, text.as_bytes())),
+        text,
+    };
+    store.create_with_session(new, |draft| {
+        empty_session(
+            kind,
+            &cwd,
+            &draft.session_dir(),
+            &resolved,
+            env.home,
+            env.claude_config_dir,
+        )
+    })
+}
+
+/// The agent a new, empty session runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Pi,
+    Claude,
+}
+
+/// The draft settings to keep with a new session on `kind`.
+pub fn session_settings(kind: AgentKind, resolved: &Resolved) -> DraftSettings {
+    let mut settings = resolved.draft_settings();
+    if kind == AgentKind::Claude {
         // Pi's; the Claude session keeps its own.
-        draft_settings.selection_model = None;
-        let session = ClaudeSession {
+        settings.selection_model = None;
+    }
+    settings
+}
+
+/// A new, empty session on `kind` in `cwd`, with the settings `resolved`
+/// for it. A pi session's file is written into `session_dir`; a Claude Code
+/// session is created when it first runs. `claude_config_dir` is the
+/// caller's `CLAUDE_CONFIG_DIR`.
+pub fn empty_session(
+    kind: AgentKind,
+    cwd: &Path,
+    session_dir: &Path,
+    resolved: &Resolved,
+    home: &Path,
+    claude_config_dir: Option<&Path>,
+) -> Result<Backend> {
+    match kind {
+        AgentKind::Claude => Ok(Backend::Claude(ClaudeSession {
             session_id: uuid::Uuid::new_v4(),
             transcript: None,
             // Unset is `~/.claude`, where a login kept in the keychain is
             // found.
-            config_dir: env
-                .claude_config_dir
+            config_dir: claude_config_dir
                 .filter(|dir| dir.is_absolute() && *dir != home.join(".claude"))
                 .map(Path::to_path_buf),
             fork: None,
@@ -116,44 +167,22 @@ fn create(store: &Store, settings: &Settings, path: PathBuf, env: &Env) -> Resul
                 .value
                 .model()
                 .map(str::to_owned),
-        };
-        return store.create(NewDraft {
-            target,
-            title,
-            source: None,
-            cwd,
-            backend: Backend::Claude(session),
-            note: None,
-            settings: draft_settings,
-            text,
-            file,
-        });
+        })),
+        AgentKind::Pi => {
+            let agent_dir = source::settings_profile(resolved.profile.value.as_deref(), home);
+            // Without an override the session names no model and pi uses
+            // the profile's default.
+            let model = match resolved.model_override() {
+                Some(model) => open::model_selection(model),
+                None => claude_convert::ModelSelection::default(),
+            };
+            let file = claude_convert::empty(cwd, &model).write_into(session_dir)?;
+            Ok(Backend::Pi(PiSession {
+                agent_dir,
+                session_file: Some(file),
+            }))
+        }
     }
-    let pi_agent_dir = source::settings_profile(resolved.profile.value.as_deref(), home);
-    // Without an override the session names no model and pi uses the
-    // profile's default.
-    let model = match resolved.model_override() {
-        Some(model) => open::model_selection(model),
-        None => claude_convert::ModelSelection::default(),
-    };
-    let new = NewDraft {
-        target,
-        title,
-        source: None,
-        cwd: cwd.clone(),
-        backend: Backend::pi(pi_agent_dir.clone()),
-        note: None,
-        settings: resolved.draft_settings(),
-        text,
-        file,
-    };
-    store.create_with_session(new, |draft| {
-        let file = claude_convert::empty(&cwd, &model).write_into(&draft.session_dir())?;
-        Ok(Backend::Pi(PiSession {
-            agent_dir: pi_agent_dir,
-            session_file: Some(file),
-        }))
-    })
 }
 
 #[cfg(test)]

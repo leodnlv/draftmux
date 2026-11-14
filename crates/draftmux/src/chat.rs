@@ -123,6 +123,10 @@ pub enum ChatEvent {
     /// Draft `id`'s Claude agent reported something its descriptor must
     /// keep. Record it in the draft's `meta.json`.
     Recorded { id: String, record: Record },
+    /// The user asked to move draft `id`, which continues no session, to a
+    /// new session on the other agent. Record it, then pass the draft to
+    /// [`Chat::restart`].
+    SwitchAgent { id: String },
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -305,6 +309,61 @@ impl Chat {
     fn busy(&self) -> bool {
         self.session()
             .is_some_and(|session| session.transcript.busy)
+    }
+
+    /// Drops `draft`'s conversation and agent, and starts its agent again
+    /// from its descriptor, such as after it moved to another agent. The
+    /// composer keeps its text.
+    pub fn restart(&mut self, draft: &Draft, cx: &mut Context<Self>) {
+        self.sessions.remove(&draft.id);
+        if self.current.as_deref() != Some(draft.id.as_str()) {
+            return;
+        }
+        let unsent = self.composer.read(cx).text().to_owned();
+        self.current = None;
+        self.set_draft(Some(draft), cx);
+        self.composer.update(cx, |composer, cx| {
+            composer.set_text(&unsent, cx);
+            composer.select_range(unsent.len()..unsent.len(), cx);
+        });
+    }
+
+    /// Asks the owner to move the selected draft to the other agent,
+    /// confirming first when that leaves a conversation behind.
+    fn switch_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        if session.transcript.busy {
+            return;
+        }
+        let id = session.draft.id.clone();
+        if session.transcript.items.is_empty() {
+            cx.emit(ChatEvent::SwitchAgent { id });
+            return;
+        }
+        let (from, to) = if session.claude() {
+            ("Claude Code", "pi")
+        } else {
+            ("pi", "Claude Code")
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Info,
+            &format!("Switch this draft to {to}?"),
+            Some(&format!(
+                "{to} starts a new conversation; this one with {from} isn't carried over. \
+                 The draft's text stays as it is."
+            )),
+            &["Cancel", "Switch"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await.ok() == Some(1) {
+                this.update(cx, |_, cx| cx.emit(ChatEvent::SwitchAgent { id }))
+                    .ok();
+            }
+        })
+        .detach();
     }
 
     /// Shows `draft`'s conversation and starts its pi; `None` shows nothing.
@@ -1249,8 +1308,13 @@ impl Chat {
             .into_any_element()
     }
 
-    fn header(&self, palette: &Palette) -> impl IntoElement {
+    fn header(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let claude = self.session().is_some_and(Session::claude);
+        // A draft that continues no session can move to the other agent.
+        let switchable = self
+            .session()
+            .is_some_and(|session| session.draft.meta.source.is_none());
+        let busy = self.busy();
         let detail = if claude {
             Some((
                 "No project settings".to_owned(),
@@ -1276,22 +1340,60 @@ impl Chat {
             .border_b_1()
             .border_color(palette.hairline)
             .child(
-                svg()
-                    .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
-                    // The starburst's thin rays need a little more room than
-                    // the pi mark's solid blocks to look the same size.
-                    .when(claude, |icon| icon.size(px(14.)))
-                    .when(!claude, |icon| icon.size(px(12.)))
-                    .flex_none()
-                    .text_color(palette.muted),
-            )
-            .child(
                 div()
+                    .id("agent")
                     .flex_none()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(palette.muted)
-                    .child(if claude { "Claude Code" } else { "Pi" }),
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .child(
+                        svg()
+                            .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
+                            // The starburst's thin rays need a little more
+                            // room than the pi mark's solid blocks to look
+                            // the same size.
+                            .when(claude, |icon| icon.size(px(14.)))
+                            .when(!claude, |icon| icon.size(px(12.)))
+                            .flex_none()
+                            .text_color(palette.muted),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(palette.muted)
+                            .child(if claude { "Claude Code" } else { "Pi" }),
+                    )
+                    .when(switchable, |agent| {
+                        agent
+                            .ml(px(-4.))
+                            .mr(px(-4.))
+                            .px(px(4.))
+                            .h(px(22.))
+                            .rounded(px(5.))
+                            .child(
+                                svg()
+                                    .path(CHEVRON_ICON)
+                                    .size(px(8.))
+                                    .text_color(palette.faint)
+                                    .with_transformation(Transformation::rotate(percentage(0.25))),
+                            )
+                            .tooltip(crate::tooltip::text(if busy {
+                                "Can't switch agents while the agent is working"
+                            } else if claude {
+                                "Switch to Pi"
+                            } else {
+                                "Switch to Claude Code"
+                            }))
+                            .when(!busy, |agent| {
+                                agent
+                                    .hover(|style| style.bg(palette.hover))
+                                    .active(|style| style.opacity(0.8))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.switch_agent(window, cx)
+                                    }))
+                            })
+                    }),
             )
             .when_some(detail, |header, (label, path)| {
                 header.child(
@@ -1723,7 +1825,7 @@ impl Render for Chat {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.header(&palette))
+            .child(self.header(&palette, cx))
             .child(log)
             .when(self.current.is_some(), |chat| chat.child(self.composer(cx)))
     }

@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Datelike, Local, Utc};
 use draftmux_storage::{
-    Autosave, Backend, Draft, FileSave, Meta, Status, Store, Syntax, Target, by_activity,
+    Autosave, Backend, Draft, DraftSettings, FileSave, Meta, Status, Store, Syntax, Target,
+    by_activity,
 };
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(600);
@@ -335,6 +336,27 @@ impl Drafts {
         Ok(())
     }
 
+    /// Moves `id` to a new session, `backend`, with the draft settings kept
+    /// beside it.
+    pub fn set_backend(
+        &mut self,
+        id: &str,
+        backend: Backend,
+        settings: DraftSettings,
+    ) -> Result<()> {
+        let meta = self.store.update_meta(id, |meta| {
+            meta.backend = backend;
+            meta.settings = settings;
+        })?;
+        if let Some(current) = &mut self.current
+            && current.draft.id == id
+        {
+            current.draft.meta = meta;
+        }
+        self.refresh();
+        Ok(())
+    }
+
     /// Archives `id`. When it is the selected draft, saves it first, clears
     /// the selection and returns the draft to select next: the row below,
     /// else the row above.
@@ -476,6 +498,41 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path());
         (root, store)
+    }
+
+    #[test]
+    fn set_backend_moves_the_draft_and_its_settings_together() {
+        let (_root, store) = store();
+        let id = create(&store, "Text", TimeDelta::zero());
+        // A pi selection model can't stay beside a Claude Code session.
+        store
+            .update_meta(&id, |meta| {
+                meta.settings.selection_model = Some(draftmux_storage::ModelChoice {
+                    provider: "anthropic".into(),
+                    model_id: "claude-haiku-5-5".into(),
+                    thinking: "low".into(),
+                })
+            })
+            .unwrap();
+        let mut drafts = Drafts::new(store.clone());
+        drafts.select(&id).unwrap();
+        let claude = Backend::Claude(draftmux_storage::ClaudeSession {
+            session_id: "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60".parse().unwrap(),
+            transcript: None,
+            config_dir: None,
+            fork: None,
+            model: None,
+            selection_model: None,
+        });
+
+        drafts
+            .set_backend(&id, claude.clone(), DraftSettings::default())
+            .unwrap();
+        let meta = store.load(&id).unwrap().meta;
+        assert_eq!(meta.backend, claude);
+        assert_eq!(meta.settings, DraftSettings::default());
+        assert_eq!(drafts.current().unwrap().meta, meta);
+        assert_eq!(store.read_text(&id).unwrap(), "Text");
     }
 
     /// Creates a draft with `text`, active `age` ago.

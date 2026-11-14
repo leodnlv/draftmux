@@ -34,9 +34,10 @@ Status: early release; expect rough edges.
   agent "done, file the issue".
 - **Edit files.** `draftmux README.md` opens a file as a draft, with an agent
   session of its own in the file's directory: Claude Code if it's installed,
-  else pi, or pi when Settings set Backend to pi. A draft opened from a file,
-  this way or with `draftmux open --draft-file`, saves back to it with `⌘S`,
-  and asks first if the file changed elsewhere.
+  else pi, or pi when Settings set Backend to pi. The agent name above the
+  chat switches it to the other agent. A draft opened from a file, this way or
+  with `draftmux open --draft-file`, saves back to it with `⌘S`, and asks
+  first if the file changed elsewhere.
 
 ## Install
 

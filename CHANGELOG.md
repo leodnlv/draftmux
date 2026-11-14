@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Switch a draft that continues no agent session, such as one opened with
+  `draftmux <FILE>` or the sample draft, between Claude Code and pi from
+  the agent name above the chat. The draft moves to a new conversation on
+  the other agent, after confirming if that leaves one behind, and keeps
+  its text and any unsent message.
 - `draftmux <FILE>` opens a file for editing without an agent session to
   hand off from. The draft is named after the file, saves back to it, and
   gets an agent session of its own in the file's directory: on Claude Code

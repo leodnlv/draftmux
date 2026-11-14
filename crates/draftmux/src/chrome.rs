@@ -41,6 +41,7 @@ use crate::assets::{CHEVRON_ICON, EDITOR_PANE_ICON, PREVIEW_ICON};
 use crate::chat::{Chat, ChatEvent};
 use crate::copy::{self, Copy};
 use crate::drafts::{self, tilde};
+use crate::edit;
 use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
@@ -919,6 +920,7 @@ impl Chrome {
                 self.selection
                     .update(cx, |selection, _| selection.refresh_draft(draft));
             }
+            ChatEvent::SwitchAgent { id } => self.switch_agent(id, cx),
             ChatEvent::Running { id, running } => {
                 self.session.agent_running(id, *running);
                 if self.session.drafts().current_id() != Some(id.as_str()) {
@@ -928,6 +930,60 @@ impl Chrome {
             }
         }
         cx.notify();
+    }
+
+    /// Moves draft `id`, which continues no session, to a new, empty
+    /// session on the other agent, with the settings for its directory, and
+    /// restarts its chat there.
+    fn switch_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(draft) = self
+            .session
+            .drafts()
+            .current()
+            .filter(|draft| draft.id == id && draft.meta.source.is_none())
+            .cloned()
+        else {
+            return;
+        };
+        let kind = match draft.meta.backend {
+            draftmux_storage::Backend::Claude(_) => edit::AgentKind::Pi,
+            draftmux_storage::Backend::Pi(_) => edit::AgentKind::Claude,
+        };
+        let Some(home) = std::env::home_dir() else {
+            self.show_error("Couldn't switch agents: no home directory", cx);
+            return;
+        };
+        let resolved = crate::app_settings::AppSettings::global(cx)
+            .read(cx)
+            .settings
+            .resolve(&draft.meta.cwd, &home);
+        let claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        let switched = edit::empty_session(
+            kind,
+            &draft.meta.cwd,
+            &draft.session_dir(),
+            &resolved,
+            &home,
+            claude_config_dir.as_deref(),
+        )
+        .and_then(|backend| {
+            self.session.drafts_mut().set_backend(
+                id,
+                backend,
+                edit::session_settings(kind, &resolved),
+            )
+        });
+        if let Err(err) = switched {
+            self.show_error(format!("Couldn't switch agents: {err:#}"), cx);
+            return;
+        }
+        let draft = self.session.drafts().current().cloned();
+        if let Some(draft) = &draft {
+            self.chat.update(cx, |chat, cx| chat.restart(draft, cx));
+        }
+        // Selection calls use the draft's agent.
+        self.selection
+            .update(cx, |selection, _| selection.refresh_draft(draft));
     }
 
     /// Shows what the selected draft's agent is doing: the editor is
