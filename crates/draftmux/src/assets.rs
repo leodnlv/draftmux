@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use gpui::{AssetSource, Result, SharedString};
 
 pub const PI_ICON: &str = "icons/pi.svg";
+pub const CLAUDE_CODE_ICON: &str = "icons/claude-code.svg";
 pub const ARCHIVE_ICON: &str = "icons/archive.svg";
 pub const PREVIEW_ICON: &str = "icons/preview.svg";
 pub const EDITOR_PANE_ICON: &str = "icons/editor-pane.svg";
@@ -45,6 +46,10 @@ pub const ALERT_CAUTION_ICON: &str = "icons/alert-caution.svg";
 
 const ASSETS: &[(&str, &[u8])] = &[
     (PI_ICON, include_bytes!("../assets/icons/pi.svg")),
+    (
+        CLAUDE_CODE_ICON,
+        include_bytes!("../assets/icons/claude-code.svg"),
+    ),
     (SIDEBAR_ICON, include_bytes!("../assets/icons/sidebar.svg")),
     (ARCHIVE_ICON, include_bytes!("../assets/icons/archive.svg")),
     (PREVIEW_ICON, include_bytes!("../assets/icons/preview.svg")),

@@ -45,8 +45,9 @@ use gpui::{
 use shell_env::ShellEnv;
 
 use crate::assets::{
-    CHEVRON_ICON, CLOSE_ICON, PI_ICON, QUOTE_ICON, SEND_ICON, SPINNER_ARC_ICON, SPINNER_TRACK_ICON,
-    STOP_ICON, TOOL_BASH_ICON, TOOL_EDIT_ICON, TOOL_OTHER_ICON, TOOL_READ_ICON, TOOL_WRITE_ICON,
+    CHEVRON_ICON, CLAUDE_CODE_ICON, CLOSE_ICON, PI_ICON, QUOTE_ICON, SEND_ICON, SPINNER_ARC_ICON,
+    SPINNER_TRACK_ICON, STOP_ICON, TOOL_BASH_ICON, TOOL_EDIT_ICON, TOOL_OTHER_ICON, TOOL_READ_ICON,
+    TOOL_WRITE_ICON,
 };
 use crate::bounce::{Bounce, ListBounce};
 use crate::chat_model::{self, ChatModel};
@@ -1275,15 +1276,13 @@ impl Chat {
             .overflow_hidden()
             .border_b_1()
             .border_color(palette.hairline)
-            .when(!claude, |header| {
-                header.child(
-                    svg()
-                        .path(PI_ICON)
-                        .size(px(12.))
-                        .flex_none()
-                        .text_color(palette.muted),
-                )
-            })
+            .child(
+                svg()
+                    .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(palette.muted),
+            )
             .child(
                 div()
                     .flex_none()
