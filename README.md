@@ -6,11 +6,12 @@ Your agent knows the context, so it's the right one to write the PR description,
 the issue or the Slack update. But polishing that message inside an agent
 harness sucks.
 
-Draftmux gives the message its own window. Hand it off from Claude Code or pi,
-and an agent forked from the session writes the first draft beside a preview of
-where it's going. Edit it by hand, rewrite a selection with one click, or ask
-for changes in chat. When it's good enough, tell your agent it's done and it
-uses the text as written.
+Draftmux is an editor built for iterating on a message with an agent. Hand the
+message off from Claude Code or pi, and it opens next to a live preview of how
+it will look on GitHub, in Slack or wherever it's going. Edit it by hand,
+rewrite a selection with one click, or ask an agent forked from your session
+for changes in chat. When it's ready, tell your original agent it's done,
+and it uses the text exactly as you left it.
 
 https://github.com/user-attachments/assets/031ca42d-ae22-48cb-b2e9-9f94e93042c1
 
