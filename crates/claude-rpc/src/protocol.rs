@@ -11,6 +11,9 @@ use crate::launch::PreToolUseHook;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Init {
     pub models: Vec<ModelInfo>,
+    /// claude confirmed it registered the hooks sent with `initialize`
+    /// (`hooks_applied`).
+    pub hooks_applied: bool,
 }
 
 /// A model `set_model` accepts.
@@ -41,7 +44,10 @@ impl Init {
                 })
             })
             .collect();
-        Self { models }
+        Self {
+            models,
+            hooks_applied: response["hooks_applied"] == true,
+        }
     }
 }
 
@@ -69,12 +75,24 @@ pub(crate) fn control_error(id: &str, error: &str) -> String {
     }))
 }
 
-pub(crate) fn user_message(text: &str) -> String {
+/// A user message: `text` alone, or after the `context` blocks.
+pub(crate) fn user_message(context: &[String], text: &str) -> String {
+    let content = if context.is_empty() {
+        json!(text)
+    } else {
+        let blocks: Vec<Value> = context
+            .iter()
+            .map(String::as_str)
+            .chain([text])
+            .map(|text| json!({"type": "text", "text": text}))
+            .collect();
+        json!(blocks)
+    };
     line(json!({
         "type": "user",
         "session_id": "",
         "parent_tool_use_id": null,
-        "message": {"role": "user", "content": text},
+        "message": {"role": "user", "content": content},
     }))
 }
 
@@ -112,7 +130,10 @@ pub(crate) fn hooks(hooks: &[PreToolUseHook]) -> Value {
         .iter()
         .enumerate()
         .map(|(i, hook)| {
-            let mut entry = json!({"matcher": hook.matcher, "hookCallbackIds": [hook_id(i)]});
+            let mut entry = json!({"hookCallbackIds": [hook_id(i)]});
+            if let Some(matcher) = &hook.matcher {
+                entry["matcher"] = json!(matcher);
+            }
             if let Some(timeout) = hook.timeout {
                 entry["timeout"] = json!(timeout);
             }

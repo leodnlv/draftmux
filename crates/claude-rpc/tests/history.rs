@@ -168,3 +168,24 @@ fn a_cut_off_last_line_is_left_out() {
         Some("user: Write a 400 word story about a lighthouse.")
     );
 }
+
+#[test]
+fn the_context_ahead_of_a_prompt_is_left_out() {
+    let user = serde_json::json!({"parentUuid": null, "isSidechain": false, "type": "user",
+        "uuid": "u1", "sessionId": "s", "message": {"role": "user", "content": [
+            {"type": "text", "text": "<draftmux-context>\nTarget platform: Slack\n</draftmux-context>"},
+            {"type": "text", "text": "<draftmux-draft>\nHello\n</draftmux-draft>"},
+            {"type": "text", "text": "Shorten it"}]}});
+    let assistant = serde_json::json!({"parentUuid": "u1", "isSidechain": false,
+        "type": "assistant", "uuid": "a1", "sessionId": "s", "message": {"id": "m1",
+            "role": "assistant", "content": [{"type": "text", "text": "Done."}],
+            "stop_reason": "end_turn"}});
+    let bytes = format!("{user}\n{assistant}\n");
+    assert_eq!(
+        render(&read(bytes.as_bytes(), None)),
+        "earlier 0
+user: Shorten it
+assistant: Done. []
+"
+    );
+}

@@ -20,6 +20,8 @@
 //! - `### no-input <ms>`: require that no line arrives for that long.
 //! - `### append <path> <line>`: append a line to a file, creating it and
 //!   its directory, as claude writes its transcript.
+//! - `### write <path> <json string>`: replace a file's content with the
+//!   string, as a tool writes the draft.
 //!
 //! A mismatch prints to stderr and exits 99. The pid, arguments, cwd and
 //! environment are written to `record-<n>` first.
@@ -125,6 +127,11 @@ fn main() {
                         .open(path)
                         .unwrap();
                     writeln!(file, "{line}").unwrap();
+                }
+                "write" => {
+                    let (path, text) = arg.split_once(' ').unwrap();
+                    let text: String = serde_json::from_str(text).unwrap();
+                    std::fs::write(path, text).unwrap();
                 }
                 other => fail(&format!("unknown directive {other}")),
             }

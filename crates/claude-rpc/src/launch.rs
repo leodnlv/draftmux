@@ -46,6 +46,9 @@ pub struct LaunchSpec {
     /// [`AgentEvent::Permission`](crate::AgentEvent::Permission)
     /// (`--permission-prompt-tool stdio`).
     pub permission_prompt: bool,
+    /// Text added to Claude Code's system prompt
+    /// (`--append-system-prompt`).
+    pub system_prompt: Option<String>,
 }
 
 /// The tools a draft's agent may get. Tools that run processes, such as
@@ -61,7 +64,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Tool::Read => "Read",
             Tool::Edit => "Edit",
@@ -102,10 +105,10 @@ pub enum Session {
 }
 
 /// A `PreToolUse` hook for the tools `matcher` matches, such as
-/// `"Edit|Write"`.
+/// `"Edit|Write"`, or for every tool call without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreToolUseHook {
-    pub matcher: String,
+    pub matcher: Option<String>,
     /// Seconds the CLI waits for the answer. A hook that times out blocks
     /// the tool call.
     pub timeout: Option<u32>,
@@ -114,7 +117,12 @@ pub struct PreToolUseHook {
 impl LaunchSpec {
     /// `claude` in stream-json mode with an allowlisted environment,
     /// continuing the session as `start` says.
-    pub(crate) fn command(&self, model: Option<&str>, start: Option<&Start>) -> Command {
+    pub(crate) fn command(
+        &self,
+        model: Option<&str>,
+        tools: &[Tool],
+        start: Option<&Start>,
+    ) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args([
@@ -129,9 +137,12 @@ impl LaunchSpec {
             .arg("--setting-sources")
             .arg(join(self.setting_sources.iter().map(|s| s.name())))
             .arg("--tools")
-            .arg(join(self.tools.iter().map(|t| t.name())));
+            .arg(join(tools.iter().map(|t| t.name())));
         if self.permission_prompt {
             command.args(["--permission-prompt-tool", "stdio"]);
+        }
+        if let Some(prompt) = &self.system_prompt {
+            command.arg("--append-system-prompt").arg(prompt);
         }
         if let Some(model) = model {
             command.arg("--model").arg(model);
@@ -205,13 +216,18 @@ mod tests {
             session: Some(Session::New("0b5c".into())),
             hooks: vec![],
             permission_prompt: true,
+            system_prompt: None,
         }
     }
 
     #[test]
     fn command_line_and_environment() {
         let spec = spec();
-        let command = spec.command(Some("sonnet"), Some(&Start::New("0b5c".into())));
+        let command = spec.command(
+            Some("sonnet"),
+            &spec.tools,
+            Some(&Start::New("0b5c".into())),
+        );
         assert_eq!(command.get_program(), "/opt/claude/bin/claude");
         assert_eq!(command.get_current_dir().unwrap(), spec.cwd);
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -257,10 +273,14 @@ mod tests {
     #[test]
     fn resume_without_tools_or_model() {
         let mut spec = spec();
-        spec.tools.clear();
         spec.setting_sources = vec![SettingSource::Project, SettingSource::Local];
         spec.permission_prompt = false;
-        let command = spec.command(None, Some(&Start::Resume("/drafts/one/s.jsonl".into())));
+        spec.system_prompt = Some("Be brief.".into());
+        let command = spec.command(
+            None,
+            &[],
+            Some(&Start::Resume("/drafts/one/s.jsonl".into())),
+        );
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             &args[7..],
@@ -269,6 +289,8 @@ mod tests {
                 "project,local",
                 "--tools",
                 "",
+                "--append-system-prompt",
+                "Be brief.",
                 "--resume",
                 "/drafts/one/s.jsonl",
             ]

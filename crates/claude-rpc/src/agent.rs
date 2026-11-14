@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use draftmux_agent::History;
 
 use crate::connection::{Closed, Connection, EXIT_BOUND, Exit, Message, Ticket};
-use crate::launch::{LaunchSpec, Session};
+use crate::launch::{LaunchSpec, Session, Tool};
 use crate::protocol::{self, Init};
 use crate::session::{self, DraftSession, Missing, Start};
 
@@ -152,6 +152,8 @@ struct Inner {
     generation: u64,
     /// The model the next process starts with.
     model: Option<String>,
+    /// The tools the next process starts with.
+    tools: Vec<Tool>,
     live: Option<Live>,
     /// The exit of the last process stopped. The next one waits for it, so
     /// two processes never write one session.
@@ -164,6 +166,8 @@ struct Live {
     next_id: u64,
     pending: HashMap<String, Pending>,
     initialized: bool,
+    /// A prompt was written to this process.
+    prompted: bool,
     /// Why the process can't be used anymore. It is being stopped, and its
     /// exit is reported as a crash.
     failed: Option<String>,
@@ -206,7 +210,14 @@ struct Turn {
     /// Answers [`Agent::prompt`] while the prompt waits for `initialize`;
     /// `None` once it was written.
     held: Option<oneshot::Sender<Result<(), Error>>>,
+    /// Builds the prompt's context blocks when it is written.
+    context: Option<PromptContext>,
 }
+
+/// Builds the text blocks sent ahead of a prompt, when it is written.
+/// Called with whether the prompt is the process's first, under the
+/// agent's lock, so it must not call into the [`Agent`].
+pub(crate) type PromptContext = Box<dyn FnOnce(bool) -> Vec<String> + Send>;
 
 #[derive(Default)]
 struct Run {
@@ -297,6 +308,7 @@ impl Agent {
     pub fn new(spec: LaunchSpec, config: Config) -> (Self, mpsc::UnboundedReceiver<AgentEvent>) {
         let (events, rx) = mpsc::unbounded();
         let model = spec.model.clone();
+        let tools = spec.tools.clone();
         let (storage, recorded) = match &spec.session {
             Some(Session::Draft(draft)) => {
                 // The `HOME` claude gets.
@@ -319,6 +331,7 @@ impl Agent {
             inner: Mutex::new(Inner {
                 generation: 0,
                 model,
+                tools,
                 live: None,
                 previous: None,
             }),
@@ -356,6 +369,17 @@ impl Agent {
     /// as events. Claude doesn't acknowledge prompts, so a missing login
     /// only shows in [`AgentEvent::RunSettled`].
     pub fn prompt(&self, text: String) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        self.prompt_with(text, None)
+    }
+
+    /// Like [`Agent::prompt`], with text blocks from `context` ahead of
+    /// `text` in the user message. Crash reports and the conversation's
+    /// retry offer `text` alone.
+    pub(crate) fn prompt_with(
+        &self,
+        text: String,
+        context: Option<PromptContext>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
         let held = (|| {
             let mut inner = self.shared.lock();
             let live = self.shared.ensure_live(&mut inner)?;
@@ -363,13 +387,14 @@ impl Agent {
                 return Err(Error::Busy);
             }
             if live.initialized {
-                self.shared.write_prompt(live, text)?;
+                self.shared.write_prompt(live, text, context)?;
                 Ok(None)
             } else {
                 let (tx, rx) = oneshot::channel();
                 live.turn = Some(Turn {
                     text,
                     held: Some(tx),
+                    context,
                 });
                 Ok(Some(rx))
             }
@@ -448,6 +473,12 @@ impl Agent {
             Ok(rx)
         })();
         async move { rx?.await.unwrap_or(Err(Error::Stopped)) }
+    }
+
+    /// The tools of processes started from now on. The running process
+    /// keeps its own.
+    pub(crate) fn set_tools(&self, tools: Vec<Tool>) {
+        self.shared.lock().tools = tools;
     }
 }
 
@@ -571,7 +602,9 @@ impl Shared {
             inner.generation += 1;
             let generation = inner.generation;
             let weak = Arc::downgrade(self);
-            let command = self.spec.command(inner.model.as_deref(), start.as_ref());
+            let command = self
+                .spec
+                .command(inner.model.as_deref(), &inner.tools, start.as_ref());
             let conn = Connection::spawn(command, self.config.max_record, move |message| {
                 on_message(&weak, generation, message)
             })
@@ -582,6 +615,7 @@ impl Shared {
                 next_id: 0,
                 pending: HashMap::new(),
                 initialized: false,
+                prompted: false,
                 failed: None,
                 turn: None,
                 run: None,
@@ -618,9 +652,20 @@ impl Shared {
     }
 
     /// Writes the prompt of a new turn and starts its run.
-    fn write_prompt(&self, live: &mut Live, text: String) -> Result<(), Error> {
-        live.send(protocol::user_message(&text))?;
-        live.turn = Some(Turn { text, held: None });
+    fn write_prompt(
+        &self,
+        live: &mut Live,
+        text: String,
+        context: Option<PromptContext>,
+    ) -> Result<(), Error> {
+        let blocks = context.map_or_else(Vec::new, |context| context(!live.prompted));
+        live.send(protocol::user_message(&blocks, &text))?;
+        live.prompted = true;
+        live.turn = Some(Turn {
+            text,
+            held: None,
+            context: None,
+        });
         live.run = Some(Run::default());
         self.emit(AgentEvent::RunStarted);
         Ok(())
@@ -880,11 +925,22 @@ fn on_response(
         Waiter::Ignore => {}
         Waiter::Initialize => match reply {
             Ok(()) => {
+                let init = Init::parse(&response["response"]);
+                if !shared.spec.hooks.is_empty() && !init.hooks_applied {
+                    let err = Error::Rejected(
+                        "claude didn't confirm it applied Draftmux's tool hooks, so it can't \
+                         run safely; this version of Claude Code may be unsupported"
+                            .into(),
+                    );
+                    eprintln!("claude-rpc: initialize failed: {err}");
+                    live.fail_held(err);
+                    return Err(());
+                }
                 live.initialized = true;
-                shared.emit(AgentEvent::Ready(Init::parse(&response["response"])));
+                shared.emit(AgentEvent::Ready(init));
                 if let Some(turn) = live.turn.take() {
                     let tx = turn.held.expect("only a held turn precedes initialize");
-                    let _ = tx.send(shared.write_prompt(live, turn.text));
+                    let _ = tx.send(shared.write_prompt(live, turn.text, turn.context));
                 }
             }
             Err(err) => {

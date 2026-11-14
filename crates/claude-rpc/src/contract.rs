@@ -1,0 +1,679 @@
+//! A draft's Claude Code agent behind the shared agent contract
+//! ([`draftmux_agent`]): [`ClaudeAgent`] wraps [`Agent`], gives the model
+//! Draftmux's context, keeps its writes to the draft, and reports which of
+//! its tool calls changed the draft.
+//!
+//! - **Context.** The drafting rules, draft path and the user's
+//!   instructions go into the system prompt. Ahead of a prompt, a
+//!   `<draftmux-context>` block carries the target platform's syntax when
+//!   it changed, and a `<draftmux-draft>` block the saved draft when it
+//!   differs from what the model last saw. Both are sent again to a new
+//!   process and after compaction, and history leaves them out.
+//! - **Policy.** A `PreToolUse` hook for every tool decides each call with
+//!   [`DraftPolicy`]; unlike permission prompts, it also runs for tools
+//!   that settings allow. claude must confirm it registered the hook, or
+//!   no prompt is sent. Permission prompts allow an Edit or Write only
+//!   when the hook allowed that call, so a call that bypassed the hook
+//!   isn't granted. Every failure is answered with a denial: an error
+//!   answer would let the tool run.
+//! - **Writes.** A call the hook allowed changed the draft when it reports
+//!   success. When it fails or never reports, as when interrupted or when
+//!   claude crashes, it counts only if the draft now holds exactly what the
+//!   call would have written; any other change is left to the app's check
+//!   for outside edits. A successful Edit or Write the hook never saw
+//!   means the hook isn't enforced: the process is stopped and later ones
+//!   start without Edit and Write.
+//!
+//! Callbacks are answered on a thread of the agent's own, in order with
+//! the frames, not on the app's executor.
+
+use std::collections::HashMap;
+use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
+use std::thread;
+
+use draftmux_agent as contract;
+use futures::channel::mpsc;
+use futures::{FutureExt, StreamExt, future};
+use serde_json::Value;
+
+use crate::agent::PromptContext;
+use crate::history;
+use crate::policy::{self, Decision, DraftPolicy};
+use crate::{
+    Agent, AgentEvent, Config, Error, HookRequest, LaunchSpec, ModelInfo, PermissionRequest,
+    PreToolUseHook, Tool,
+};
+
+/// The tools of an agent that may edit.
+const EDITING_TOOLS: &[Tool] = &[Tool::Read, Tool::Glob, Tool::Grep, Tool::Edit, Tool::Write];
+/// The tools left once editing was found unenforced.
+const READ_ONLY_TOOLS: &[Tool] = &[Tool::Read, Tool::Glob, Tool::Grep];
+/// Seconds claude waits for the hook's answer before refusing the call.
+const HOOK_TIMEOUT: u32 = 30;
+/// Drafts larger than this are left for the model to read.
+const MAX_SENT_DRAFT_BYTES: usize = 50 * 1024;
+
+const CONTEXT_TAG: &str = "<draftmux-context>";
+const DRAFT_TAG: &str = "<draftmux-draft>";
+
+/// Whether a user message's text block is context Draftmux added.
+pub(crate) fn is_context_block(text: &str) -> bool {
+    text.starts_with(CONTEXT_TAG) || text.starts_with(DRAFT_TAG)
+}
+
+/// What the model is told about the draft.
+pub struct DraftContext {
+    /// The draft's `draft.md`.
+    pub draft_path: PathBuf,
+    /// The user's drafting instructions; may be empty.
+    pub instructions: String,
+    /// The target platform's syntax, such as "plain text, such as an email
+    /// body", read before every prompt; `None` when it can't be told.
+    pub target: Box<dyn Fn() -> Option<String> + Send + Sync>,
+}
+
+/// A draft's Claude [`Agent`] as a [`contract::Agent`].
+pub struct ClaudeAgent {
+    agent: Arc<Agent>,
+    context: Arc<DraftContext>,
+    ledger: Arc<Mutex<Ledger>>,
+    models: Arc<Mutex<Vec<ModelInfo>>>,
+}
+
+/// What the model was last sent or saw, so a prompt carries only what
+/// changed.
+#[derive(Default)]
+struct Ledger {
+    /// The target syntax last sent.
+    target: Option<String>,
+    /// The draft text the model last saw in full: through a draft block,
+    /// its own Read, or its own successful write.
+    seen: Option<String>,
+}
+
+impl ClaudeAgent {
+    /// Like [`Agent::new`], for a draft the agent may edit: the spec's
+    /// tools, hooks, permission prompts and system prompt are set here.
+    /// Fails when the spec loads settings, which can add hooks and allow
+    /// tools, or when the draft's directory can't be resolved.
+    pub fn new(
+        mut spec: LaunchSpec,
+        config: Config,
+        context: DraftContext,
+    ) -> Result<(Self, contract::Events), String> {
+        if !spec.setting_sources.is_empty() {
+            return Err("Claude Code settings can't be loaded for a draft yet".into());
+        }
+        let policy = DraftPolicy::new(&context.draft_path).map_err(|err| {
+            format!(
+                "couldn't resolve the draft {}: {err}",
+                context.draft_path.display()
+            )
+        })?;
+        spec.tools = EDITING_TOOLS.to_vec();
+        spec.hooks = vec![PreToolUseHook {
+            matcher: None,
+            timeout: Some(HOOK_TIMEOUT),
+        }];
+        spec.permission_prompt = true;
+        spec.system_prompt = Some(system_prompt(&context));
+        let model = spec.model.clone();
+        let (agent, mut raw) = Agent::new(spec, config);
+        let agent = Arc::new(agent);
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let (tx, events) = mpsc::unbounded();
+        let mut observer = Observer {
+            agent: Arc::downgrade(&agent),
+            policy,
+            ledger: ledger.clone(),
+            models: models.clone(),
+            model,
+            events: tx,
+            calls: HashMap::new(),
+            approved: Vec::new(),
+            message: None,
+            error_reported: false,
+            editing: true,
+        };
+        thread::Builder::new()
+            .name("claude-draft".into())
+            .spawn(move || {
+                while let Some(event) = futures::executor::block_on(raw.next()) {
+                    observer.on_event(event);
+                }
+            })
+            .map_err(|err| err.to_string())?;
+        let agent = Self {
+            agent,
+            context: Arc::new(context),
+            ledger,
+            models,
+        };
+        Ok((agent, events.boxed()))
+    }
+}
+
+impl contract::Agent for ClaudeAgent {
+    fn capabilities(&self) -> contract::Capabilities {
+        contract::Capabilities {
+            model_switching: false,
+        }
+    }
+
+    fn focus(&self) -> Result<(), contract::Error> {
+        self.agent.focus().map_err(error)
+    }
+
+    fn blur(&self) {
+        self.agent.blur();
+    }
+
+    fn prompt(
+        &self,
+        text: String,
+    ) -> future::BoxFuture<'static, Result<contract::Prompted, contract::Error>> {
+        // Claude Code reads slash commands only from plain text.
+        let context = (!text.trim_start().starts_with('/')).then(|| {
+            let context = self.context.clone();
+            let ledger = self.ledger.clone();
+            Box::new(move |first| blocks(&context, &mut ledger.lock().unwrap(), first))
+                as PromptContext
+        });
+        self.agent
+            .prompt_with(text, context)
+            .map(|reply| reply.map(|()| contract::Prompted::Running).map_err(error))
+            .boxed()
+    }
+
+    fn abort(&self) -> future::BoxFuture<'static, Result<(), contract::Error>> {
+        self.agent
+            .interrupt()
+            .map(|reply| reply.map_err(error))
+            .boxed()
+    }
+
+    fn history(&self) -> future::BoxFuture<'static, Result<contract::History, contract::Error>> {
+        future::ready(self.agent.history().map_err(|message| contract::Error {
+            kind: contract::ErrorKind::Other,
+            message,
+        }))
+        .boxed()
+    }
+
+    fn available_models(
+        &self,
+    ) -> future::BoxFuture<'static, Result<Vec<contract::Model>, contract::Error>> {
+        let models = self.models.lock().unwrap();
+        future::ready(Ok(models.iter().map(|m| model(&m.value)).collect())).boxed()
+    }
+
+    fn switch_model(
+        &self,
+        _model: contract::Model,
+    ) -> future::BoxFuture<'static, Result<contract::State, contract::Error>> {
+        future::ready(Err(contract::Error {
+            kind: contract::ErrorKind::Other,
+            message: "Switching models isn't available for Claude drafts yet.".into(),
+        }))
+        .boxed()
+    }
+}
+
+fn error(error: Error) -> contract::Error {
+    contract::Error {
+        kind: match error {
+            Error::Stopped => contract::ErrorKind::Stopped,
+            _ => contract::ErrorKind::Other,
+        },
+        message: error.to_string(),
+    }
+}
+
+fn model(id: &str) -> contract::Model {
+    contract::Model {
+        provider: "claude".into(),
+        id: id.to_owned(),
+    }
+}
+
+fn system_prompt(context: &DraftContext) -> String {
+    let draft = context.draft_path.display();
+    let mut prompt = format!(
+        "[Draftmux] You are helping the user polish a message in Draftmux.
+
+Draft file: {draft}
+
+- Make every change to the draft by editing that file with the Edit or Write tool; the user sees it in the Draftmux editor. Don't paste drafts or rewritten versions in chat; use chat for discussion.
+- Edit and Write only work on the draft file; give its absolute path. Read, Glob and Grep work as usual for checking facts.
+- Draftmux puts a {DRAFT_TAG} block holding the draft file's exact text before the user's message when it differs from what you last read, edited or wrote, for example after the user edits it, and a {CONTEXT_TAG} block with the target platform when it changes. The user doesn't see these blocks.
+- Edit and Write need the file to have been read in this session; when they report that, Read the draft and try again.
+- Put fields in YAML frontmatter at the very top of the draft, between --- lines: title: for PRs and issues; subject:, to: and cc: for emails (only known recipients). Any other key is allowed. Use string values, quoting YAML punctuation as needed; use comma-separated strings rather than lists. Keep these fields separate from the message body. Draftmux displays them separately and copies only the body.
+- Change only what the user asks for; keep the rest of the draft, including its formatting, as it is."
+    );
+    let instructions = context.instructions.trim();
+    if !instructions.is_empty() {
+        prompt.push_str("\n\nDrafting instructions from the user:\n");
+        prompt.push_str(instructions);
+    }
+    prompt
+}
+
+/// The context blocks of a prompt, given what the model saw. `first` says
+/// the prompt is a new process's first, which starts the ledger over.
+fn blocks(context: &DraftContext, ledger: &mut Ledger, first: bool) -> Vec<String> {
+    if first {
+        *ledger = Ledger::default();
+    }
+    let mut blocks = Vec::new();
+    if let Some(target) = (context.target)()
+        && ledger.target.as_ref() != Some(&target)
+    {
+        blocks.push(format!(
+            "{CONTEXT_TAG}\nTarget platform: {target}\n</draftmux-context>"
+        ));
+        ledger.target = Some(target);
+    }
+    // Saved before the prompt, so this is what the editor showed.
+    if let Ok(draft) = fs::read_to_string(&context.draft_path)
+        && ledger.seen.as_ref() != Some(&draft)
+    {
+        if draft.len() > MAX_SENT_DRAFT_BYTES {
+            blocks.push(format!(
+                "{CONTEXT_TAG}\nThe draft file changed since you last read, edited or wrote it, \
+                 and is too long to include here. Read it before editing.\n</draftmux-context>"
+            ));
+            ledger.seen = None;
+        } else {
+            let newline = if draft.is_empty() || draft.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            blocks.push(format!("{DRAFT_TAG}\n{draft}{newline}</draftmux-draft>"));
+            ledger.seen = Some(draft);
+        }
+    }
+    blocks
+}
+
+/// Follows one agent's events on its thread: answers callbacks, maps
+/// frames to contract events, and works out the draft writes.
+struct Observer {
+    agent: Weak<Agent>,
+    policy: DraftPolicy,
+    ledger: Arc<Mutex<Ledger>>,
+    models: Arc<Mutex<Vec<ModelInfo>>>,
+    /// The model the agent was asked to start with.
+    model: Option<String>,
+    events: mpsc::UnboundedSender<contract::Event>,
+    /// The tool calls of the run so far, by `tool_use_id`: name and input.
+    calls: HashMap<String, (String, Value)>,
+    /// Draft writes the hook allowed whose result hasn't arrived, in the
+    /// order they were allowed.
+    approved: Vec<Approved>,
+    /// The assistant message streaming: its id and text blocks.
+    message: Option<(String, Vec<String>)>,
+    /// The run's error was shown, so its settlement doesn't show it again.
+    error_reported: bool,
+    /// Edit and Write are still trusted.
+    editing: bool,
+}
+
+impl Observer {
+    fn emit(&self, event: contract::Event) {
+        let _ = self.events.unbounded_send(event);
+    }
+
+    fn on_event(&mut self, event: AgentEvent) {
+        use contract::Event as E;
+        match event {
+            AgentEvent::Ready(init) => {
+                *self.models.lock().unwrap() = init.models;
+                self.emit(E::Ready(contract::State {
+                    model: self.model.as_deref().map(model),
+                    thinking: String::new(),
+                }));
+            }
+            AgentEvent::RunStarted => {
+                self.error_reported = false;
+                self.emit(E::RunStarted);
+            }
+            AgentEvent::Frame(frame) => self.on_frame(&frame),
+            AgentEvent::Hook(request) => self.on_hook(request),
+            AgentEvent::Permission(request) => self.on_permission(request),
+            AgentEvent::CallbackCancelled { .. } | AgentEvent::Transcript(_) => {}
+            AgentEvent::RunSettled { aborted, error } => {
+                self.end_run(aborted);
+                if let Some(error) = error.filter(|_| !self.error_reported) {
+                    self.emit(E::AssistantEnded {
+                        text: String::new(),
+                        stop: contract::Stop::Error(Some(error)),
+                    });
+                }
+                self.emit(E::RunSettled { aborted });
+            }
+            AgentEvent::Crashed {
+                error,
+                failed_prompt,
+            } => {
+                self.end_run(true);
+                self.emit(E::Crashed {
+                    error,
+                    failed_prompt,
+                });
+            }
+        }
+    }
+
+    fn on_frame(&mut self, frame: &Value) {
+        use contract::Event as E;
+        match frame["type"].as_str() {
+            Some("stream_event") => {
+                let event = &frame["event"];
+                match event["type"].as_str() {
+                    Some("message_start") => {
+                        let id = event["message"]["id"].as_str().unwrap_or_default();
+                        self.message = Some((id.to_owned(), Vec::new()));
+                        self.emit(E::AssistantStarted);
+                    }
+                    Some("content_block_start")
+                        if event["content_block"]["type"] == "text"
+                            && event["index"].as_u64().is_some_and(|index| index > 0) =>
+                    {
+                        self.emit(E::AssistantBlock);
+                    }
+                    Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
+                        let text = event["delta"]["text"].as_str().unwrap_or_default();
+                        self.emit(E::AssistantText(text.to_owned()));
+                    }
+                    Some("message_stop") => self.end_message(contract::Stop::Completed),
+                    _ => {}
+                }
+            }
+            Some("assistant") => self.on_assistant(frame),
+            Some("user") if frame["isReplay"] != true => self.on_user(frame),
+            Some("system") if frame["subtype"] == "compact_boundary" => {
+                // The summary may have lost what the model was sent.
+                *self.ledger.lock().unwrap() = Ledger::default();
+            }
+            _ => {}
+        }
+    }
+
+    /// One content block of an assistant message, or a whole message
+    /// that wasn't streamed, such as a failed login's.
+    fn on_assistant(&mut self, frame: &Value) {
+        let message = &frame["message"];
+        let id = message["id"].as_str().unwrap_or_default();
+        let streamed = self.message.as_ref().is_some_and(|(open, _)| open == id);
+        if !streamed {
+            self.end_message(contract::Stop::Completed);
+            self.message = Some((id.to_owned(), Vec::new()));
+            self.emit(contract::Event::AssistantStarted);
+        }
+        let blocks = message["content"].as_array().map(Vec::as_slice);
+        for block in blocks.unwrap_or_default() {
+            if block["type"] == "text"
+                && let Some(text) = block["text"].as_str().filter(|t| !t.trim().is_empty())
+            {
+                if let Some((_, texts)) = &mut self.message {
+                    texts.push(text.to_owned());
+                }
+            } else if block["type"] == "tool_use" {
+                let call = history::tool_call(block);
+                let name = block["name"].as_str().unwrap_or_default().to_owned();
+                self.calls
+                    .insert(call.id.clone(), (name, block["input"].clone()));
+                self.emit(contract::Event::ToolStarted(call));
+            }
+        }
+        if frame["error"].is_string() {
+            let text = self.message.take().map(|(_, texts)| texts.join("\n\n"));
+            self.error_reported = true;
+            self.emit(contract::Event::AssistantEnded {
+                text: String::new(),
+                stop: contract::Stop::Error(text.filter(|text| !text.is_empty())),
+            });
+        } else if !streamed {
+            self.end_message(contract::Stop::Completed);
+        }
+    }
+
+    fn end_message(&mut self, stop: contract::Stop) {
+        if let Some((_, texts)) = self.message.take() {
+            self.emit(contract::Event::AssistantEnded {
+                text: texts.join("\n\n"),
+                stop,
+            });
+        }
+    }
+
+    fn on_user(&mut self, frame: &Value) {
+        let blocks = frame["message"]["content"].as_array().map(Vec::as_slice);
+        let results: Vec<&Value> = blocks
+            .unwrap_or_default()
+            .iter()
+            .filter(|block| block["type"] == "tool_result")
+            .collect();
+        for block in &results {
+            let Some(id) = block["tool_use_id"].as_str() else {
+                continue;
+            };
+            let is_error = block["is_error"] == true;
+            // `tool_use_result` belongs to the frame's only result.
+            let detail = (results.len() == 1).then(|| &frame["tool_use_result"]);
+            let result = contract::ToolResult {
+                output: history::content_text(&block["content"]),
+                is_error,
+                duration: None,
+                patch: detail.and_then(history::patch_of),
+            };
+            let (name, input) = self.calls.remove(id).unwrap_or_default();
+            let (draft_write, breach) = self.finished(id, &name, &input, is_error, detail);
+            self.emit(contract::Event::ToolFinished {
+                id: id.to_owned(),
+                result,
+                draft_write,
+            });
+            if let Some(error) = breach {
+                self.unenforced(error);
+            }
+        }
+    }
+
+    /// Works out whether call `id` of `name` with `input`, which just
+    /// ended, changed the draft, and what the model saw of it; with the
+    /// error to stop on when it was a write the hook didn't allow.
+    fn finished(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &Value,
+        is_error: bool,
+        detail: Option<&Value>,
+    ) -> (bool, Option<String>) {
+        if let Some(at) = self.approved.iter().position(|approved| approved.id == id) {
+            let approved = self.approved.remove(at);
+            let now = fs::read_to_string(self.policy.draft()).ok();
+            let landed = approved.wrote(now.as_deref());
+            // The model knows the draft only if it holds just what the call
+            // wrote, not a failed edit or a change made since.
+            self.ledger.lock().unwrap().seen = if landed && !is_error { now } else { None };
+            return (!is_error || landed, None);
+        }
+        let path = input["file_path"].as_str().unwrap_or_default();
+        match name {
+            "Edit" | "Write" if !is_error => (
+                true,
+                Some(format!(
+                    "Claude Code ran {name} on {path} without asking Draftmux, so Draftmux \
+                     can't keep its writes to the draft. Editing is off for this draft until \
+                     Draftmux restarts."
+                )),
+            ),
+            "Read" if !is_error && self.policy.is_draft(path) => {
+                if let Some(shown) = full_read(detail) {
+                    // Unless the draft changed after it was read.
+                    let now = fs::read_to_string(self.policy.draft()).ok();
+                    self.ledger.lock().unwrap().seen = now.filter(|now| now == shown);
+                }
+                (false, None)
+            }
+            _ => (false, None),
+        }
+    }
+
+    fn on_hook(&mut self, request: HookRequest) {
+        let decision = catch_unwind(AssertUnwindSafe(|| {
+            let tool = request.input["tool_name"].as_str().unwrap_or_default();
+            self.policy.decide(tool, &request.input["tool_input"])
+        }))
+        .unwrap_or_else(|_| Decision::Deny("Draftmux couldn't check this tool call.".into()));
+        let Some(id) = request.tool_use_id.clone() else {
+            request.deny("Draftmux: the tool call has no id.");
+            return;
+        };
+        match decision {
+            Decision::Allow => {
+                request.proceed();
+            }
+            Decision::DraftWrite if !self.editing => {
+                request.deny("Draftmux: editing is off for this draft.");
+            }
+            Decision::DraftWrite => {
+                self.approved.push(Approved {
+                    id,
+                    tool: request.input["tool_name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    input: request.input["tool_input"].clone(),
+                    before: fs::read_to_string(self.policy.draft()).ok(),
+                });
+                if !request.proceed() {
+                    // claude withdrew the call, or the process is gone.
+                    self.approved.pop();
+                }
+            }
+            Decision::Deny(reason) => {
+                request.deny(&reason);
+            }
+        }
+    }
+
+    fn on_permission(&mut self, request: PermissionRequest) {
+        let approved = request
+            .tool_use_id
+            .as_ref()
+            .is_some_and(|id| self.approved.iter().any(|approved| &approved.id == id));
+        match request.tool_name.as_str() {
+            "Read" | "Glob" | "Grep" => {
+                request.allow();
+            }
+            "Edit" | "Write" if approved => {
+                request.allow();
+            }
+            "Edit" | "Write" => {
+                request.deny("Draftmux: this write wasn't checked, so it isn't allowed.");
+                self.unenforced(
+                    "Claude Code asked to write without running Draftmux's check first, so \
+                     Draftmux can't keep its writes to the draft. Editing is off for this \
+                     draft until Draftmux restarts."
+                        .into(),
+                );
+            }
+            name => {
+                let reason = format!("Draftmux: {name} isn't available in this draft.");
+                request.deny(&reason);
+            }
+        }
+    }
+
+    /// The hook isn't enforced: stops claude and starts later processes
+    /// without Edit and Write.
+    fn unenforced(&mut self, error: String) {
+        if !self.editing {
+            return;
+        }
+        self.editing = false;
+        eprintln!("claude-rpc: {error}");
+        if let Some(agent) = self.agent.upgrade() {
+            agent.set_tools(READ_ONLY_TOOLS.to_vec());
+            agent.stop();
+        }
+        self.end_run(true);
+        self.emit(contract::Event::Crashed {
+            error,
+            failed_prompt: None,
+        });
+    }
+
+    /// Ends what the run left open: the streaming message, and the allowed
+    /// writes that never reported, which count by what the draft holds.
+    fn end_run(&mut self, aborted: bool) {
+        self.end_message(if aborted {
+            contract::Stop::Aborted
+        } else {
+            contract::Stop::Completed
+        });
+        let now = fs::read_to_string(self.policy.draft()).ok();
+        let approved = std::mem::take(&mut self.approved);
+        if !approved.is_empty() {
+            self.ledger.lock().unwrap().seen = None;
+        }
+        // Edit and Write run one at a time, so a draft holding what one of
+        // them would leave means it and every write allowed before it ran.
+        let landed = approved
+            .iter()
+            .rposition(|approved| approved.wrote(now.as_deref()))
+            .map_or(0, |last| last + 1);
+        for (n, approved) in approved.into_iter().enumerate() {
+            let draft_write = n < landed;
+            self.emit(contract::Event::ToolFinished {
+                id: approved.id,
+                result: contract::ToolResult {
+                    output: "The tool didn't report a result.".into(),
+                    is_error: true,
+                    duration: None,
+                    patch: None,
+                },
+                draft_write,
+            });
+        }
+        self.calls.clear();
+    }
+}
+
+/// A draft write the hook allowed: the call, and the draft's text then.
+struct Approved {
+    id: String,
+    tool: String,
+    input: Value,
+    before: Option<String>,
+}
+
+impl Approved {
+    /// Whether the draft, now holding `now`, holds what the call writes.
+    fn wrote(&self, now: Option<&str>) -> bool {
+        now.is_some_and(|now| {
+            self.before.as_deref() != Some(now)
+                && policy::expected(&self.tool, &self.input, self.before.as_deref()).as_deref()
+                    == Some(now)
+        })
+    }
+}
+
+/// The text a Read's result showed, when that was the whole file.
+fn full_read(detail: Option<&Value>) -> Option<&str> {
+    let file = &detail?["file"];
+    let whole = file["startLine"].as_u64() == Some(1)
+        && file["numLines"]
+            .as_u64()
+            .zip(file["totalLines"].as_u64())
+            .is_some_and(|(shown, total)| shown >= total);
+    whole.then(|| file["content"].as_str()).flatten()
+}

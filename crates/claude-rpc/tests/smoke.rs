@@ -15,10 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use draftmux_agent::Message;
+use draftmux_agent::{Agent as _, Event, Message};
 use draftmux_claude_rpc::{
-    Agent, AgentEvent, Config, DraftSession, Error, LaunchSpec, Session, Snapshot, transcript,
+    Agent, AgentEvent, ClaudeAgent, Config, DraftContext, DraftSession, Error, LaunchSpec, Session,
+    Snapshot, transcript,
 };
+use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
 use serde_json::Value;
@@ -100,6 +102,7 @@ fn spec(cwd: &Path, session: Session) -> LaunchSpec {
         session: Some(session),
         hooks: vec![],
         permission_prompt: true,
+        system_prompt: None,
     }
 }
 
@@ -386,5 +389,76 @@ fn live_draft_fork_is_adopted_resumed_and_read_back() {
         std::fs::read(&source).unwrap(),
         source_bytes,
         "the source is unchanged"
+    );
+}
+
+#[test]
+#[ignore = "runs the real claude"]
+fn live_draft_editing_is_limited_to_the_draft() {
+    let scratch = Scratch::new();
+    let id = scratch.session.clone();
+    let draft_dir = scratch.cwd.join("drafts/one");
+    std::fs::create_dir_all(&draft_dir).unwrap();
+    let draft = draft_dir.join("draft.md");
+    std::fs::write(&draft, "I like apples.\n").unwrap();
+    let outside = scratch.cwd.join("outside.md");
+    let spec = spec(&scratch.cwd, Session::New(id.clone()));
+    let context = DraftContext {
+        draft_path: draft.clone(),
+        instructions: String::new(),
+        target: Box::new(|| Some("Markdown for a forum post titled ZEBRA-7".into())),
+    };
+    let (agent, mut stream) = ClaudeAgent::new(spec, config(), context).unwrap();
+    let (tx, events) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while let Some(event) = block_on(stream.next()) {
+            if tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let prompt = format!(
+        "Do these in order, without asking: 1. Use the Edit tool to replace \"apples\" with \
+         \"pears\" in the draft. 2. Use the Write tool to create {} containing \"x\". \
+         3. Reply with only the title of the forum post the target platform names.",
+        outside.display()
+    );
+    block_on(agent.prompt(prompt.clone())).unwrap();
+    let mut finished = Vec::new();
+    let mut reply = String::new();
+    loop {
+        let event = events.recv_timeout(TIMEOUT).expect("an event");
+        match event {
+            Event::ToolFinished {
+                id, draft_write, ..
+            } => finished.push((id, draft_write)),
+            Event::AssistantEnded { text, .. } => reply.push_str(&text),
+            Event::Crashed { error, .. } => panic!("crashed: {error}"),
+            Event::RunSettled { aborted } => {
+                assert!(!aborted);
+                break;
+            }
+            _ => {}
+        }
+    }
+    eprintln!("tools {finished:?}, reply {reply:?}");
+    assert_eq!(std::fs::read_to_string(&draft).unwrap(), "I like pears.\n");
+    assert!(!outside.exists(), "the outside write was refused");
+    assert_eq!(finished.iter().filter(|(_, wrote)| *wrote).count(), 1);
+    assert!(
+        reply.contains("ZEBRA-7"),
+        "the target reached the model: {reply}"
+    );
+    drop(agent);
+    wait_gone(&id);
+    // The context blocks went to claude ahead of the prompt, and the
+    // history shows the prompt alone.
+    let native = std::fs::read(scratch.projects().join(format!("{id}.jsonl"))).unwrap();
+    let native = String::from_utf8(native).unwrap();
+    assert!(native.contains("<draftmux-draft>") && native.contains("ZEBRA-7"));
+    let lines = transcript::parse(native.as_bytes()).unwrap();
+    assert_eq!(
+        draftmux_claude_rpc::history(&lines, None).messages.first(),
+        Some(&Message::User(prompt))
     );
 }

@@ -112,6 +112,7 @@ impl Harness {
             session: Some(Session::New("00000000-0000-4000-8000-000000000000".into())),
             hooks: vec![],
             permission_prompt: true,
+            system_prompt: None,
         };
         edit(&mut spec);
         let (agent, events) = Agent::new(spec, config);
@@ -448,7 +449,7 @@ fn incoming_requests_are_answered_or_refused() {
                 {"matcher": "Edit|Write", "hookCallbackIds": ["draftmux_hook_0"], "timeout": 5}
             ]}}),
         ),
-        ack("init", json!({"models": []})),
+        ack("init", json!({"models": [], "hooks_applied": true})),
         // Answered at once: an unsupported subtype and an unknown hook.
         request(
             "m1",
@@ -489,7 +490,7 @@ fn incoming_requests_are_answered_or_refused() {
     .join("\n");
     let mut h = Harness::with(&[&script], config(), |spec| {
         spec.hooks = vec![PreToolUseHook {
-            matcher: "Edit|Write".into(),
+            matcher: Some("Edit|Write".into()),
             timeout: Some(5),
         }];
     });
@@ -1126,4 +1127,31 @@ fn a_restart_waits_for_the_previous_process_to_exit() {
     assert_eq!(h.take(1), ["Ready(1)"]);
     h.agent().stop();
     h.assert_finished(1);
+}
+
+#[test]
+fn hooks_claude_does_not_confirm_fail_the_prompt() {
+    let script = [
+        control_in(
+            "init",
+            json!({"subtype": "initialize", "hooks": {"PreToolUse": [
+                {"hookCallbackIds": ["draftmux_hook_0"], "timeout": 30}
+            ]}}),
+        ),
+        ack("init", json!({"models": []})),
+        "### eof".into(),
+    ]
+    .join("\n");
+    let mut h = Harness::with(&[&script], config(), |spec| {
+        spec.hooks = vec![PreToolUseHook {
+            matcher: None,
+            timeout: Some(30),
+        }];
+    });
+    let Err(Error::Rejected(err)) = resolve(h.agent().prompt("one".into())) else {
+        panic!("expected the prompt to be rejected");
+    };
+    assert!(err.contains("hooks"), "{err}");
+    h.assert_finished(0);
+    h.quiet(Duration::from_millis(100));
 }

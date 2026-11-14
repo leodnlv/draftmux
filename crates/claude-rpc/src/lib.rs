@@ -23,13 +23,16 @@
 
 mod agent;
 mod connection;
+mod contract;
 mod history;
 mod launch;
+mod policy;
 mod protocol;
 mod session;
 pub mod transcript;
 
 pub use agent::{Agent, AgentEvent, Config, Error, HookRequest, PermissionRequest};
+pub use contract::{ClaudeAgent, DraftContext};
 pub use history::history;
 pub use launch::{LaunchSpec, PreToolUseHook, Session, SettingSource, Tool};
 pub use protocol::{Init, ModelInfo};

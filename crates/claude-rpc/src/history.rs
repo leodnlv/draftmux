@@ -4,8 +4,10 @@
 use std::collections::{HashMap, HashSet};
 
 use draftmux_agent::{History, Message, Stop, ToolCall, ToolKind, ToolResult};
+use serde::Deserialize;
 use serde_json::Value;
 
+use crate::contract::is_context_block;
 use crate::transcript::{self, Line, ToolUseResult};
 
 /// What Claude Code writes as a user message when a run is interrupted,
@@ -132,7 +134,7 @@ fn messages(lines: &[&Line]) -> Vec<Message> {
                     },
                 });
             }
-            let text = content_text(&message.content);
+            let text = prompt_text(&message.content);
             if text.starts_with(INTERRUPTED) {
                 // The reply it interrupted, unless it came before any.
                 if let Some(Message::Assistant { stop, .. }) = messages
@@ -159,7 +161,7 @@ fn messages(lines: &[&Line]) -> Vec<Message> {
 
 /// The text of a `content`: a string, or the text blocks of an array joined
 /// by newlines.
-fn content_text(content: &Value) -> String {
+pub(crate) fn content_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks
@@ -172,9 +174,25 @@ fn content_text(content: &Value) -> String {
     }
 }
 
+/// The text of a user message's `content` without the context blocks
+/// Draftmux puts ahead of a prompt.
+fn prompt_text(content: &Value) -> String {
+    match content {
+        Value::Array(blocks) => {
+            let blocks: Vec<Value> = blocks
+                .iter()
+                .filter(|block| !block["text"].as_str().is_some_and(is_context_block))
+                .cloned()
+                .collect();
+            content_text(&Value::Array(blocks))
+        }
+        content => content_text(content),
+    }
+}
+
 /// A `tool_use` block, with the arguments the chat shows for Claude Code's
 /// built-in tools.
-fn tool_call(block: &Value) -> ToolCall {
+pub(crate) fn tool_call(block: &Value) -> ToolCall {
     let input = &block["input"];
     let arg = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
     let name = block["name"].as_str().unwrap_or_default();
@@ -205,6 +223,15 @@ fn tool_call(block: &Value) -> ToolCall {
     ToolCall {
         id: block["id"].as_str().unwrap_or_default().to_owned(),
         kind,
+    }
+}
+
+/// The unified patch of an Edit's or Write's `tool_use_result`, as a
+/// stream-json `user` frame carries it.
+pub(crate) fn patch_of(tool_use_result: &Value) -> Option<String> {
+    match ToolUseResult::deserialize(tool_use_result).ok()? {
+        ToolUseResult::Patch { structured_patch } => patch(&structured_patch),
+        ToolUseResult::Other(_) => None,
     }
 }
 
