@@ -121,8 +121,9 @@ type Reply = Result<(), Error>;
 /// No call blocks on claude: lines are queued to a writer thread, and a
 /// timer thread per process fails control requests claude doesn't answer
 /// in time and stops it once idle. The one wait is for a stopped process
-/// to exit before another starts on the same session, usually half a
-/// second and at most the stop escalation. Contract for the app:
+/// to exit before a request starts another on the same session, usually
+/// half a second and at most the stop escalation; [`Agent::focus`] waits
+/// for it on a background thread. Contract for the app:
 ///
 /// - Call [`Agent::focus`] when the draft is selected and [`Agent::blur`]
 ///   when switching away. Requests start claude when it isn't running.
@@ -158,6 +159,8 @@ struct Inner {
     /// The exit of the last process stopped. The next one waits for it, so
     /// two processes never write one session.
     previous: Option<Exit>,
+    /// The draft is selected, so a process starts once `previous` exits.
+    focused: bool,
 }
 
 struct Live {
@@ -328,24 +331,51 @@ impl Agent {
                 tools,
                 live: None,
                 previous: None,
+                focused: false,
             }),
             changed: Condvar::new(),
         });
         (Self { shared }, rx)
     }
 
-    /// The draft was selected: start claude if it isn't running.
+    /// The draft was selected: start claude if it isn't running. While the
+    /// previous process is still exiting, it starts on a background thread
+    /// once that has exited, and a failed start shows on the next request.
     pub fn focus(&self) -> Result<(), Error> {
         let mut inner = self.shared.lock();
-        let live = self.shared.ensure_live(&mut inner)?;
-        live.stop_when_quiescent = false;
-        Ok(())
+        inner.focused = true;
+        if inner.live.is_none()
+            && let Some(previous) = inner.previous.clone()
+            && !previous.wait(Instant::now())
+        {
+            let shared = Arc::downgrade(&self.shared);
+            thread::Builder::new()
+                .name("claude-focus".into())
+                .spawn(move || {
+                    if !previous.wait(Instant::now() + EXIT_BOUND) {
+                        return;
+                    }
+                    let Some(shared) = shared.upgrade() else {
+                        return;
+                    };
+                    let mut inner = shared.lock();
+                    if inner.focused
+                        && let Err(err) = shared.focus(&mut inner)
+                    {
+                        eprintln!("claude-rpc: couldn't start claude: {err}");
+                    }
+                })
+                .map_err(|err| Error::Spawn(err.to_string()))?;
+            return Ok(());
+        }
+        self.shared.focus(&mut inner)
     }
 
     /// The app switched to another draft: stop claude now if nothing is in
     /// flight, otherwise once the run settles.
     pub fn blur(&self) {
         let mut inner = self.shared.lock();
+        inner.focused = false;
         if let Some(live) = &mut inner.live {
             live.stop_when_quiescent = true;
         }
@@ -355,7 +385,9 @@ impl Agent {
     /// Stops claude now. A run in progress is interrupted first, since
     /// claude finishes a run after stdin closes.
     pub fn stop(&self) {
-        self.shared.stop(&mut self.shared.lock());
+        let mut inner = self.shared.lock();
+        inner.focused = false;
+        self.shared.stop(&mut inner);
     }
 
     /// Sends a user message. Resolves once it is written to claude, which
@@ -586,6 +618,12 @@ impl Shared {
         }) {
             self.stop(inner);
         }
+    }
+
+    fn focus(self: &Arc<Self>, inner: &mut Inner) -> Result<(), Error> {
+        let live = self.ensure_live(inner)?;
+        live.stop_when_quiescent = false;
+        Ok(())
     }
 
     fn ensure_live<'a>(self: &Arc<Self>, inner: &'a mut Inner) -> Result<&'a mut Live, Error> {

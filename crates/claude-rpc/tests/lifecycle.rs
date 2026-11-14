@@ -1120,13 +1120,30 @@ fn a_restart_waits_for_the_previous_process_to_exit() {
     assert_eq!(h.take(1), ["Ready(1)"]);
     let pid = h.pid(0);
     h.agent().stop();
-    h.agent().focus().unwrap();
     // SAFETY: probes a pid without signalling it.
-    let gone = unsafe { libc::kill(pid, 0) } == -1;
-    assert!(gone, "the first process exited before the second started");
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    h.agent().focus().unwrap();
+    assert!(alive(), "focus returned before the first process exited");
     assert_eq!(h.take(1), ["Ready(1)"]);
+    assert!(
+        !alive(),
+        "the first process exited before the second started"
+    );
     h.agent().stop();
     h.assert_finished(1);
+}
+
+#[test]
+fn switching_away_while_the_previous_process_exits_starts_none() {
+    let first = format!("{INIT}\n### sleep 300\n### exit 0");
+    let mut h = Harness::new(&[&first]);
+    h.agent().focus().unwrap();
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    h.agent().stop();
+    h.agent().focus().unwrap();
+    h.agent().blur();
+    h.quiet(Duration::from_millis(600));
+    assert!(!h.dir.path().join("record-1").exists());
 }
 
 #[test]
