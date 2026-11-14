@@ -1279,7 +1279,10 @@ impl Chat {
             .child(
                 svg()
                     .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
-                    .size(px(12.))
+                    // The crab is 24×15; at the pi mark's height it would
+                    // look smaller than the square, so it gets a wider box.
+                    .when(claude, |icon| icon.w(px(16.)).h(px(10.)))
+                    .when(!claude, |icon| icon.size(px(12.)))
                     .flex_none()
                     .text_color(palette.muted),
             )
