@@ -146,6 +146,9 @@ pub struct SelectionPopover {
     panel: Option<Panel>,
     /// The popover content's size, measured by the panel after layout.
     content_size: Option<Size<Pixels>>,
+    /// Options that arrived while the panel is open, shown once the panel
+    /// has their size.
+    staged: Option<Staged>,
     /// The editor pane in window coordinates, measured by [`Self::wrap`].
     pane: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The preview's selection, which the editor's mirrors while it has one.
@@ -211,23 +214,24 @@ impl Mode {
     fn is_request(&self, request: &Arc<AtomicBool>) -> bool {
         matches!(self, Self::Running { _cancel, .. } if Arc::ptr_eq(&_cancel.0, request))
     }
-
-    fn set_previews(&mut self, request: &Arc<AtomicBool>, options: Vec<String>) -> bool {
-        if !self.is_request(request) {
-            return false;
-        }
-        let Self::Running { previews, .. } = self else {
-            return false;
-        };
-        if *previews == options {
-            return false;
-        }
-        *previews = options;
-        true
-    }
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
+
+/// Options for the running request, held back until the panel is their
+/// size: drawn at once they would show clipped at the old size for a frame,
+/// since the panel resizes only after they are measured.
+struct Staged {
+    options: Vec<String>,
+    /// The request finished and these are its results.
+    done: bool,
+    /// Their size, measured by a hidden copy in the panel.
+    size: Option<Size<Pixels>>,
+}
+
+/// How long staged options wait for the panel to take their size before
+/// they show anyway.
+const STAGE_TIMEOUT: Duration = Duration::from_millis(250);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
@@ -324,6 +328,7 @@ impl SelectionPopover {
             open: None,
             panel: None,
             content_size: None,
+            staged: None,
             pane: Rc::new(Cell::new(None)),
             preview,
             preview_pane: Rc::new(Cell::new(None)),
@@ -851,11 +856,7 @@ impl SelectionPopover {
             while let Ok(options) = updates.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        if let Some(Open { mode, .. }) = &mut this.open
-                            && mode.set_previews(&request, options)
-                        {
-                            this.changed(cx);
-                        }
+                        this.options_arrived(&request, options, false, cx);
                     })
                     .is_err()
                 {
@@ -872,7 +873,7 @@ impl SelectionPopover {
                     return;
                 }
                 match result {
-                    Ok(options) => this.set_mode(Mode::Results(options), Some(0), cx),
+                    Ok(options) => this.options_arrived(&request, options, true, cx),
                     Err(err) => this.set_mode(Mode::Error(err.into()), None, cx),
                 }
             })
@@ -1108,8 +1109,128 @@ impl SelectionPopover {
         });
     }
 
+    /// Shows `options` from `request`, its results when it's `done`. While
+    /// the panel is open they wait in [`Staged`] for it to take their size.
+    fn options_arrived(
+        &mut self,
+        request: &Arc<AtomicBool>,
+        options: Vec<String>,
+        done: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = &self.open else { return };
+        if !open.mode.is_request(request) {
+            return;
+        }
+        if self.panel.is_none() {
+            self.staged = None;
+            return self.show_options(options, done, cx);
+        }
+        self.staged = Some(Staged {
+            options,
+            done,
+            size: None,
+        });
+        self.redraw(cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(STAGE_TIMEOUT).await;
+            this.update(cx, |this, cx| {
+                if this
+                    .staged
+                    .as_ref()
+                    .is_some_and(|staged| staged.done == done)
+                {
+                    this.unstage(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_options(&mut self, options: Vec<String>, done: bool, cx: &mut Context<Self>) {
+        if done {
+            return self.set_mode(Mode::Results(options), Some(0), cx);
+        }
+        if let Some(Open {
+            mode: Mode::Running { previews, .. },
+            ..
+        }) = &mut self.open
+            && *previews != options
+        {
+            *previews = options;
+            self.changed(cx);
+        }
+    }
+
+    /// Shows the staged options; the panel has their size, or stopped
+    /// waiting for it.
+    fn unstage(&mut self, cx: &mut Context<Self>) {
+        let Some(staged) = self.staged.take() else {
+            return;
+        };
+        let size = staged.size;
+        self.show_options(staged.options, staged.done, cx);
+        // The panel is already their size; skip measuring them again.
+        if size.is_some() && self.content_size.is_none() {
+            self.content_size = size;
+        }
+    }
+
+    /// Called by the panel with the staged options' size. The panel takes
+    /// it, and shows them in its first frame at that size.
+    fn measured_staged(&mut self, measured: Size<Pixels>, cx: &mut Context<Self>) {
+        let measured = measured.map(|v| v.ceil());
+        let Some(staged) = &mut self.staged else {
+            return;
+        };
+        if staged.size == Some(measured) {
+            return;
+        }
+        staged.size = Some(measured);
+        if self.content_size == Some(measured) {
+            // Drawing them needs no resize.
+            let this = cx.entity();
+            cx.defer(move |cx| this.update(cx, |this, cx| this.unstage(cx)));
+        } else {
+            self.content_size = Some(measured);
+            self.schedule_reconcile(cx);
+        }
+    }
+
+    /// Called by the panel before it draws, at `size`: the staged options
+    /// show once it is their size.
+    fn panel_sized(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        let ready =
+            self.staged.as_ref().and_then(|staged| staged.size) == Some(size.map(|v| v.ceil()));
+        if ready {
+            self.unstage(cx);
+        }
+    }
+
+    /// The staged options laid out as they will show, for measuring.
+    fn staged_content(&self, cx: &App) -> Option<AnyElement> {
+        let staged = self.staged.as_ref()?;
+        let Some(Open {
+            mode: Mode::Running { label, .. },
+            ..
+        }) = &self.open
+        else {
+            return None;
+        };
+        Some(previews(label, &staged.options, theme::palette(cx)))
+    }
+
     /// Called by the panel after layout with the content's natural size.
     fn measured(&mut self, measured: Size<Pixels>, cx: &mut Context<Self>) {
+        // The staged options' size is the one the panel is taking.
+        if self
+            .staged
+            .as_ref()
+            .is_some_and(|staged| staged.size.is_some())
+        {
+            return;
+        }
         let measured = measured.map(|v| v.ceil());
         if self.content_size != Some(measured) {
             self.content_size = Some(measured);
@@ -1346,32 +1467,10 @@ impl SelectionPopover {
             // Previews take the rows the options will, so finishing only
             // brings in the highlight and the keys.
             Mode::Running {
-                label, previews, ..
-            } if !previews.is_empty() => div()
-                .w(RESULTS_WIDTH - PADDING * 2.)
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .children(previews.iter().enumerate().map(|(index, option)| {
-                    let number = option_number(index).text_color(palette.faint);
-                    option_row(div().id(("preview", index)), number, option)
-                        .text_color(palette.muted)
-                }))
-                .child(rule(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .px(px(8.))
-                        .text_size(px(11.))
-                        .text_color(palette.faint)
-                        .whitespace_nowrap()
-                        .child(crate::chat::spinner(&palette))
-                        .child(label.clone())
-                        .child(div().ml(px(4.)).child("esc cancel")),
-                    &palette,
-                ))
-                .into_any_element(),
+                label,
+                previews: options,
+                ..
+            } if !options.is_empty() => previews(label, options, &palette),
             Mode::Running { label, .. } => div()
                 .px(px(10.))
                 .py(px(8.))
@@ -1419,10 +1518,9 @@ impl SelectionPopover {
         let key = match &open.mode {
             Mode::Actions(_) | Mode::Several(_) => return content,
             Mode::Comment(_) => "popover-comment",
-            // The options replace their previews without fading in again.
-            Mode::Running { previews, .. } if !previews.is_empty() => "popover-results",
-            Mode::Running { .. } => "popover-running",
-            Mode::Results(_) => "popover-results",
+            // Previews and then the options replace the spinner in place,
+            // without fading in again.
+            Mode::Running { .. } | Mode::Results(_) => "popover-options",
             Mode::Error(_) => "popover-error",
         };
         div()
@@ -1434,6 +1532,35 @@ impl SelectionPopover {
             )
             .into_any_element()
     }
+}
+
+/// `options` that aren't final yet, in the rows they will take, with
+/// `label` and a spinner below.
+fn previews(label: &SharedString, options: &[String], palette: &Palette) -> AnyElement {
+    div()
+        .w(RESULTS_WIDTH - PADDING * 2.)
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .children(options.iter().enumerate().map(|(index, option)| {
+            let number = option_number(index).text_color(palette.faint);
+            option_row(div().id(("preview", index)), number, option).text_color(palette.muted)
+        }))
+        .child(rule(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .text_size(px(11.))
+                .text_color(palette.faint)
+                .whitespace_nowrap()
+                .child(crate::chat::spinner(palette))
+                .child(label.clone())
+                .child(div().ml(px(4.)).child("esc cancel")),
+            palette,
+        ))
+        .into_any_element()
 }
 
 /// A row of the options, numbered.
@@ -1535,9 +1662,19 @@ struct PopoverPanel {
 }
 
 impl Render for PopoverPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let popover = self.popover.clone();
+        let size = window.viewport_size();
+        popover.update(cx, |popover, cx| popover.panel_sized(size, cx));
         let content = popover.read(cx).content(&popover, cx);
+        let staged = popover.read(cx).staged_content(cx).map(|staged| {
+            let mut copy = measured(staged, {
+                let popover = popover.clone();
+                move |size, cx| popover.update(cx, |this, cx| this.measured_staged(size, cx))
+            });
+            copy.style().visibility = Some(gpui::Visibility::Hidden);
+            copy
+        });
         let palette = theme::palette(cx);
         let (background, text) = (crate::platform::menu_color(palette), palette.text);
         div()
@@ -1559,12 +1696,20 @@ impl Render for PopoverPanel {
                 }
             })
             .child(measured_content(popover, content))
+            .children(staged)
     }
 }
 
 /// `content` laid out at its natural size, then measured to size the
 /// panel.
 fn measured_content(popover: Entity<SelectionPopover>, content: AnyElement) -> gpui::Div {
+    measured(content, move |size, cx| {
+        popover.update(cx, |this, cx| this.measured(size, cx))
+    })
+}
+
+/// `content` laid out at its natural size, which goes to `report`.
+fn measured(content: AnyElement, report: impl Fn(Size<Pixels>, &mut App) + 'static) -> gpui::Div {
     div()
         .absolute()
         .top_0()
@@ -1573,7 +1718,7 @@ fn measured_content(popover: Entity<SelectionPopover>, content: AnyElement) -> g
         .child(content)
         .child(
             canvas(
-                move |bounds, _, cx| popover.update(cx, |this, cx| this.measured(bounds.size, cx)),
+                move |bounds, _, cx| report(bounds.size, cx),
                 |_, _, _, _| {},
             )
             .absolute()
@@ -1789,26 +1934,58 @@ mod tests {
         assert!(cancel.load(Ordering::Relaxed));
     }
 
-    #[test]
-    fn previews_keep_request_alive_and_ignore_stale_updates() {
+    #[gpui::test]
+    fn options_from_the_running_request_show_and_stale_ones_dont(cx: &mut gpui::TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::app_settings::init(config.path().to_owned(), cx));
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        let popover = window
+            .update(cx, |_, window, cx| {
+                let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
+                let preview = cx.new(TextSelection::new);
+                let store = Store::new(config.path().join("drafts"));
+                cx.new(|cx| SelectionPopover::new(editor, preview, store, window, cx))
+            })
+            .unwrap();
         let request = Arc::new(AtomicBool::new(false));
         let stale = Arc::new(AtomicBool::new(false));
-        let mut mode = Mode::Running {
-            label: "Generating alternatives…".into(),
-            previews: Vec::new(),
-            _cancel: CancelOnDrop(request.clone()),
-            _task: Task::ready(()),
-        };
-        assert!(!mode.set_previews(&stale, vec!["stale".into()]));
-        assert!(mode.set_previews(&request, vec!["first".into()]));
-        assert!(!mode.set_previews(&request, vec!["first".into()]));
-        assert!(matches!(&mode, Mode::Running { previews, .. } if previews == &["first"]));
-        assert!(!request.load(Ordering::Relaxed));
-        assert!(mode.set_previews(&request, Vec::new()));
-        assert!(!request.load(Ordering::Relaxed));
-        drop(mode);
-        assert!(request.load(Ordering::Relaxed));
-        let mut completed = Mode::Results(vec!["final".into()]);
-        assert!(!completed.set_previews(&request, vec!["late".into()]));
+        cx.update(|cx| {
+            popover.update(cx, |popover, cx| {
+                popover.open = Some(Open {
+                    text: "Hi there\n".into(),
+                    range: 3..8,
+                    highlighted: None,
+                    mode: Mode::Running {
+                        label: "Generating alternatives…".into(),
+                        previews: Vec::new(),
+                        _cancel: CancelOnDrop(request.clone()),
+                        _task: Task::ready(()),
+                    },
+                });
+                let previews = |popover: &SelectionPopover| match &popover.open {
+                    Some(Open {
+                        mode: Mode::Running { previews, .. },
+                        ..
+                    }) => previews.clone(),
+                    _ => panic!("not running"),
+                };
+                popover.options_arrived(&stale, vec!["stale".into()], false, cx);
+                assert!(previews(popover).is_empty());
+                popover.options_arrived(&request, vec!["first".into()], false, cx);
+                assert_eq!(previews(popover), ["first"]);
+                assert!(!request.load(Ordering::Relaxed));
+
+                popover.options_arrived(&request, vec!["a".into(), "b".into()], true, cx);
+                let open = popover.open.as_ref().unwrap();
+                assert!(matches!(&open.mode, Mode::Results(options) if options == &["a", "b"]));
+                assert_eq!(open.highlighted, Some(0));
+                // The request is over: dropping it cancelled it, and late
+                // options are ignored.
+                assert!(request.load(Ordering::Relaxed));
+                popover.options_arrived(&request, vec!["late".into()], true, cx);
+                let open = popover.open.as_ref().unwrap();
+                assert!(matches!(&open.mode, Mode::Results(options) if options == &["a", "b"]));
+            });
+        });
     }
 }
