@@ -450,6 +450,7 @@ mod tests {
 
     /// A stand-in for `pi --mode rpc --fork`: records its arguments, creates
     /// a session file in `--session-dir` and answers `get_state` with it.
+    #[cfg(unix)]
     const FAKE_PI: &str = r#"
 printf '%s\n' "$@" > "$FAKE_PI_ARGS"
 while [ $# -gt 0 ]; do [ "$1" = --session-dir ] && dir=$2; shift; done
@@ -1279,6 +1280,7 @@ cat > /dev/null
         );
     }
 
+    #[cfg(unix)]
     const REFUSING_PI: &str = r#"
 while [ $# -gt 0 ]; do [ "$1" = --session-dir ] && dir=$2; shift; done
 file="$dir/fork.jsonl"

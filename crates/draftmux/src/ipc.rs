@@ -1,4 +1,5 @@
-//! How the CLI reaches the running app: a Unix socket in the data directory.
+//! How the CLI reaches the running app: a Unix socket in the data directory,
+//! which Windows provides too (AF_UNIX, Windows 10 1803 and later).
 //!
 //! The app process holding `draftmux.lock` owns `draftmux.sock`; the lock is
 //! taken before gpui starts and held for the process lifetime, so only one app
@@ -10,8 +11,8 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
@@ -22,6 +23,13 @@ use anyhow::{Context, Result, bail};
 use draftmux_storage::{CONFIG_DIR_VAR, DATA_DIR_VAR, data_dir};
 use gpui::{App, AsyncApp, WindowHandle};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::ERROR_ACCESS_DENIED,
+    System::Threading::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS},
+};
 
 use crate::chrome::Chrome;
 use crate::diagnostics;
@@ -221,7 +229,9 @@ pub fn activate_running() -> Result<()> {
 /// data and configuration directories; the returned child is then `open`,
 /// which exits once the launch is submitted. Otherwise this binary is spawned
 /// as `draftmux app` in its own process group, so the agent's tool timeout or
-/// Ctrl-C doesn't kill it.
+/// Ctrl-C doesn't kill it. On Windows it is detached from the console and,
+/// where the caller's job allows, from the job, which an agent's tool runner
+/// may kill when the command returns.
 fn launch(dir: &Path) -> Result<Child> {
     let log_path = diagnostics::log_path(dir);
     let log = diagnostics::open_log(&log_path)?;
@@ -250,16 +260,32 @@ fn launch(dir: &Path) -> Result<Child> {
             if let Some(home) = std::env::home_dir() {
                 command.current_dir(home);
             }
-            command.process_group(0);
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(
+                &mut command,
+                DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
+            );
             command
         }
     };
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .with_context(|| format!("launching {}", exe.display()))
+        .stderr(log);
+    let spawned = command.spawn();
+    // A job that doesn't allow breaking away refuses the flag; the app then
+    // stays in the caller's job.
+    #[cfg(windows)]
+    let spawned = match spawned {
+        Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            std::os::windows::process::CommandExt::creation_flags(&mut command, DETACHED_PROCESS);
+            command.spawn()
+        }
+        spawned => spawned,
+    };
+    spawned.with_context(|| format!("launching {}", exe.display()))
 }
 
 /// Polls until the app accepts connections. A launched app that exits

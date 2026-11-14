@@ -1493,6 +1493,7 @@ dependencies = [
  "draftmux-process",
  "draftmux-settings",
  "draftmux-storage",
+ "dunce",
  "editor",
  "futures",
  "gpui",
@@ -1511,7 +1512,9 @@ dependencies = [
  "shell-env",
  "similar",
  "tempfile",
+ "uds_windows",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

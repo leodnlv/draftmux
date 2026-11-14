@@ -26,7 +26,8 @@ mod model_picker;
 mod open;
 #[cfg(test)]
 mod performance;
-#[cfg_attr(target_os = "linux", path = "platform_linux.rs")]
+// Linux and Windows share one implementation.
+#[cfg_attr(not(target_os = "macos"), path = "platform_linux.rs")]
 mod platform;
 mod process;
 mod profiles;
@@ -137,14 +138,17 @@ fn run_app() -> Result<()> {
         ipc::Claim::Taken => return ipc::activate_running(),
     };
     let data_dir = draftmux_storage::data_dir()?;
+    // Before the log takes over stderr from a console that goes away.
+    #[cfg(windows)]
+    platform::release_console();
     diagnostics::init(&data_dir);
     let config_dir = draftmux_storage::prepare_config_dir()?;
     let store = Store::open_default()?;
 
     let application = gpui_platform::application().with_assets(assets::Assets);
-    // Linux restarts by running the binary again, which needs the command
-    // that starts the app; macOS reopens the bundle.
-    #[cfg(target_os = "linux")]
+    // Linux and Windows restart by running the binary again, which needs the
+    // command that starts the app; macOS reopens the bundle.
+    #[cfg(not(target_os = "macos"))]
     let application = application.with_restart_arguments(vec!["app".into()]);
     application.run(move |cx: &mut App| {
         theme::init(cx);

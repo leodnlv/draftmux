@@ -4,7 +4,8 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::symlink;
+#[cfg(unix)]
+use std::os::unix::fs::symlink as link_dir;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -178,7 +179,10 @@ fn is_skill(dir: &Path) -> bool {
 fn place(path: &Path, want: Want) -> Outcome {
     let ours = stub_text(path).filter(|text| is_stub(text));
     let result = match (&want, fs::symlink_metadata(path)) {
-        (Want::Link(target), Ok(_)) if fs::read_link(path).is_ok_and(|l| l == *target) => {
+        // Windows reads links back as verbatim (`\\?\C:\…`) paths.
+        (Want::Link(target), Ok(_))
+            if fs::read_link(path).is_ok_and(|l| *dunce::simplified(&l) == **target) =>
+        {
             return Outcome::Present;
         }
         (Want::Stub, Ok(_)) if ours.as_deref() == Some(STUB) => return Outcome::Present,
@@ -222,13 +226,38 @@ fn is_stub(text: &str) -> bool {
     lines.any(|line| line == "name: draftmux") && lines.any(|line| line == LOADER)
 }
 
+/// Links `path` to the directory `target` with a junction, which unlike a
+/// symlink needs neither administrator rights nor Developer Mode. Like
+/// `symlink`, it fails if `path` exists.
+#[cfg(windows)]
+fn link_dir(target: impl AsRef<Path>, path: impl AsRef<Path>) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let (target, path) = (target.as_ref(), path.as_ref());
+    // Paths can't contain quotes, so quoting each is enough for cmd.
+    let status = std::process::Command::new("cmd")
+        .raw_arg(format!(
+            "/d /c mklink /J \"{}\" \"{}\"",
+            path.display(),
+            target.display()
+        ))
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "mklink /J {} failed ({status})",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Creates `want` at `path`, failing rather than replacing anything that
 /// appeared there since `place` checked.
 fn create(path: &Path, want: &Want) -> Result<()> {
     let parent = path.parent().expect("skill paths have a parent");
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     match want {
-        Want::Link(target) => symlink(target, path)?,
+        Want::Link(target) => link_dir(target, path)?,
         Want::Stub => {
             fs::create_dir(path)?;
             fs::OpenOptions::new()
@@ -340,7 +369,7 @@ mod tests {
         // A link to a checkout the user made by hand.
         let checkout = home.join("checkout/skills/draftmux");
         fs::create_dir_all(&checkout).unwrap();
-        symlink(&checkout, skills.join("draftmux")).unwrap();
+        link_dir(&checkout, skills.join("draftmux")).unwrap();
         // An edited copy and a dangling link in the pi profiles.
         let edited = profile(home, "pi");
         let edited_skill = edited.dir.join("skills/draftmux");
@@ -348,7 +377,7 @@ mod tests {
         fs::write(edited_skill.join("SKILL.md"), "mine").unwrap();
         let dangling = profile(home, "pi-work");
         fs::create_dir_all(dangling.dir.join("skills")).unwrap();
-        symlink(home.join("gone"), dangling.dir.join("skills/draftmux")).unwrap();
+        link_dir(home.join("gone"), dangling.dir.join("skills/draftmux")).unwrap();
 
         let entries = install(
             Some(&claude),

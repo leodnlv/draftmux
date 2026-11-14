@@ -1,6 +1,7 @@
 //! The latest GitHub release, read with the system's curl so the app needs
 //! no TLS stack of its own.
 
+#[cfg(not(windows))]
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -13,10 +14,12 @@ use super::{CURRENT_VERSION, Release};
 
 const LATEST_RELEASE: &str = "https://api.github.com/repos/raine/draftmux/releases/latest";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Larger responses are refused: the release JSON and checksum files are
 /// small, and the app archive is tens of megabytes.
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+#[cfg(not(windows))]
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -55,10 +58,11 @@ fn is_not_found(curl_error: &str) -> bool {
 }
 
 /// This platform's app archive of `version`, which the release must include
-/// with its checksum file: the macOS bundle, or the Linux tree for this
-/// architecture.
+/// with its checksum file: the macOS bundle, or the Linux or Windows tree
+/// for this architecture.
 pub fn archive_name(version: &Version) -> String {
-    format!("{}.tar.gz", asset_stem(version))
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    format!("{}.{extension}", asset_stem(version))
 }
 
 fn checksum_name(version: &Version) -> String {
@@ -68,6 +72,8 @@ fn checksum_name(version: &Version) -> String {
 fn asset_stem(version: &Version) -> String {
     if cfg!(target_os = "macos") {
         format!("Draftmux-{version}-arm64-app")
+    } else if cfg!(windows) {
+        format!("Draftmux-{version}-windows-x86_64")
     } else {
         // Rust's names for the architectures match `uname -m`'s, which
         // scripts/release-linux uses.
@@ -106,6 +112,7 @@ pub fn fetch_text(url: &str) -> Result<String> {
 }
 
 /// Downloads `url` to `path`.
+#[cfg(not(windows))]
 pub fn download(url: &str, path: &Path) -> Result<()> {
     let mut command = curl(MAX_DOWNLOAD_BYTES);
     command.arg("--output").arg(path).arg(url);
@@ -201,6 +208,15 @@ mod tests {
             ]
             .contains(&name.as_str()),
             "{name}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_takes_the_zip() {
+        assert_eq!(
+            archive_name(&Version::new(1, 2, 3)),
+            "Draftmux-1.2.3-windows-x86_64.zip"
         );
     }
 

@@ -2,11 +2,12 @@
 //! raine/draftmux. A Developer ID signed `Draftmux.app`, or a Linux app tree
 //! from a release tarball, checks for a newer release once a day, installs
 //! it in the background by swapping the app in place and offers to restart
-//! into it. Development builds never check on their own; Check for Updates
+//! into it. A Windows release checks as often and offers the download. Development builds never check on their own; Check for Updates
 //! still reports a newer release to them. The toolbar offers a newer release
 //! with what changed in it.
 
 mod cache;
+#[cfg_attr(windows, path = "update/install_windows.rs")]
 mod install;
 mod notes;
 mod release;
@@ -50,12 +51,18 @@ pub enum Ineligible {
     /// built from source.
     Development,
     /// The folder holding the app isn't writable by this user.
+    #[cfg_attr(windows, allow(dead_code))]
     Unwritable(String),
+    /// A release on a platform whose updates are installed by hand.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Manual,
 }
 
 /// The recipe that rebuilds and installs a development build.
 const INSTALL_RECIPE: &str = if cfg!(target_os = "macos") {
     "just install-app"
+} else if cfg!(windows) {
+    "cargo build --release -p draftmux"
 } else {
     "just linux-install"
 };
@@ -71,6 +78,7 @@ impl Ineligible {
                 "Draftmux {version} is available, but Draftmux can't replace itself in {dir}. \
                  Download it from GitHub."
             ),
+            Self::Manual => format!("Draftmux {version} is available. Download it from GitHub."),
         }
     }
 }

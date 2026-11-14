@@ -19,6 +19,7 @@ draftmux-pi-rpc = { path = "../pi-rpc" }
 draftmux-process = { path = "../process" }
 draftmux-settings = { path = "../settings" }
 draftmux-storage = { path = "../storage" }
+dunce = "1.0.5"
 editor = { path = "../editor" }
 futures = "0.3"
 gpui.workspace = true
@@ -73,6 +74,18 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSString",
 ] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(windows)'.dependencies]
+gpui_platform.workspace = true
+uds_windows = "1.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }

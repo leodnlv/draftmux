@@ -19,8 +19,8 @@ pub fn system_dark(cx: &App) -> bool {
 pub fn reduce_transparency() -> bool {
     false
 }
-/// The desktop entry runs `draftmux app`, so a bare command is never the
-/// app's launch.
+/// The desktop entry and the Start Menu shortcut run `draftmux app`, so a
+/// bare command is never the app's launch.
 pub fn launched_as_app() -> bool {
     false
 }
@@ -70,7 +70,11 @@ pub fn write_flavours(flavours: &crate::copy::Flavours, cx: &mut App) -> bool {
 }
 
 /// The label of a button that reveals a path in the file manager.
-pub const REVEAL_LABEL: &str = "Show in File Manager";
+pub const REVEAL_LABEL: &str = if cfg!(windows) {
+    "Show in Explorer"
+} else {
+    "Show in File Manager"
+};
 
 pub fn window_options(mut options: gpui::WindowOptions) -> gpui::WindowOptions {
     if let Some(titlebar) = options.titlebar.as_mut() {
@@ -129,6 +133,41 @@ pub fn move_popup(
 ) {
     match *window {}
 }
+#[cfg(target_os = "linux")]
 #[path = "platform_linux/frame.rs"]
 mod frame;
+#[cfg(target_os = "linux")]
 pub use frame::frame;
+
+/// Windows draws the title bar and window frame.
+#[cfg(windows)]
+pub fn frame(
+    content: gpui::AnyElement,
+    _: &mut gpui::Window,
+    cx: &mut App,
+    _close: Box<dyn gpui::Action>,
+    _title: &'static str,
+) -> gpui::AnyElement {
+    use gpui::{div, prelude::*};
+    // Translucent surfaces need an opaque backing on non-blurred windows.
+    div()
+        .size_full()
+        .bg(crate::theme::palette(cx).pane)
+        .child(content)
+        .into_any_element()
+}
+
+/// Detaches from the console window a Start Menu or Explorer launch of the
+/// console program creates, so none stays open beside the app. A console
+/// shared with a terminal is kept for the app's output.
+#[cfg(windows)]
+pub fn release_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut processes = [0u32; 2];
+    // SAFETY: the buffer holds the two entries the call may write.
+    let count = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), 2) };
+    if count == 1 {
+        // SAFETY: a plain call; stderr is redirected to the log afterwards.
+        unsafe { FreeConsole() };
+    }
+}

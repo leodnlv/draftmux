@@ -6,8 +6,6 @@
 use std::backtrace::Backtrace;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
-use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::fs::MetadataExt;
 use std::panic::{self, PanicHookInfo};
 use std::path::{Path, PathBuf};
 
@@ -67,7 +65,9 @@ pub fn init(dir: &Path) {
     install_panic_hook();
 }
 
+#[cfg(unix)]
 fn redirect_stderr(path: &Path) -> Result<()> {
+    use std::os::fd::{AsFd, AsRawFd};
     let stderr = io::stderr();
     if stderr.is_terminal() || is_same_file(stderr.as_fd(), path) {
         return Ok(());
@@ -82,7 +82,29 @@ fn redirect_stderr(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Points stderr at the log unless it goes to a console. When the CLI
+/// launched the app, stderr already is the log, and appending through a
+/// second handle changes nothing.
+#[cfg(windows)]
+fn redirect_stderr(path: &Path) -> Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+    if io::stderr().is_terminal() {
+        return Ok(());
+    }
+    // The handle stays open as the process's stderr.
+    let log = open_log(path)?.into_raw_handle();
+    // SAFETY: `log` is an open file handle that is never closed.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, log) } == 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("redirecting stderr to {}", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn is_same_file(fd: std::os::fd::BorrowedFd<'_>, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
     let Ok(fd) = fd.try_clone_to_owned() else {
         return false;
     };
@@ -158,8 +180,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "kept\nadded\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn is_same_file_compares_the_open_file() {
+        use std::os::fd::AsFd;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join(LOG);
         let file = open_log(&log).unwrap();

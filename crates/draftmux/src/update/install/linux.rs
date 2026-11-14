@@ -11,12 +11,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::run;
-use crate::resources::LINUX_MARKER;
+use crate::resources::{RELEASE_MARKER, TREE_MARKER};
 use crate::update::{Ineligible, Release};
-
-/// In the root of a tree that scripts/release-linux built, holding its
-/// version. Trees without it are development builds.
-const RELEASE_MARKER: &str = ".draftmux-release";
 
 pub const TAR: &str = "tar";
 pub const ARCHIVE_ROOT: &str = "draftmux-linux";
@@ -31,7 +27,7 @@ pub struct Installation {
 /// can write to.
 pub fn installation() -> Result<Installation, Ineligible> {
     let exe = crate::resources::exe().map_err(|_| Ineligible::Development)?;
-    let root = crate::resources::linux_root(&exe)
+    let root = crate::resources::tree_root(&exe)
         .ok_or(Ineligible::Development)?
         .to_owned();
     if !root.join(RELEASE_MARKER).is_file() {
@@ -82,7 +78,7 @@ pub fn verify(new: &Path, release: &Release, installation: &Installation) -> Res
 /// The tree must have the markers and the pi extension that the install
 /// script requires, and an executable binary rather than a link out of it.
 fn check_tree(new: &Path) -> Result<()> {
-    for marker in [LINUX_MARKER, RELEASE_MARKER] {
+    for marker in [TREE_MARKER, RELEASE_MARKER] {
         if !new.join(marker).is_file() {
             bail!("the archive's app has no {marker}");
         }
@@ -112,7 +108,7 @@ mod tests {
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir_all(root.join("share/draftmux/pi-extension")).unwrap();
         fs::write(root.join("share/draftmux/pi-extension/draftmux.ts"), "").unwrap();
-        fs::write(root.join(LINUX_MARKER), "draftmux\n").unwrap();
+        fs::write(root.join(TREE_MARKER), "draftmux\n").unwrap();
         fs::write(root.join(RELEASE_MARKER), "1.2.3\n").unwrap();
         let binary = root.join("bin/draftmux");
         fs::write(&binary, "#!/bin/sh\necho draftmux 1.2.3\n").unwrap();

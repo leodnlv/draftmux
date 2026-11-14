@@ -431,6 +431,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn pi(pi: Command) -> Backend {
         Backend::Pi {
             pi,

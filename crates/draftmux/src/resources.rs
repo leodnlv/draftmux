@@ -1,5 +1,6 @@
 //! Files the app ships beside its binary: in `Draftmux.app/Contents/Resources`
-//! on macOS or `share/draftmux` beside the Linux install's `bin` directory.
+//! on macOS or `share/draftmux` beside the `bin` directory of a Linux or
+//! Windows app tree.
 //! Development binaries use the repository. Installed binaries never fall
 //! back to build-machine resources.
 
@@ -8,18 +9,25 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 
-/// In the root of a Linux app tree, which the install script requires.
-pub const LINUX_MARKER: &str = ".draftmux-bundle";
+/// In the root of a Linux or Windows app tree, which the install scripts
+/// require.
+pub const TREE_MARKER: &str = ".draftmux-bundle";
+/// In the root of a tree that a release script built, holding its version.
+/// Trees without it are development builds.
+#[cfg(not(target_os = "macos"))]
+pub const RELEASE_MARKER: &str = ".draftmux-release";
 
 /// The running binary with symlinks resolved, so a `draftmux` on `PATH` that
-/// links into a bundle is seen as bundled. Resolved once: after an update
+/// links into a bundle is seen as bundled. Windows paths stay in their usual
+/// form rather than the verbatim (`\\?\`) one, which pi and its users are
+/// shown. Resolved once: after an update
 /// replaces the Linux tree, the kernel reports the running binary as
 /// deleted, while its path holds the new version's files.
 pub fn exe() -> Result<PathBuf> {
     static EXE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     EXE.get_or_init(|| {
         std::env::current_exe()
-            .and_then(|exe| exe.canonicalize())
+            .and_then(dunce::canonicalize)
             .map_err(|err| err.to_string())
     })
     .clone()
@@ -44,7 +52,7 @@ pub fn pi_extension() -> Result<PathBuf> {
 }
 
 fn pi_extension_for(exe: &Path) -> Result<PathBuf> {
-    let path = match (bundle(exe), linux_layout(exe)) {
+    let path = match (bundle(exe), tree_resources(exe)) {
         (Some(app), _) => app.join("Contents/Resources/pi-extension/draftmux.ts"),
         (None, Some(resources)) => resources.join("pi-extension/draftmux.ts"),
         (None, None) => Path::new(concat!(
@@ -59,16 +67,16 @@ fn pi_extension_for(exe: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The Linux app tree holding `exe`, if it is `<root>/bin/<exe>`. The marker
+/// The app tree holding `exe`, if it is `<root>/bin/<exe>`. The marker
 /// distinguishes an installed tree from a development binary.
-pub fn linux_root(exe: &Path) -> Option<&Path> {
+pub fn tree_root(exe: &Path) -> Option<&Path> {
     let bin = exe.parent()?;
     let root = bin.parent()?;
-    (bin.file_name()? == "bin" && root.join(LINUX_MARKER).is_file()).then_some(root)
+    (bin.file_name()? == "bin" && root.join(TREE_MARKER).is_file()).then_some(root)
 }
 
-fn linux_layout(exe: &Path) -> Option<PathBuf> {
-    linux_root(exe).map(|root| root.join("share/draftmux"))
+fn tree_resources(exe: &Path) -> Option<PathBuf> {
+    tree_root(exe).map(|root| root.join("share/draftmux"))
 }
 
 #[cfg(test)]
@@ -101,11 +109,11 @@ mod tests {
     }
 
     #[test]
-    fn linux_extension_is_relocatable_and_never_falls_back() {
+    fn tree_extension_is_relocatable_and_never_falls_back() {
         let tmp = tempfile::tempdir().unwrap();
         let app = tmp.path().join("app with spaces");
         fs::create_dir_all(app.join("bin")).unwrap();
-        fs::write(app.join(LINUX_MARKER), "draftmux\n").unwrap();
+        fs::write(app.join(TREE_MARKER), "draftmux\n").unwrap();
         let exe = app.join("bin/draftmux");
         assert!(pi_extension_for(&exe).is_err());
         let ext = app.join("share/draftmux/pi-extension/draftmux.ts");
