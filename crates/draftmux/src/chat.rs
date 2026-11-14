@@ -1278,10 +1278,9 @@ impl Chat {
             .child(
                 svg()
                     .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
-                    // The mascot is drawn on a 16×10 grid. At 1.5 points per
-                    // unit its edges land on whole pixels on Retina displays,
-                    // and its body is as tall as the pi mark.
-                    .when(claude, |icon| icon.w(px(24.)).h(px(15.)))
+                    // The starburst's thin rays need a little more room than
+                    // the pi mark's solid blocks to look the same size.
+                    .when(claude, |icon| icon.size(px(14.)))
                     .when(!claude, |icon| icon.size(px(12.)))
                     .flex_none()
                     .text_color(palette.muted),
