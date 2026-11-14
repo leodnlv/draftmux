@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use draftmux_pi_profiles::{Availability, ModelRef, availability};
 use draftmux_pi_rpc::{ModelOverride, ThinkingLevel};
 use draftmux_settings::{
-    ALTERNATIVES, ClaudeSelectionModel, DraftingModel, PiReads, Resolved, Rule, Scope,
-    SelectionModel, Settings, Source, Trust, default_profile, pi_reads, tilde_path,
+    ALTERNATIVES, ClaudeDraftingModel, ClaudeSelectionModel, DraftBackend, DraftingModel, PiReads,
+    Resolved, Rule, Scope, SelectionModel, Settings, Source, Trust, default_profile, pi_reads,
+    tilde_path,
 };
 use draftmux_storage::Target;
 use editor::{Editor, EditorEvent, EditorStyle};
@@ -104,24 +105,42 @@ enum Field {
     Target,
     ContextFiles,
     Alternatives,
+    Backend,
+    ClaudeDrafting,
     ClaudeSelection,
 }
 
-/// The Claude Code models the selection model menu offers, by `--model`
-/// alias.
+/// The Claude Code models the model menus offer, by `--model` alias.
 const CLAUDE_MODELS: &[(&str, &str)] =
     &[("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
 
-/// What the Claude selection model field shows.
-fn claude_selection_label(model: &ClaudeSelectionModel) -> SharedString {
-    match model.model() {
-        None => "Same as drafting".into(),
+/// The name of a Claude Code model, else `follows`.
+fn claude_model_label(model: Option<&str>, follows: &'static str) -> SharedString {
+    match model {
+        None => follows.into(),
         Some(model) => CLAUDE_MODELS
             .iter()
             .find(|(alias, _)| *alias == model)
             .map_or(model, |(_, name)| name)
             .to_owned()
             .into(),
+    }
+}
+
+/// What the Claude drafting model field shows.
+fn claude_drafting_label(model: &ClaudeDraftingModel) -> SharedString {
+    claude_model_label(model.model(), "Same as session")
+}
+
+/// What the Claude selection model field shows.
+fn claude_selection_label(model: &ClaudeSelectionModel) -> SharedString {
+    claude_model_label(model.model(), "Same as drafting")
+}
+
+fn backend_label(backend: DraftBackend) -> SharedString {
+    match backend {
+        DraftBackend::Pi => "pi".into(),
+        DraftBackend::SameAsSource => "Same as source".into(),
     }
 }
 
@@ -185,6 +204,8 @@ enum Choice {
     Thinking(ModelField, ThinkingLevel),
     Target(Target),
     Alternatives(usize),
+    Backend(DraftBackend),
+    ClaudeDrafting(ClaudeDraftingModel),
     ClaudeSelection(ClaudeSelectionModel),
 }
 
@@ -443,6 +464,14 @@ impl SettingsWindow {
                     (model_field.label(inherited), !model_field.is_set(&own))
                 }
                 Field::Target => (inherited.target.value.label().into(), own.target.is_none()),
+                Field::Backend => (
+                    backend_label(inherited.backend.value),
+                    own.backend.is_none(),
+                ),
+                Field::ClaudeDrafting => (
+                    claude_drafting_label(&inherited.claude_drafting_model.value),
+                    own.claude_drafting_model.is_none(),
+                ),
                 Field::ClaudeSelection => (
                     claude_selection_label(&inherited.claude_selection_model.value),
                     own.claude_selection_model.is_none(),
@@ -536,6 +565,42 @@ impl SettingsWindow {
                     ));
                 }
             }
+            Field::Backend => {
+                let current = match is_rule {
+                    true => own.backend,
+                    false => Some(resolved.backend.value),
+                };
+                for backend in [DraftBackend::Pi, DraftBackend::SameAsSource] {
+                    items.push(item(
+                        backend_label(backend),
+                        current == Some(backend),
+                        Choice::Backend(backend),
+                    ));
+                }
+            }
+            Field::ClaudeDrafting => {
+                let current = match is_rule {
+                    true => own.claude_drafting_model.as_ref(),
+                    false => Some(&resolved.claude_drafting_model.value),
+                };
+                let mut choices = vec![ClaudeDraftingModel::Session];
+                choices.extend(
+                    CLAUDE_MODELS
+                        .iter()
+                        .map(|(alias, _)| ClaudeDraftingModel::Model((*alias).into())),
+                );
+                // One set by hand in settings.json.
+                if let Some(other) = current.filter(|model| !choices.contains(model)) {
+                    choices.push(other.clone());
+                }
+                for choice in choices {
+                    items.push(item(
+                        claude_drafting_label(&choice),
+                        current == Some(&choice),
+                        Choice::ClaudeDrafting(choice),
+                    ));
+                }
+            }
             Field::ClaudeSelection => {
                 let current = match is_rule {
                     true => own.claude_selection_model.as_ref(),
@@ -597,6 +662,12 @@ impl SettingsWindow {
                 }
             }
             Choice::Target(target) => self.update_scope(|scope| scope.target = Some(target), cx),
+            Choice::Backend(backend) => {
+                self.update_scope(|scope| scope.backend = Some(backend), cx)
+            }
+            Choice::ClaudeDrafting(model) => {
+                self.update_scope(|scope| scope.claude_drafting_model = Some(model), cx)
+            }
             Choice::ClaudeSelection(model) => {
                 self.update_scope(|scope| scope.claude_selection_model = Some(model), cx)
             }
@@ -632,6 +703,8 @@ impl SettingsWindow {
                     scope.selection_model = None
                 }
                 Field::Target => scope.target = None,
+                Field::Backend => scope.backend = None,
+                Field::ClaudeDrafting => scope.claude_drafting_model = None,
                 Field::ClaudeSelection => scope.claude_selection_model = None,
                 Field::ContextFiles => scope.context_files = None,
                 Field::Alternatives => {}
@@ -1139,9 +1212,44 @@ impl SettingsWindow {
     ) -> Vec<AnyElement> {
         let c = &Colors::get(cx);
         let is_rule = inherited.is_some();
+        let target_row = self.scoped_row(
+            Field::Target,
+            "Target",
+            vec![description(c, "For drafts handed off without --target")],
+            own.target.is_some(),
+            inherited.map(|i| i.target.source),
+            self.popup(
+                Field::Target,
+                resolved.target.value.label().into(),
+                own.target.is_none(),
+                None,
+                cx,
+            ),
+            cx,
+        );
+        let instructions = self.instructions_row(own, inherited, cx);
+        let backend_row = self.scoped_row(
+            Field::Backend,
+            "Backend",
+            vec![description(
+                c,
+                "Where Claude Code sessions continue when handed off without --backend. \
+                 pi sessions always continue on pi",
+            )],
+            own.backend.is_some(),
+            inherited.map(|i| i.backend.source),
+            self.popup(
+                Field::Backend,
+                backend_label(resolved.backend.value),
+                own.backend.is_none(),
+                Some(150.),
+                cx,
+            ),
+            cx,
+        );
         let profile_row = self.scoped_row(
             Field::Profile,
-            "pi profile",
+            "Profile",
             vec![description(
                 c,
                 "For sessions not stored in a pi profile, such as Claude Code handoffs",
@@ -1159,22 +1267,6 @@ impl SettingsWindow {
         );
         let drafting = self.model_row(ModelField::Drafting, own, resolved, inherited, cx);
         let selection = self.model_row(ModelField::Selection, own, resolved, inherited, cx);
-        let target_row = self.scoped_row(
-            Field::Target,
-            "Default target",
-            vec![description(c, "For drafts handed off without --target")],
-            own.target.is_some(),
-            inherited.map(|i| i.target.source),
-            self.popup(
-                Field::Target,
-                resolved.target.value.label().into(),
-                own.target.is_none(),
-                None,
-                cx,
-            ),
-            cx,
-        );
-        let instructions = self.instructions_row(own, inherited, cx);
         let context_on = resolved.context_files.value;
         let context_row = self.scoped_row(
             Field::ContextFiles,
@@ -1197,34 +1289,11 @@ impl SettingsWindow {
             ),
             cx,
         );
-
-        let mut form = vec![
-            group_title(c, "Models").into_any_element(),
-            group(c, vec![profile_row, drafting, selection]).into_any_element(),
-        ];
-        if !is_rule {
-            form.push(
-                note(
-                    c,
-                    "Drafts continue on the model their source session used, and selection \
-                     actions reuse it, so the provider's prompt cache covers the forked \
-                     conversation. The profile's settings.json default only applies when a \
-                     session names no model, as with Claude Code handoffs.",
-                )
-                .into_any_element(),
-            );
-        }
-        form.push(group_title(c, "Drafts").into_any_element());
-        form.push(group(c, vec![target_row, instructions]).into_any_element());
-        form.push(group_title(c, "pi setup").into_any_element());
-        form.push(group(c, vec![context_row]).into_any_element());
+        let claude_drafting = self.claude_drafting_row(own, resolved, inherited, cx);
         let claude_selection = self.scoped_row(
             Field::ClaudeSelection,
             "Selection model",
-            vec![description(
-                c,
-                "Alternatives and actions on selected text in drafts on Claude Code",
-            )],
+            vec![description(c, "Alternatives and actions on selected text")],
             own.claude_selection_model.is_some(),
             inherited.map(|i| i.claude_selection_model.source),
             self.popup(
@@ -1236,9 +1305,66 @@ impl SettingsWindow {
             ),
             cx,
         );
+
+        let mut form = vec![
+            group_title(c, "General").into_any_element(),
+            group(c, vec![target_row, instructions, backend_row]).into_any_element(),
+            group_title(c, "pi").into_any_element(),
+            group(c, vec![profile_row, drafting, selection, context_row]).into_any_element(),
+        ];
+        if !is_rule {
+            form.push(
+                note(
+                    c,
+                    "Drafts continue on the model their source session used, and selection \
+                     actions reuse it, so the provider's prompt cache covers the forked \
+                     conversation. The profile's settings.json default only applies when a \
+                     session names no model, as with Claude Code sessions converted to pi.",
+                )
+                .into_any_element(),
+            );
+        }
         form.push(group_title(c, "Claude Code").into_any_element());
-        form.push(group(c, vec![claude_selection]).into_any_element());
+        form.push(group(c, vec![claude_drafting, claude_selection]).into_any_element());
         form
+    }
+
+    fn claude_drafting_row(
+        &self,
+        own: &Scope,
+        resolved: &Resolved,
+        inherited: Option<&Resolved>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = &Colors::get(cx);
+        let model = &resolved.claude_drafting_model.value;
+        let mut notes = vec![description(c, "Chat and draft edits")];
+        notes.push(match model.model() {
+            None => div()
+                .mt(px(2.))
+                .child(source_tag(c, "Keeps the prompt cache", true))
+                .into_any_element(),
+            Some(_) => description(
+                c,
+                "New drafts switch to this model, so their first reply re-reads the \
+                 conversation without the cache",
+            ),
+        });
+        self.scoped_row(
+            Field::ClaudeDrafting,
+            "Drafting model",
+            notes,
+            own.claude_drafting_model.is_some(),
+            inherited.map(|i| i.claude_drafting_model.source),
+            self.popup(
+                Field::ClaudeDrafting,
+                claude_drafting_label(model),
+                own.claude_drafting_model.is_none(),
+                Some(190.),
+                cx,
+            ),
+            cx,
+        )
     }
 
     fn model_row(
@@ -1254,7 +1380,7 @@ impl SettingsWindow {
             ModelField::Drafting => ("Drafting model", "Chat and draft edits"),
             ModelField::Selection => (
                 "Selection model",
-                "Alternatives and actions on selected text in drafts on pi",
+                "Alternatives and actions on selected text",
             ),
         };
         let set = field.is_set(own);
@@ -1362,7 +1488,7 @@ impl SettingsWindow {
                 div()
                     .flex()
                     .flex_col()
-                    .child(label(c, "Drafting instructions", overridden))
+                    .child(label(c, "Instructions", overridden))
                     .child(description(c, desc)),
             )
             .when(overridden, |header| {

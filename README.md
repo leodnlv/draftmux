@@ -104,15 +104,20 @@ formatting is built in for GitHub and rich-text drafts.
 
 Drafts run on pi unless you ask for Claude Code. From a Claude Code session,
 ask the skill for it (`/draftmux PR description, on Claude Code`) or run
-`draftmux open <transcript> --backend claude`. Needs Claude Code 2.1.293 or
-later.
+`draftmux open <transcript> --backend claude`. To make it the default, set
+Backend to Same as source in Settings, for all directories or one: Claude Code
+sessions then continue on Claude Code and pi sessions on pi, and
+`--backend pi` still converts one to pi. Needs Claude Code 2.1.293 or later;
+`open` fails rather than falling back to pi when it can't run it.
 
 - The draft continues your conversation as its own Claude Code session, forked
   from a copy of the transcript kept with the draft. Your original session is
   untouched.
 - Claude Code may read files but edit only the draft. It runs without your
   project settings, `CLAUDE.md`, hooks or MCP servers.
-- The model chip switches the draft's model, and later sessions keep it.
+- New drafts continue on the session's model, keeping its prompt cache, unless
+  Settings gives a Claude Code drafting model such as `sonnet`. The model chip
+  switches the draft's model, and later sessions keep it.
 - Selection actions run on a copy of the conversation as a session that isn't
   saved, with no tools. Settings has a separate Claude Code selection model;
   by default they use the draft's model.

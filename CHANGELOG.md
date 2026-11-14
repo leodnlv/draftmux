@@ -14,7 +14,11 @@
   Settings gives a Claude Code selection model for its directory. The
   `draftmux` agent skill passes `--backend claude` when you ask for Claude
   Code. Needs Claude Code 2.1.293 or later. Drafts are still created with pi
-  unless you ask for Claude Code.
+  unless you ask for Claude Code, or set Backend to Same as source in Settings
+  for a directory; `--backend pi` or `--backend claude` overrides it for one
+  handoff, and `open` fails when Claude Code can't be run. Settings also has a
+  Claude Code drafting model, which by default continues on the session's
+  model, and now groups its fields into General, pi and Claude Code.
 - Changes to a draft's details from the app and from `draftmux restore` at
   the same moment no longer undo one another.
 - A handed-off draft whose first draft was never started, because Draftmux

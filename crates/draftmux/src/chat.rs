@@ -2185,13 +2185,22 @@ pub(crate) fn check_claude(program: &Path, env: &[(OsString, OsString)]) -> Resu
         .iter()
         .any(|known| known == program)
     {
-        let command = draftmux_claude_rpc::version_command(program, env);
-        let output = crate::process::run("Claude Code", command, None, VERSION_TIMEOUT, None)?;
-        let version = draftmux_claude_rpc::check_version(program, &output)?;
+        let version = claude_version(program, env)?;
         eprintln!("draftmux: Claude Code {version} at {}", program.display());
         SUPPORTED.lock().unwrap().push(program.to_owned());
     }
     Ok(())
+}
+
+/// `program`'s Claude Code version when it is supported, else a message for
+/// the user. Blocks while it runs claude with `env`'s allowlisted variables.
+pub(crate) fn claude_version(
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> Result<String, String> {
+    let command = draftmux_claude_rpc::version_command(program, env);
+    let output = crate::process::run("Claude Code", command, None, VERSION_TIMEOUT, None)?;
+    draftmux_claude_rpc::check_version(program, &output)
 }
 
 /// `draft`'s Claude Code session, from its descriptor.

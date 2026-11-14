@@ -4,11 +4,12 @@
 //! the app (launching it if needed) to focus the draft. The draft exists even
 //! if the app can't be reached.
 //!
-//! A draft runs on pi unless `--backend claude` is given: its pi session is
-//! forked from a pi source or converted from a Claude Code transcript. With
-//! `--backend claude` a Claude Code transcript is continued as a native
-//! Claude Code session, forked from a snapshot of it taken into the draft's
-//! session directory.
+//! A draft runs on the backend `--backend` names, else the one Draftmux's
+//! settings give the source's directory, pi unless set. On pi, its pi
+//! session is forked from a pi source or converted from a Claude Code
+//! transcript. On Claude Code, a Claude Code transcript is continued as a
+//! native Claude Code session, forked from a snapshot of it taken into the
+//! draft's session directory.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use claude_convert::ModelSelection;
 use draftmux_claude_rpc::Snapshot;
 use draftmux_pi_rpc::{ForkSpec, ModelOverride};
-use draftmux_settings::Settings;
+use draftmux_settings::{DraftBackend, Settings};
 use draftmux_storage::{
     Backend, ClaudeFork, ClaudeSession, Draft, NewDraft, PiSession, Source, SourceKind, Store,
     Target,
@@ -39,9 +40,10 @@ pub struct Args {
     session_file: PathBuf,
     /// Agent the draft runs on. `claude` continues a Claude Code transcript
     /// as a native Claude Code session; a pi session can only continue on
-    /// pi.
-    #[arg(long, value_enum, default_value_t = BackendArg::Pi)]
-    backend: BackendArg,
+    /// pi. Defaults to the backend Draftmux's settings give the session's
+    /// directory, else pi.
+    #[arg(long, value_enum)]
+    backend: Option<BackendArg>,
     /// pi profile to pin the draft to (`PI_CODING_AGENT_DIR`). Defaults to the
     /// profile the session file is stored in, else the profile Draftmux's
     /// settings give the session's directory, else ~/.pi/agent.
@@ -82,6 +84,13 @@ pub fn main(args: Args) -> Result<u8> {
     // pi runs with the environment of the agent shell that called `open`,
     // which has the PATH and API keys the source session used.
     let pi = || Command::new("pi");
+    // The app runs Claude Code with the login shell's environment, so it is
+    // checked with that.
+    let claude = || {
+        let env = shell_env::ShellEnv::capture();
+        let program = env.claude().map_err(|err| err.to_string())?;
+        crate::chat::claude_version(program, env.vars()).map(drop)
+    };
     // A settings problem never blocks a handoff.
     let settings = draftmux_storage::prepare_config_dir()
         .and_then(|dir| Settings::load(&dir))
@@ -89,7 +98,7 @@ pub fn main(args: Args) -> Result<u8> {
             eprintln!("draftmux: ignoring Draftmux's settings: {err:#}");
             Settings::default()
         });
-    let draft = create(&args, &Store::open_default()?, &pi, &settings)?;
+    let draft = create(&args, &Store::open_default()?, &pi, &claude, &settings)?;
     // Printed before focusing: the draft exists and `show` can read it even
     // if the app can't be reached.
     println!("{}", draft.id);
@@ -110,14 +119,17 @@ pub fn main(args: Args) -> Result<u8> {
     }
 }
 
-/// `pi` builds the base pi command. `settings` are resolved for the source
-/// session's directory and kept in the draft. Unless they set a drafting
-/// model, a pi source continues on its own model and a Claude Code source on
-/// the profile's default.
+/// `pi` builds the base pi command; `claude` fails, with a message for the
+/// user, unless the app can run Claude Code. `settings` are resolved for the
+/// source session's directory and kept in the draft. Unless they set a
+/// drafting model, a pi source continues on its own model, a Claude Code
+/// source converted to pi on the profile's default and one on Claude Code on
+/// its own model.
 fn create(
     args: &Args,
     store: &Store,
     pi: &dyn Fn() -> Command,
+    claude: &dyn Fn() -> Result<(), String>,
     settings: &Settings,
 ) -> Result<Draft> {
     // `show --source` matches this path exactly and normalizes its argument
@@ -125,16 +137,29 @@ fn create(
     let path = std::path::absolute(&args.session_file)
         .with_context(|| format!("resolving {}", args.session_file.display()))?;
     let info = source::inspect(&path)?;
-    if args.backend == BackendArg::Claude {
-        if info.kind == SourceKind::Pi {
-            bail!(
-                "{} is a pi session, and Claude Code can only continue its own sessions; \
-                 leave out --backend claude to continue it on pi",
-                path.display()
-            );
-        }
-        if args.pi_agent_dir.is_some() {
-            bail!("--pi-agent-dir is for drafts on pi; leave it out with --backend claude");
+    let home = std::env::home_dir().context("no home directory")?;
+    let resolved = settings.resolve(&info.cwd, &home);
+    let on_claude = match args.backend {
+        Some(backend) => backend == BackendArg::Claude,
+        None => resolved.backend.value == DraftBackend::SameAsSource,
+    } && info.kind == SourceKind::Claude;
+    if args.backend == Some(BackendArg::Claude) && info.kind == SourceKind::Pi {
+        bail!(
+            "{} is a pi session, and Claude Code can only continue its own sessions; \
+             leave out --backend claude to continue it on pi",
+            path.display()
+        );
+    }
+    if on_claude && args.pi_agent_dir.is_some() {
+        match args.backend {
+            Some(_) => {
+                bail!("--pi-agent-dir is for drafts on pi; leave it out with --backend claude")
+            }
+            None => bail!(
+                "--pi-agent-dir is for drafts on pi, and Draftmux's backend setting continues \
+                 Claude Code sessions on Claude Code in {}; add --backend pi to use it",
+                info.cwd.display()
+            ),
         }
     }
     // Read before the draft exists, so a missing file creates nothing.
@@ -144,16 +169,8 @@ fn create(
         }
         None => String::new(),
     };
-    let home = std::env::home_dir().context("no home directory")?;
-    let resolved = settings.resolve(&info.cwd, &home);
     let target = args.target.unwrap_or(resolved.target.value);
-    if args.backend == BackendArg::Claude {
-        if resolved.model_override().is_some() {
-            eprintln!(
-                "draftmux: the drafting model setting is for pi; the Claude Code session \
-                 continues on its own model"
-            );
-        }
+    if on_claude {
         let mut settings = resolved.draft_settings();
         // Pi's; the Claude session keeps its own.
         settings.selection_model = None;
@@ -162,7 +179,11 @@ fn create(
             transcript: None,
             config_dir: claude_config_dir(&path, &home, std::env::var_os("CLAUDE_CONFIG_DIR")),
             fork: None,
-            model: None,
+            model: resolved
+                .claude_drafting_model
+                .value
+                .model()
+                .map(str::to_owned),
             selection_model: resolved
                 .claude_selection_model
                 .value
@@ -182,7 +203,7 @@ fn create(
             settings,
             text,
         };
-        return create_claude(store, new, session, &path);
+        return create_claude(store, new, session, &path, claude);
     }
     let pi_agent_dir = source::resolve_profile(
         args.pi_agent_dir.as_deref(),
@@ -254,12 +275,15 @@ fn create(
 }
 
 /// Creates the Claude draft `new`, whose `session` forks a snapshot of
-/// `source`, the Claude Code transcript.
+/// `source`, the Claude Code transcript, once `claude` finds Claude Code
+/// usable. A draft's backend never changes, so an unusable Claude Code
+/// creates nothing rather than falling back to pi.
 fn create_claude(
     store: &Store,
     new: NewDraft,
     session: ClaudeSession,
     source: &Path,
+    claude: &dyn Fn() -> Result<(), String>,
 ) -> Result<Draft> {
     if !new.cwd.is_dir() {
         bail!(
@@ -268,6 +292,13 @@ fn create_claude(
             new.cwd.display()
         );
     }
+    claude().map_err(|err| {
+        anyhow!(
+            "can't continue {} on Claude Code: {err}\n\
+             draftmux: add --backend pi to continue it on pi instead",
+            source.display()
+        )
+    })?;
     store.create_with_session(new, |draft| {
         let snapshot = Snapshot::take(source, &draft.session_dir())
             .map_err(|err| anyhow!("copying {}: {err}", source.display()))?;
@@ -351,7 +382,7 @@ mod tests {
     use std::time::Instant;
 
     use draftmux_pi_rpc::{Agent, LaunchSpec, State, ThinkingLevel};
-    use draftmux_settings::{DraftingModel, Rule, SelectionModel};
+    use draftmux_settings::{ClaudeDraftingModel, DraftingModel, Rule, SelectionModel};
     use draftmux_storage::{DraftSettings, ModelChoice};
     use futures::executor::block_on;
 
@@ -400,6 +431,14 @@ cat > /dev/null
         panic!("pi isn't needed")
     }
 
+    fn no_claude() -> Result<(), String> {
+        panic!("Claude Code isn't needed")
+    }
+
+    fn claude_ok() -> Result<(), String> {
+        Ok(())
+    }
+
     /// Settings whose All directories scope sets the drafting model.
     fn drafting_on(model: ModelOverride) -> Settings {
         let mut settings = Settings::default();
@@ -429,7 +468,14 @@ cat > /dev/null
 
         let session_arg = session.to_str().unwrap();
         let args = parse(&[session_arg, "--target", "slack", "--note", "release notes"]);
-        let draft = create(&args, &store, &fake_pi(&args_file), &Settings::default()).unwrap();
+        let draft = create(
+            &args,
+            &store,
+            &fake_pi(&args_file),
+            &no_claude,
+            &Settings::default(),
+        )
+        .unwrap();
 
         let meta = store.load(&draft.id).unwrap().meta;
         assert_eq!(meta.source.as_ref().unwrap().kind, SourceKind::Pi);
@@ -479,6 +525,7 @@ cat > /dev/null
             &parse(&[session.to_str().unwrap()]),
             &store,
             &pi,
+            &no_claude,
             &Settings::default(),
         )
         .unwrap_err();
@@ -499,6 +546,7 @@ cat > /dev/null
             &parse(&[session.to_str().unwrap()]),
             &store,
             &no_pi,
+            &no_claude,
             &Settings::default(),
         )
         .unwrap_err();
@@ -518,6 +566,7 @@ cat > /dev/null
             &parse(&[session.to_str().unwrap()]),
             &store,
             &no_pi,
+            &no_claude,
             &Settings::default(),
         )
         .unwrap_err();
@@ -537,6 +586,7 @@ cat > /dev/null
                 &parse(&[session.to_str().unwrap()]),
                 &store,
                 &no_pi,
+                &no_claude,
                 &Settings::default()
             )
             .is_err()
@@ -614,7 +664,7 @@ cat > /dev/null
             "--pi-agent-dir",
             profile.to_str().unwrap(),
         ]);
-        let draft = create(&args, &store, &no_pi, &Settings::default()).unwrap();
+        let draft = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap();
         (store, draft)
     }
 
@@ -674,7 +724,7 @@ cat > /dev/null
             "--draft-file",
             file.to_str().unwrap(),
         ]);
-        let draft = create(&args, &store, &no_pi, &Settings::default()).unwrap();
+        let draft = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap();
 
         assert_eq!(store.read_text(&draft.id).unwrap(), text);
         let meta = store.load(&draft.id).unwrap().meta;
@@ -695,7 +745,7 @@ cat > /dev/null
             "--draft-file",
             missing.to_str().unwrap(),
         ]);
-        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        let err = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap_err();
         assert!(format!("{err:#}").contains("missing.md"), "{err:#}");
         assert!(store.scan().unwrap().drafts.is_empty());
     }
@@ -769,7 +819,7 @@ cat > /dev/null
         );
 
         let args = parse(&[transcript.to_str().unwrap(), "--backend", "claude"]);
-        let draft = create(&args, &store, &no_pi, &settings).unwrap();
+        let draft = create(&args, &store, &no_pi, &claude_ok, &settings).unwrap();
 
         let meta = store.load(&draft.id).unwrap().meta;
         assert!(meta.pi().is_none());
@@ -809,7 +859,7 @@ cat > /dev/null
         let store = Store::new(tmp.path().join("drafts"));
 
         let args = parse(&[session.to_str().unwrap(), "--backend", "claude"]);
-        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        let err = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap_err();
         assert!(err.to_string().contains("is a pi session"), "{err}");
 
         let transcript = native_transcript(&tmp.path().join("config"), &cwd);
@@ -822,7 +872,7 @@ cat > /dev/null
             "--pi-agent-dir",
             profile,
         ]);
-        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        let err = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("--pi-agent-dir is for drafts on pi"),
@@ -841,8 +891,117 @@ cat > /dev/null
             "--pi-agent-dir",
             profile,
         ]);
-        assert_eq!(args.backend, BackendArg::Pi);
-        assert_eq!(parse(&[session.to_str().unwrap()]).backend, BackendArg::Pi);
+        assert_eq!(args.backend, Some(BackendArg::Pi));
+        assert_eq!(parse(&[session.to_str().unwrap()]).backend, None);
+    }
+
+    /// Settings with a rule on `dir` that continues Claude Code sources on
+    /// Claude Code with `sonnet`, and sets pi's drafting model.
+    fn claude_rule_on(dir: &Path) -> Settings {
+        let mut settings = drafting_on(ModelOverride {
+            provider: "anthropic".into(),
+            model_id: "claude-opus-5-5".into(),
+            thinking: ThinkingLevel::High,
+        });
+        let mut rule = Rule::new(dir.to_owned());
+        rule.scope.backend = Some(DraftBackend::SameAsSource);
+        rule.scope.claude_drafting_model = Some(ClaudeDraftingModel::Model("sonnet".into()));
+        settings.directories.push(rule);
+        settings
+    }
+
+    #[test]
+    fn backend_setting_picks_the_backend_unless_the_flag_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        let transcript = native_transcript(&tmp.path().join("config"), &cwd);
+        let store = Store::new(tmp.path().join("drafts"));
+        let settings = claude_rule_on(tmp.path());
+
+        // The setting continues a Claude Code source on Claude Code, on the
+        // Claude drafting model; pi's drafting model doesn't apply.
+        let args = parse(&[transcript.to_str().unwrap()]);
+        let draft = create(&args, &store, &no_pi, &claude_ok, &settings).unwrap();
+        let Backend::Claude(session) = &store.load(&draft.id).unwrap().meta.backend else {
+            panic!("not Claude: {:?}", draft.meta.backend);
+        };
+        assert_eq!(session.model.as_deref(), Some("sonnet"));
+        assert!(session.fork.is_some());
+
+        // `--backend pi` converts it to pi instead, on pi's drafting model.
+        let args = parse(&[
+            transcript.to_str().unwrap(),
+            "--backend",
+            "pi",
+            "--pi-agent-dir",
+            tmp.path().to_str().unwrap(),
+        ]);
+        let draft = create(&args, &store, &no_pi, &no_claude, &settings).unwrap();
+        let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
+        let entries = session_entries(&file);
+        assert_eq!(entries[entries.len() - 2]["modelId"], "claude-opus-5-5");
+
+        // A pi source stays on pi.
+        let mut settings = settings;
+        settings.defaults.drafting_model = None;
+        let session = pi_session(&tmp.path().join("agent"), &cwd);
+        let args_file = tmp.path().join("args");
+        let args = parse(&[session.to_str().unwrap()]);
+        let draft = create(&args, &store, &fake_pi(&args_file), &no_claude, &settings).unwrap();
+        assert!(draft.meta.pi().is_some());
+
+        // Without the setting, `--backend claude` continues on Claude Code
+        // on the session's model.
+        let args = parse(&[transcript.to_str().unwrap(), "--backend", "claude"]);
+        let draft = create(&args, &store, &no_pi, &claude_ok, &Settings::default()).unwrap();
+        let Backend::Claude(session) = &draft.meta.backend else {
+            panic!("not Claude: {:?}", draft.meta.backend);
+        };
+        assert_eq!(session.model, None);
+    }
+
+    #[test]
+    fn unusable_claude_code_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        let transcript = native_transcript(&tmp.path().join("config"), &cwd);
+        let store = Store::new(tmp.path().join("drafts"));
+        let missing = || Err("Claude Code wasn't found on your login shell's PATH.".to_owned());
+
+        let from_setting = parse(&[transcript.to_str().unwrap()]);
+        let flagged = parse(&[transcript.to_str().unwrap(), "--backend", "claude"]);
+        for (args, settings) in [
+            (&from_setting, claude_rule_on(tmp.path())),
+            (&flagged, Settings::default()),
+        ] {
+            let err = create(args, &store, &no_pi, &missing, &settings).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains("can't continue"), "{err}");
+            assert!(err.contains("wasn't found"), "{err}");
+            assert!(err.contains("--backend pi"), "{err}");
+        }
+
+        // A pi profile can't go with the setting's Claude Code either.
+        let args = parse(&[
+            transcript.to_str().unwrap(),
+            "--pi-agent-dir",
+            tmp.path().to_str().unwrap(),
+        ]);
+        let err = create(
+            &args,
+            &store,
+            &no_pi,
+            &no_claude,
+            &claude_rule_on(tmp.path()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("add --backend pi"), "{err}");
+        assert_eq!(
+            fs::read_dir(tmp.path().join("drafts")).map_or(0, |d| d.count()),
+            0
+        );
     }
 
     #[test]
@@ -851,7 +1010,7 @@ cat > /dev/null
         let store = Store::new(tmp.path().join("drafts"));
         let gone = native_transcript(&tmp.path().join("config"), &tmp.path().join("deleted"));
         let args = parse(&[gone.to_str().unwrap(), "--backend", "claude"]);
-        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        let err = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap_err();
         assert!(err.to_string().contains("no longer exists"), "{err}");
 
         // Recognized as Claude Code, but without a complete message.
@@ -862,7 +1021,7 @@ cat > /dev/null
         );
         fs::write(&cut, line).unwrap();
         let args = parse(&[cut.to_str().unwrap(), "--backend", "claude"]);
-        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        let err = create(&args, &store, &no_pi, &claude_ok, &Settings::default()).unwrap_err();
         assert!(format!("{err:#}").contains("copying"), "{err:#}");
         assert!(store.scan().unwrap().drafts.is_empty());
         assert_eq!(fs::read_dir(tmp.path().join("drafts")).unwrap().count(), 0);
@@ -910,7 +1069,7 @@ cat > /dev/null
             "--pi-agent-dir",
             tmp.path().to_str().unwrap(),
         ]);
-        assert!(create(&args, &store, &no_pi, &Settings::default()).is_err());
+        assert!(create(&args, &store, &no_pi, &no_claude, &Settings::default()).is_err());
         assert!(store.scan().unwrap().drafts.is_empty());
     }
 
@@ -949,6 +1108,7 @@ cat > /dev/null
             &parse(&[transcript.to_str().unwrap()]),
             &store,
             &no_pi,
+            &no_claude,
             &settings,
         )
         .unwrap();
@@ -976,7 +1136,9 @@ cat > /dev/null
             "--target",
             "github",
         ]);
-        let other = create(&flagged, &store, &no_pi, &settings).unwrap().meta;
+        let other = create(&flagged, &store, &no_pi, &no_claude, &settings)
+            .unwrap()
+            .meta;
         assert_eq!(other.pi().unwrap().agent_dir, tmp.path());
         assert_eq!(other.target, Target::Github);
 
@@ -986,6 +1148,7 @@ cat > /dev/null
             &parse(&[transcript.to_str().unwrap()]),
             &store,
             &no_pi,
+            &no_claude,
             &settings,
         );
         assert_eq!(store.load(&draft.id).unwrap().meta, meta);
@@ -1010,7 +1173,14 @@ cat > /dev/null
             model_id: "missing".into(),
             thinking: ThinkingLevel::High,
         });
-        let draft = create(&parse(&[session.to_str().unwrap()]), &store, &pi, &settings).unwrap();
+        let draft = create(
+            &parse(&[session.to_str().unwrap()]),
+            &store,
+            &pi,
+            &no_claude,
+            &settings,
+        )
+        .unwrap();
         assert_eq!(
             store
                 .load(&draft.id)
@@ -1126,7 +1296,7 @@ cat > /dev/null
             model_id: "claude-opus-5-5".into(),
             thinking: ThinkingLevel::High,
         };
-        let draft = create(&args, &store, &no_pi, &drafting_on(model)).unwrap();
+        let draft = create(&args, &store, &no_pi, &no_claude, &drafting_on(model)).unwrap();
 
         let entries = session_entries(&draft.meta.pi().unwrap().session_file.clone().unwrap());
         let tail = &entries[entries.len() - 2..];
@@ -1235,7 +1405,7 @@ cat > /dev/null
         ]);
 
         let started = Instant::now();
-        let draft = create(&args, &store, &pi, &Settings::default()).unwrap();
+        let draft = create(&args, &store, &pi, &no_claude, &Settings::default()).unwrap();
         eprintln!("fork took {} ms", started.elapsed().as_millis());
         assert_eq!(fs::read_to_string(&source).unwrap(), original + "\n");
         let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
@@ -1269,7 +1439,7 @@ cat > /dev/null
             model_id: default.id.clone(),
             thinking,
         };
-        let draft = create(&args, &store, &pi, &drafting_on(model)).unwrap();
+        let draft = create(&args, &store, &pi, &no_claude, &drafting_on(model)).unwrap();
         let file = draft.meta.pi().unwrap().session_file.clone().unwrap();
         let (state, _) = real_pi_state(&env, &profile, &file, &cwd);
         let model = state.model.unwrap();

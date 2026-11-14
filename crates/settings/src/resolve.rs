@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use draftmux_pi_rpc::ModelOverride;
 use draftmux_storage::{DraftSettings, ModelChoice, Target};
 
-use crate::{ClaudeSelectionModel, DraftingModel, Scope, SelectionModel, Settings, expand_home};
+use crate::{
+    ClaudeDraftingModel, ClaudeSelectionModel, DraftBackend, DraftingModel, Scope, SelectionModel,
+    Settings, expand_home,
+};
 
 /// Where a resolved value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +36,9 @@ pub struct Resolved {
     pub profile: Sourced<Option<PathBuf>>,
     pub drafting_model: Sourced<DraftingModel>,
     pub selection_model: Sourced<SelectionModel>,
+    pub claude_drafting_model: Sourced<ClaudeDraftingModel>,
     pub claude_selection_model: Sourced<ClaudeSelectionModel>,
+    pub backend: Sourced<DraftBackend>,
     pub target: Sourced<Target>,
     /// The innermost scope that contributed is the source.
     pub instructions: Sourced<Option<String>>,
@@ -101,11 +106,17 @@ impl Settings {
                 |s| s.selection_model.as_ref(),
                 SelectionModel::Drafting,
             ),
+            claude_drafting_model: pick(
+                &scopes,
+                |s| s.claude_drafting_model.as_ref(),
+                ClaudeDraftingModel::Session,
+            ),
             claude_selection_model: pick(
                 &scopes,
                 |s| s.claude_selection_model.as_ref(),
                 ClaudeSelectionModel::Drafting,
             ),
+            backend: pick(&scopes, |s| s.backend.as_ref(), DraftBackend::Pi),
             target: pick(&scopes, |s| s.target.as_ref(), Target::Github),
             instructions: self.instructions(rules),
             context_files: pick(&scopes, |s| s.context_files.as_ref(), true),
@@ -196,6 +207,11 @@ mod tests {
         assert_eq!(resolved.instructions.value, None);
         assert!(resolved.context_files.value);
         assert_eq!(resolved.target.source, Source::Builtin);
+        assert_eq!(resolved.backend.value, DraftBackend::Pi);
+        assert_eq!(
+            resolved.claude_drafting_model.value,
+            ClaudeDraftingModel::Session
+        );
         assert_eq!(resolved.model_override(), None);
         assert_eq!(resolved.draft_settings(), DraftSettings::default());
     }
@@ -362,5 +378,39 @@ mod tests {
             json,
             serde_json::json!({"claude_selection_model": {"model": "haiku"}})
         );
+    }
+
+    #[test]
+    fn backend_and_claude_drafting_model_cascade() {
+        let (_t, home) = home();
+        let mut settings = Settings::default();
+        settings.defaults.backend = Some(DraftBackend::SameAsSource);
+        settings.defaults.claude_drafting_model = Some(ClaudeDraftingModel::Model("sonnet".into()));
+        let mut work = Rule::new("~/work".into());
+        work.scope.backend = Some(DraftBackend::Pi);
+        let mut app = Rule::new("~/work/app".into());
+        // An explicit "Session's model" overrides the inherited model.
+        app.scope.claude_drafting_model = Some(ClaudeDraftingModel::Session);
+        settings.directories = vec![work, app];
+
+        let r = settings.resolve(&home, &home);
+        assert_eq!(r.backend.value, DraftBackend::SameAsSource);
+        assert_eq!(r.backend.source, Source::AllDirectories);
+        assert_eq!(r.claude_drafting_model.value.model(), Some("sonnet"));
+
+        let r = settings.resolve(&home.join("work/app/src"), &home);
+        assert_eq!(
+            r.backend,
+            Sourced {
+                value: DraftBackend::Pi,
+                source: Source::Rule(0)
+            }
+        );
+        assert_eq!(r.claude_drafting_model.value.model(), None);
+        assert_eq!(r.claude_drafting_model.source, Source::Rule(1));
+        // Pi's drafting model is untouched.
+        assert_eq!(r.model_override(), None);
+        assert_eq!(settings.directories[0].override_count(), 1);
+        assert_eq!(settings.directories[1].override_count(), 1);
     }
 }

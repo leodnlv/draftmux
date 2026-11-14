@@ -109,9 +109,14 @@ pub struct Scope {
     pub drafting_model: Option<DraftingModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_model: Option<SelectionModel>,
+    /// The model of drafts on Claude Code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_drafting_model: Option<ClaudeDraftingModel>,
     /// The selection model of drafts on Claude Code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_selection_model: Option<ClaudeSelectionModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<DraftBackend>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
     /// Never empty; clearing the text unsets it.
@@ -150,7 +155,9 @@ impl Rule {
             s.profile.is_some(),
             s.drafting_model.is_some(),
             s.selection_model.is_some(),
+            s.claude_drafting_model.is_some(),
             s.claude_selection_model.is_some(),
+            s.backend.is_some(),
             s.target.is_some(),
             s.instructions.is_some() || self.replace_instructions,
             s.context_files.is_some(),
@@ -193,6 +200,36 @@ impl SelectionModel {
         match self {
             SelectionModel::Drafting => None,
             SelectionModel::Model(model) => Some(model),
+        }
+    }
+}
+
+/// The agent a new draft runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftBackend {
+    /// pi, converting a Claude Code transcript to a pi session.
+    Pi,
+    /// The source's own agent: a Claude Code transcript continues on Claude
+    /// Code, a pi session on pi.
+    SameAsSource,
+}
+
+/// The model a new draft on Claude Code starts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeDraftingModel {
+    /// Continue on the source session's model, keeping its prompt cache.
+    Session,
+    /// A model as Claude Code's `--model` takes it, such as `sonnet`.
+    Model(String),
+}
+
+impl ClaudeDraftingModel {
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            ClaudeDraftingModel::Session => None,
+            ClaudeDraftingModel::Model(model) => Some(model),
         }
     }
 }
@@ -321,6 +358,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         settings.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()).unwrap(), settings);
+    }
+
+    #[test]
+    fn backend_and_claude_drafting_model_round_trip() {
+        let mut settings = Settings::default();
+        settings.defaults.backend = Some(DraftBackend::SameAsSource);
+        settings.defaults.claude_drafting_model = Some(ClaudeDraftingModel::Session);
+        let mut rule = Rule::new("~/work".into());
+        rule.scope.backend = Some(DraftBackend::Pi);
+        rule.scope.claude_drafting_model = Some(ClaudeDraftingModel::Model("opus".into()));
+        settings.directories.push(rule);
+        let dir = tempfile::tempdir().unwrap();
+        settings.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap(), settings);
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(Settings::path(dir.path())).unwrap()).unwrap();
+        assert_eq!(
+            json["defaults"],
+            serde_json::json!({"backend": "same_as_source", "claude_drafting_model": "session"})
+        );
+        assert_eq!(json["directories"][0]["backend"], "pi");
+        assert_eq!(
+            json["directories"][0]["claude_drafting_model"],
+            serde_json::json!({"model": "opus"})
+        );
+
+        // Files without the fields load as before and don't gain them.
+        let old: Settings =
+            serde_json::from_str(r#"{"defaults":{"target":"slack"},"directories":[]}"#).unwrap();
+        assert_eq!(old.defaults.backend, None);
+        assert_eq!(old.defaults.claude_drafting_model, None);
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !json.contains("backend") && !json.contains("claude_drafting"),
+            "{json}"
+        );
     }
 
     #[test]
