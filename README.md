@@ -26,9 +26,7 @@ Status: early release; expect rough edges.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
   text or plain text. `⌘+` and `⌘−` change the text size, and `⌘0` resets it.
 - **Selection actions.** Select text for alternatives, Shorten or Tighten, or
-  your own actions. Options appear as previews while the agent generates the
-  rest; choose one when the request finishes. With text selected, a chat message
-  changes only that part. Hold `⌘` while dragging to select more passages; a
+  your own actions. With text selected, a chat message changes only that part. Hold `⌘` while dragging to select more passages; a
   chat message then edits each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
@@ -62,14 +60,15 @@ Shortcuts use Ctrl where macOS uses Cmd.
 
 ### pi
 
-The agent features run [pi](https://github.com/earendil-works/pi):
+By default, the agent features run [pi](https://github.com/earendil-works/pi):
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-Without pi, editing, formatting, previews and copying still work. Markdown
-formatting is built in for GitHub and rich-text drafts.
+Without pi, editing, previews, copying and Markdown formatting of GitHub and
+rich-text drafts still work. Drafts can also run on
+[Claude Code](#drafting-with-claude-code).
 
 ## Quick start
 
@@ -105,22 +104,23 @@ formatting is built in for GitHub and rich-text drafts.
 Drafts run on pi unless you ask for Claude Code. From a Claude Code session,
 ask the skill for it (`/draftmux PR description, on Claude Code`) or run
 `draftmux open <transcript> --backend claude`. To make it the default, set
-Backend to Same as source in Settings, for all directories or one: Claude Code
-sessions then continue on Claude Code and pi sessions on pi, and
-`--backend pi` still converts one to pi. Needs Claude Code 2.1.293 or later;
-`open` fails rather than falling back to pi when it can't run it.
+Backend to Same as source in Settings, globally or for one directory. Claude
+Code sessions then continue on Claude Code, and `--backend pi` puts a single
+draft on pi.
 
-- The draft continues your conversation as its own Claude Code session, forked
-  from a copy of the transcript kept with the draft. Your original session is
-  untouched.
+Needs Claude Code 2.1.293 or later. If Draftmux can't run Claude Code, `open`
+reports an error instead of switching to pi.
+
+- The draft continues your conversation in its own Claude Code session. Your
+  original session is untouched.
 - Claude Code may read files but edit only the draft. It runs without your
-  project settings, `CLAUDE.md`, hooks or MCP servers.
-- New drafts continue on the session's model, keeping its prompt cache, unless
-  Settings gives a Claude Code drafting model such as `sonnet`. The model chip
-  switches the draft's model, and later sessions keep it.
-- Selection actions run on a copy of the conversation as a session that isn't
-  saved, with no tools. Settings has a separate Claude Code selection model;
-  by default they use the draft's model.
+  Claude Code settings files, `CLAUDE.md`, hooks or MCP servers.
+- New drafts use the session's model unless Settings sets a Claude Code
+  drafting model such as `sonnet`. The model chip changes a draft's model, and
+  the draft keeps the choice.
+- Selection actions run in a throwaway copy of the conversation with no tools.
+  They use the draft's model unless Settings sets a Claude Code selection
+  model.
 - A draft stays on the agent it was created with.
 
 ## Configuration
@@ -140,10 +140,10 @@ such as `title` for PRs and issues or `subject`, `to` and `cc` for emails.
 
 ## Troubleshooting
 
-The app writes errors, its start time and version, and any crash with a
-backtrace to `draftmux.log`, in `~/Library/Application Support/Draftmux` on
-macOS and `~/.local/share/Draftmux` on Linux. Once the log passes 1 MB it is
-moved to `draftmux.log.1` when the app next starts.
+Errors and crash reports go to `draftmux.log` in
+`~/Library/Application Support/Draftmux` on macOS and `~/.local/share/Draftmux`
+on Linux. Once the log passes 1 MB, the app moves it to `draftmux.log.1` on its
+next start.
 
 ## Development
 
