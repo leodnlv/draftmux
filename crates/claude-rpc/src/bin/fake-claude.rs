@@ -153,11 +153,16 @@ fn main() {
 fn claim(dir: &Path) -> usize {
     (0..)
         .find(|n| {
-            OpenOptions::new()
+            match OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(dir.join(format!("claimed-{n}")))
-                .is_ok()
+            {
+                Ok(_) => true,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => false,
+                // The test is over and removed its directory.
+                Err(err) => fail(&format!("claiming a script in {}: {err}", dir.display())),
+            }
         })
         .unwrap()
 }
