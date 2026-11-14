@@ -191,15 +191,15 @@ pub fn keep_inactive_appearance(window: &gpui::Window) {
     }
 }
 
-/// A pop-up's AppKit window, kept to resize it with [`resize_popup`].
+/// A pop-up's AppKit window, kept to move it with [`move_popup`].
 pub struct NativeWindow(Retained<objc2::runtime::AnyObject>);
 
-/// Sets up `window` as a pop-up that resizes keeping its top edge in place,
-/// or else its bottom, and returns it for [`resize_popup`].
+/// Sets up `window` as a pop-up that grows from its top edge, or else its
+/// bottom, and returns it for [`move_popup`].
 ///
-/// It opens and closes without AppKit's fade, and while it resizes its last
-/// frame stays pinned to that edge at its own size instead of stretching to
-/// the new one.
+/// It opens and closes without AppKit's fade, and if it shows a frame while
+/// it resizes, the frame stays pinned to that edge at its own size instead
+/// of stretching to the new one.
 pub fn prepare_popup(window: &gpui::Window, keep_top: bool) -> Option<NativeWindow> {
     use objc2::runtime::AnyObject;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -229,30 +229,30 @@ pub fn prepare_popup(window: &gpui::Window, keep_top: bool) -> Option<NativeWind
     }
 }
 
-/// Resizes a pop-up to `size` at once, keeping its top edge in place or
-/// else its bottom, and draws it at the new size before the resize shows.
+/// Moves a pop-up at once from `from` to `to`, in gpui's screen
+/// coordinates, and draws it at its new size before the move shows.
 ///
 /// gpui resizes a window later and draws it at the new size after that, so
 /// for a frame it would show its old contents in the new size. Call this
 /// outside gpui's updates: drawing the window needs the app.
-pub fn resize_popup(window: &NativeWindow, size: gpui::Size<gpui::Pixels>, keep_top: bool) {
+pub fn move_popup(
+    window: &NativeWindow,
+    from: gpui::Bounds<gpui::Pixels>,
+    to: gpui::Bounds<gpui::Pixels>,
+) {
     use objc2::runtime::Bool;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-    let (width, height) = (
-        f64::from(size.width.as_f32()),
-        f64::from(size.height.as_f32()),
-    );
+    let f = |pixels: gpui::Pixels| f64::from(pixels.as_f32());
     // SAFETY: the retained window is valid to message on the main thread.
     unsafe {
         let frame: NSRect = msg_send![&*window.0, frame];
-        // AppKit's y axis points up, so the top edge is at the frame's top.
-        let y = if keep_top {
-            frame.origin.y + frame.size.height - height
-        } else {
-            frame.origin.y
-        };
-        let frame = NSRect::new(NSPoint::new(frame.origin.x, y), NSSize::new(width, height));
+        // AppKit's frame origin is its bottom left, and its y axis points up.
+        let origin = NSPoint::new(
+            frame.origin.x + f(to.left() - from.left()),
+            frame.origin.y - f(to.bottom() - from.bottom()),
+        );
+        let frame = NSRect::new(origin, NSSize::new(f(to.size.width), f(to.size.height)));
         let _: () = msg_send![&*window.0, setFrame: frame, display: Bool::YES];
     }
 }

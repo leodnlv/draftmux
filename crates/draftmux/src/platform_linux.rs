@@ -121,7 +121,11 @@ pub fn prepare_popup(_: &gpui::Window, _: bool) -> Option<NativeWindow> {
     None
 }
 
-pub fn resize_popup(window: &NativeWindow, _: gpui::Size<gpui::Pixels>, _: bool) {
+pub fn move_popup(
+    window: &NativeWindow,
+    _: gpui::Bounds<gpui::Pixels>,
+    _: gpui::Bounds<gpui::Pixels>,
+) {
     match *window {}
 }
 #[path = "platform_linux/frame.rs"]

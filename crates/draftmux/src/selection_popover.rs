@@ -961,34 +961,39 @@ impl SelectionPopover {
         match (&mut self.panel, target) {
             (None, None) => {}
             (Some(panel), Some((bounds, _))) if panel.bounds == bounds => {}
+            // Where the platform moves the panel, it goes anywhere in
+            // place: reopening it would show both panels for a moment,
+            // since gpui closes a window later.
+            (Some(panel), Some((bounds, side))) if panel.native.is_some() => {
+                let from = std::mem::replace(&mut panel.bounds, bounds);
+                panel.side = side;
+                panel.pinned = side;
+                let native = panel.native.clone().expect("checked above");
+                let handle = panel.handle;
+                // Drawing the panel at its new size needs the app, so the
+                // move waits for this update to end.
+                cx.spawn(async move |this, cx| {
+                    let current = this
+                        .read_with(cx, |this, _| {
+                            this.panel
+                                .as_ref()
+                                .is_some_and(|panel| panel.handle == handle)
+                        })
+                        .unwrap_or(false);
+                    if current {
+                        crate::platform::move_popup(&native, from, bounds);
+                    }
+                })
+                .detach();
+            }
             (Some(panel), Some((bounds, _)))
                 if panel.pinned.corner(panel.bounds) == panel.pinned.corner(bounds) =>
             {
                 panel.bounds = bounds;
-                if let Some(native) = panel.native.clone() {
-                    // Drawing the panel at its new size needs the app, so
-                    // the resize waits for this update to end.
-                    let keep_top = panel.pinned == Edge::Top;
-                    let handle = panel.handle;
-                    cx.spawn(async move |this, cx| {
-                        let current = this
-                            .read_with(cx, |this, _| {
-                                this.panel
-                                    .as_ref()
-                                    .is_some_and(|panel| panel.handle == handle)
-                            })
-                            .unwrap_or(false);
-                        if current {
-                            crate::platform::resize_popup(&native, bounds.size, keep_top);
-                        }
-                    })
-                    .detach();
-                } else {
-                    panel
-                        .handle
-                        .update(cx, |_, window, _| window.resize(bounds.size))
-                        .ok();
-                }
+                panel
+                    .handle
+                    .update(cx, |_, window, _| window.resize(bounds.size))
+                    .ok();
             }
             (_, target) => {
                 self.close_panel(cx);
