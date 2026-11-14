@@ -1006,9 +1006,7 @@ impl SelectionPopover {
 
     /// Where the panel goes, in screen coordinates: above the selection's
     /// first visible row, or below its last when there's no room above, with
-    /// the edge that faces the selection. A panel already above may grow
-    /// past the pane's top up to the window's, so typing a newline in it
-    /// doesn't flip it below. `None` when the popover is hidden
+    /// the edge that faces the selection. `None` when the popover is hidden
     /// or the selection is scrolled away.
     fn placement(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, Edge)> {
         self.open.as_ref()?;
@@ -1025,14 +1023,22 @@ impl SelectionPopover {
         let (first, last) = (rows.first()?, rows.last()?);
         let size = self.content_size?;
 
-        let above = first.top() - GAP - size.height;
-        let stays_above = self
-            .panel
-            .as_ref()
-            .is_some_and(|panel| panel.side == Edge::Bottom);
-        let top = if stays_above { px(0.) } else { pane.top() };
-        let (y, side) = if above >= top + MARGIN {
-            (above, Edge::Bottom)
+        // The options grow as they come in, so their side is chosen for the
+        // height they're expected to reach, and once below the selection
+        // they stay there rather than jump back.
+        let options = self.options_height(cx);
+        let side = self.panel.as_ref().map(|panel| panel.side);
+        let needed = options.map_or(size.height, |options| options.max(size.height));
+        // The comment field, already above, may grow past the pane's top
+        // up to the window's, so typing a newline in it doesn't flip it.
+        let top = if options.is_none() && side == Some(Edge::Bottom) {
+            px(0.)
+        } else {
+            pane.top()
+        };
+        let stays_below = options.is_some() && side == Some(Edge::Top);
+        let (y, side) = if !stays_below && first.top() - GAP - needed >= top + MARGIN {
+            (first.top() - GAP - size.height, Edge::Bottom)
         } else {
             (last.bottom() + GAP, Edge::Top)
         };
@@ -1040,6 +1046,34 @@ impl SelectionPopover {
         let x = (first.left() - px(6.)).clamp(pane.left() + MARGIN, max_x);
         let origin = window.bounds().origin + point(x, y);
         Some((Bounds::new(origin.map(|v| v.round()), size), side))
+    }
+
+    /// While options are coming in or shown, the height the list is
+    /// expected to reach: each of the options the actions ask for about as
+    /// long as the selection.
+    fn options_height(&self, cx: &App) -> Option<Pixels> {
+        let open = self.open.as_ref()?;
+        if !matches!(open.mode, Mode::Running { .. } | Mode::Results(_)) {
+            return None;
+        }
+        let count = AppSettings::global(cx)
+            .read(cx)
+            .settings
+            .alternatives()
+            .max(1);
+        let chars = open
+            .text
+            .get(open.range.clone())
+            .map_or(0, |text| text.chars().count());
+        // A row's text is the list's width less the padding, the number
+        // and the gaps, at about this many points per character.
+        let width = RESULTS_WIDTH - PADDING * 2. - px(8.) * 3. - px(10.);
+        let per_line = (width.as_f32() / 6.5).floor().max(1.) as usize;
+        let lines = chars.div_ceil(per_line).clamp(1, 8);
+        let row = px(7.) * 2. + px(19.) * lines as f32;
+        let rows = row * count as f32 + px(2.) * (count - 1) as f32;
+        // The footer and the panel's padding.
+        Some(rows + px(32.) + PADDING * 2.)
     }
 
     /// Opens the panel at `bounds`, pinned at the `side` edge where the
