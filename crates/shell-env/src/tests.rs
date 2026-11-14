@@ -168,6 +168,8 @@ fn missing_shell_falls_back() {
     let missing = env.pi().unwrap_err().to_string();
     assert!(missing.contains("pi wasn't found"), "{missing}");
     assert!(missing.contains("couldn't start"), "{missing}");
+    let missing = env.claude().unwrap_err().to_string();
+    assert!(missing.contains("Claude Code wasn't found"), "{missing}");
 }
 
 /// The real zsh reads `.zshrc` (where API keys usually live), its PATH
@@ -193,9 +195,17 @@ fn zsh_login_env_reaches_spawned_tools() {
     base.push(("ZDOTDIR".into(), dir.path().into()));
     base.push(("INHERITED".into(), "from-app".into()));
 
+    write_executable(&bin.join("claude"), "");
+
     let env = capture("/bin/zsh", base, TIMEOUT);
     assert_eq!(env.capture_error, None);
     assert_eq!(env.pi().unwrap(), bin.join("pi"));
+    assert_eq!(env.claude().unwrap(), bin.join("claude"));
+    assert!(
+        env.vars()
+            .iter()
+            .any(|(k, v)| k == "TEST_API_KEY" && v == "secret-from-zshrc")
+    );
 
     let output = env.command(env.pi().unwrap()).output().unwrap();
     assert_eq!(

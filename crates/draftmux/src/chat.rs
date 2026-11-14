@@ -1,8 +1,9 @@
-//! The chat column: the selected draft's conversation with its pi agent,
-//! drawn on gpui's `list()` with tool calls as compact rows, and the composer.
+//! The chat column: the selected draft's conversation with its agent, drawn
+//! on gpui's `list()` with tool calls as compact rows, and the composer.
 //!
-//! Each draft gets its own [`Agent`], started when the draft is selected
-//! and stopped once it is idle or left. The chat reports to its owner
+//! Each draft gets its own [`Agent`], for the backend its descriptor names
+//! (pi or Claude Code), started when the draft is selected and stopped once
+//! it is idle or left. The chat reports to its owner
 //! through [`ChatEvent`]: the owner saves the draft before a prompt, reloads
 //! it after the agent writes it, and locks the editor while the agent runs.
 //!
@@ -21,18 +22,19 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use draftmux_agent::quote::{self, Quote};
 use draftmux_agent::transcript::{self, DiffLine, Item, Retry, Target, Tool, Transcript};
 use draftmux_agent::{Agent, Event, Events, History, Prompted, ToolKind};
+use draftmux_claude_rpc::{ClaudeAgent, DraftContext, DraftSession, Record};
 use draftmux_pi_rpc::{LaunchSpec, PiAgent};
-use draftmux_storage::{Draft, SourceKind};
+use draftmux_storage::{Backend, ClaudeSession, Draft, PiSession, SourceKind, Store};
 use editor::{Editor, EditorEvent, EditorStyle};
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FollowMode, FontWeight, HighlightStyle, Hsla, KeyBinding, ListAlignment, ListState,
@@ -46,7 +48,7 @@ use crate::assets::{
     STOP_ICON, TOOL_BASH_ICON, TOOL_EDIT_ICON, TOOL_OTHER_ICON, TOOL_READ_ICON, TOOL_WRITE_ICON,
 };
 use crate::bounce::{Bounce, ListBounce};
-use crate::chat_model::ChatModel;
+use crate::chat_model::{self, ChatModel};
 use crate::chrome::shadow;
 use crate::markup_view::{self, MarkupStyle, SelectBody};
 use crate::profiles::ProfileCatalog;
@@ -56,11 +58,24 @@ use crate::theme::{self, MONO, Palette, Theme};
 
 actions!(chat, [Send, Stop]);
 
-/// How long an idle pi process is kept.
+/// How long an idle agent process is kept.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long pi gets to answer a request. pi answers a prompt only after
 /// compacting and running input hooks or an extension command.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// What a Claude draft's agent asks the app to keep in the draft's
+/// descriptor.
+type Records = futures::channel::mpsc::UnboundedReceiver<Record>;
+
+/// How long `claude --version` gets to answer.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
+/// A Claude draft's process: how long claude gets to answer a control
+/// request, and the longest line it may print.
+const CLAUDE_CONFIG: draftmux_claude_rpc::Config = draftmux_claude_rpc::Config {
+    idle_timeout: IDLE_TIMEOUT,
+    request_timeout: REQUEST_TIMEOUT,
+    max_record: 16 << 20,
+};
 /// How long the draft's selection must stay put before the composer's
 /// quotes show it, so dragging a selection doesn't flicker them.
 const QUOTES_SETTLE: Duration = Duration::from_millis(250);
@@ -103,6 +118,9 @@ pub enum ChatEvent {
     /// Draft `id`'s agent accepted a prompt; a rejected or failed one isn't
     /// reported.
     Accepted { id: String },
+    /// Draft `id`'s Claude agent reported something its descriptor must
+    /// keep. Record it in the draft's `meta.json`.
+    Recorded { id: String, record: Record },
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -189,8 +207,17 @@ struct Session {
 }
 
 impl Session {
-    /// Whether pi is still starting or the earlier conversation is still
-    /// loading. A pi that can't start isn't starting.
+    fn claude(&self) -> bool {
+        matches!(self.draft.meta.backend, Backend::Claude(_))
+    }
+
+    /// The agent's name in the chat's own text.
+    fn agent_name(&self) -> &'static str {
+        if self.claude() { "Claude" } else { "pi" }
+    }
+
+    /// Whether the agent is still starting or the earlier conversation is
+    /// still loading. An agent that can't start isn't starting.
     fn starting(&self) -> bool {
         match &self.agent {
             None => true,
@@ -367,83 +394,94 @@ impl Chat {
             return;
         };
         let ready = ShellEnv::ready(cx);
+        let claude = session.claude();
         let id = id.to_owned();
         session._events = cx.spawn(async move |this, cx| {
             let env = ready.await;
-            let Some(mut events) = this
-                .update(cx, |this, cx| this.create_agent(&id, &env, cx))
+            // Runs claude, so off the UI thread.
+            let program = match claude {
+                true => {
+                    let env = env.clone();
+                    let check = async move { claude_program(&env) };
+                    Some(cx.background_executor().spawn(check).await)
+                }
+                false => None,
+            };
+            let Some((events, records)) = this
+                .update(cx, |this, cx| this.create_agent(&id, &env, program, cx))
                 .ok()
                 .flatten()
             else {
                 return;
             };
-            while let Some(event) = events.next().await {
-                if this
-                    .update(cx, |this, cx| this.on_event(&id, event, cx))
-                    .is_err()
-                {
+            let records = match records {
+                Some(records) => records.map(Incoming::Record).boxed(),
+                None => stream::empty().boxed(),
+            };
+            let mut incoming = stream::select(events.map(Incoming::Event), records);
+            while let Some(incoming) = incoming.next().await {
+                let updated = this.update(cx, |this, cx| match incoming {
+                    Incoming::Event(event) => this.on_event(&id, event, cx),
+                    Incoming::Record(record) => cx.emit(ChatEvent::Recorded {
+                        id: id.clone(),
+                        record,
+                    }),
+                });
+                if updated.is_err() {
                     break;
                 }
             }
         });
     }
 
+    /// `program` is the checked `claude` for a Claude draft.
     fn create_agent(
         &mut self,
         id: &str,
         env: &Arc<ShellEnv>,
+        program: Option<Result<PathBuf, String>>,
         cx: &mut Context<Self>,
-    ) -> Option<Events> {
+    ) -> Option<(Events, Option<Records>)> {
         let composer = self.composer.focus_handle(cx);
         let session = self.sessions.get_mut(id)?;
         let draft = &session.draft;
-        let spec = (|| {
-            let pi_session = draft
-                .meta
-                .pi()
-                .ok_or("This draft runs on Claude Code, which this version can't start.")?;
-            let pi = env.pi().map_err(|err| err.to_string())?.to_path_buf();
-            let session_file = pi_session
-                .session_file
-                .clone()
-                .ok_or("This draft has no pi session yet.")?;
-            let extension = crate::resources::pi_extension().map_err(|err| format!("{err:#}"))?;
-            let env = env.clone();
-            Ok::<_, String>(LaunchSpec {
-                command: Arc::new(move || env.command(&pi)),
-                session_file,
-                extension,
-                cwd: draft.meta.cwd.clone(),
-                agent_dir: pi_session.agent_dir.clone(),
-                draft_path: draft.draft_path(),
-                instructions: draft.meta.settings.instructions.clone(),
-                context_files: draft.meta.settings.context_files,
-            })
-        })();
-        let (agent, events) = match spec {
-            Ok(spec) => {
-                let (agent, events) = PiAgent::new(spec, IDLE_TIMEOUT, REQUEST_TIMEOUT);
-                (Ok(Arc::new(agent) as Arc<dyn Agent>), Some(events))
+        let started = match &draft.meta.backend {
+            Backend::Pi(pi) => {
+                pi_agent(draft, pi, env).map(|(agent, events)| (agent, events, None))
             }
+            Backend::Claude(claude) => program
+                .unwrap_or_else(|| Err("Claude Code wasn't checked.".into()))
+                .and_then(|program| claude_agent(draft, claude, env, program))
+                .map(|(agent, events, records)| (agent, events, Some(records))),
+        };
+        let (agent, streams) = match started {
+            Ok((agent, events, records)) => (Ok(agent), Some((events, records))),
             Err(err) => (Err(err), None),
         };
-        let pi = session.draft.meta.pi();
-        session.model = agent.as_ref().ok().zip(pi).map(|(agent, pi)| {
-            let dir = &pi.agent_dir;
-            let profile_name = ProfileCatalog::global(cx)
-                .read(cx)
-                .entry(dir)
-                .map(|entry| entry.profile.name.clone())
-                .unwrap_or_else(|| dir.display().to_string());
+        let backend = match &session.draft.meta.backend {
+            Backend::Pi(pi) => {
+                let dir = &pi.agent_dir;
+                let profile_name = ProfileCatalog::global(cx)
+                    .read(cx)
+                    .entry(dir)
+                    .map(|entry| entry.profile.name.clone())
+                    .unwrap_or_else(|| dir.display().to_string());
+                chat_model::Backend::Pi {
+                    profile_name: profile_name.into(),
+                }
+            }
+            Backend::Claude(_) => chat_model::Backend::Claude,
+        };
+        session.model = agent.as_ref().ok().map(|agent| {
             let agent = agent.clone();
-            cx.new(|_| ChatModel::new(agent, profile_name, composer))
+            cx.new(|_| ChatModel::new(agent, backend, composer))
         });
         session.agent = Some(agent);
         if self.current.as_deref() == Some(id) {
             self.focus_agent(id, cx);
         }
         self.sync_list(id, cx);
-        events
+        streams
     }
 
     /// Starts the selected draft's pi and, the first time, loads its
@@ -579,7 +617,7 @@ impl Chat {
                 Ok(agent.clone())
             }
             (Some(Err(err)), Ok(_)) => Err(err.clone()),
-            (None, Ok(_)) => Err("pi is still starting.".to_owned()),
+            (None, Ok(_)) => Err("The agent is still starting.".to_owned()),
         };
         match agent {
             Ok(agent) => {
@@ -1194,11 +1232,22 @@ impl Chat {
     }
 
     fn header(&self, palette: &Palette) -> impl IntoElement {
-        let profile = self.session().and_then(|session| {
-            let dir = &session.draft.meta.pi()?.agent_dir;
-            profile_label(dir, std::env::home_dir().as_deref())
-                .map(|label| (label, dir.display().to_string()))
-        });
+        let claude = self.session().is_some_and(Session::claude);
+        let detail = if claude {
+            Some((
+                "No project settings".to_owned(),
+                "Claude Code runs this draft without project settings, CLAUDE.md, hooks or MCP \
+                 servers, and may edit only the draft. Selection actions aren't available for \
+                 Claude Code drafts yet."
+                    .to_owned(),
+            ))
+        } else {
+            self.session().and_then(|session| {
+                let dir = &session.draft.meta.pi()?.agent_dir;
+                profile_label(dir, std::env::home_dir().as_deref())
+                    .map(|label| (label, dir.display().to_string()))
+            })
+        };
         div()
             .h(px(32.))
             .flex_none()
@@ -1209,25 +1258,27 @@ impl Chat {
             .overflow_hidden()
             .border_b_1()
             .border_color(palette.hairline)
-            .child(
-                svg()
-                    .path(PI_ICON)
-                    .size(px(12.))
-                    .flex_none()
-                    .text_color(palette.muted),
-            )
+            .when(!claude, |header| {
+                header.child(
+                    svg()
+                        .path(PI_ICON)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(palette.muted),
+                )
+            })
             .child(
                 div()
                     .flex_none()
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(palette.muted)
-                    .child("Pi"),
+                    .child(if claude { "Claude Code" } else { "Pi" }),
             )
-            .when_some(profile, |header, (label, path)| {
+            .when_some(detail, |header, (label, path)| {
                 header.child(
                     div()
-                        .id("pi-profile")
+                        .id("agent-detail")
                         .min_w_0()
                         .ml_auto()
                         .text_size(px(11.))
@@ -1437,10 +1488,11 @@ impl Chat {
         }
         let model = session.and_then(|session| session.model.clone());
         let quotes = self.quotes(&self.shown, cx);
+        let agent = session.map_or("pi", Session::agent_name);
         let placeholder: SharedString = match quotes.len() {
-            0 => "Ask pi to change the draft, or ask about the session…".into(),
-            1 => "Ask pi to change the selection, or ask about it…".into(),
-            n => format!("Tell pi what to do with these {n} selections…").into(),
+            0 => format!("Ask {agent} to change the draft, or ask about the session…").into(),
+            1 => format!("Ask {agent} to change the selection, or ask about it…").into(),
+            n => format!("Tell {agent} what to do with these {n} selections…").into(),
         };
         // The quotes sit in a chip in the footer, listed above it on
         // demand, so attaching a selection neither resizes the transcript nor
@@ -1837,10 +1889,10 @@ fn needs_activity_row(starting: bool, transcript: &Transcript) -> bool {
 
 /// The waiting slot before a visible reply replaces it.
 fn activity_row(session: &Session, palette: &Palette) -> AnyElement {
-    let text = if session.starting() {
-        "Starting pi…"
+    let text: SharedString = if session.starting() {
+        format!("Starting {}…", session.agent_name()).into()
     } else {
-        "Thinking…"
+        "Thinking…".into()
     };
     // Inset like the messages: the item padding plus their own 2px.
     let row = div()
@@ -1871,7 +1923,7 @@ fn activity_row(session: &Session, palette: &Palette) -> AnyElement {
                 };
                 (at..at + c.len_utf8(), style)
             });
-            row.child(StyledText::new(text).with_highlights(highlights))
+            row.child(StyledText::new(text.clone()).with_highlights(highlights))
         },
     )
     .into_any_element()
@@ -2034,6 +2086,114 @@ fn first_draft_prompt(note: Option<&str>) -> String {
         text.push_str(note);
     }
     text
+}
+
+/// Keeps `record` in a Claude draft's `backend`.
+pub fn record(backend: &mut Backend, record: &Record) {
+    let Backend::Claude(claude) = backend else {
+        return;
+    };
+    match record {
+        Record::Transcript(path) => claude.transcript = Some(path.clone()),
+        Record::Model(model) => claude.model = Some(model.clone()),
+    }
+}
+
+/// What a draft's agent loop receives.
+enum Incoming {
+    Event(Event),
+    Record(Record),
+}
+
+fn pi_agent(
+    draft: &Draft,
+    pi_session: &PiSession,
+    env: &Arc<ShellEnv>,
+) -> Result<(Arc<dyn Agent>, Events), String> {
+    let pi = env.pi().map_err(|err| err.to_string())?.to_path_buf();
+    let session_file = pi_session
+        .session_file
+        .clone()
+        .ok_or("This draft has no pi session yet.")?;
+    let extension = crate::resources::pi_extension().map_err(|err| format!("{err:#}"))?;
+    let env = env.clone();
+    let spec = LaunchSpec {
+        command: Arc::new(move || env.command(&pi)),
+        session_file,
+        extension,
+        cwd: draft.meta.cwd.clone(),
+        agent_dir: pi_session.agent_dir.clone(),
+        draft_path: draft.draft_path(),
+        instructions: draft.meta.settings.instructions.clone(),
+        context_files: draft.meta.settings.context_files,
+    };
+    let (agent, events) = PiAgent::new(spec, IDLE_TIMEOUT, REQUEST_TIMEOUT);
+    Ok((Arc::new(agent), events))
+}
+
+/// The `claude` on the login shell's PATH, once its version is supported.
+/// Blocks while it runs claude. Only a supported version is remembered, so
+/// a failed check is tried again for the next draft.
+fn claude_program(env: &ShellEnv) -> Result<PathBuf, String> {
+    static SUPPORTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let program = env.claude().map_err(|err| err.to_string())?.to_path_buf();
+    if !SUPPORTED.lock().unwrap().contains(&program) {
+        let command = draftmux_claude_rpc::version_command(&program, env.vars());
+        let output = crate::process::run("Claude Code", command, None, VERSION_TIMEOUT, None)?;
+        let version = draftmux_claude_rpc::check_version(&program, &output)?;
+        eprintln!("draftmux: Claude Code {version} at {}", program.display());
+        SUPPORTED.lock().unwrap().push(program.clone());
+    }
+    Ok(program)
+}
+
+fn claude_agent(
+    draft: &Draft,
+    claude: &ClaudeSession,
+    env: &ShellEnv,
+    program: PathBuf,
+) -> Result<(Arc<dyn Agent>, Events, Records), String> {
+    let spec = draftmux_claude_rpc::LaunchSpec {
+        program,
+        cwd: draft.meta.cwd.clone(),
+        env: env.vars().to_vec(),
+        extra_env: Vec::new(),
+        model: claude.model.clone(),
+        tools: Vec::new(),
+        setting_sources: Vec::new(),
+        session: Some(draftmux_claude_rpc::Session::Draft(DraftSession {
+            id: claude.session_id.to_string(),
+            dir: draft.session_dir(),
+            config_dir: claude.config_dir.clone(),
+            fork_boundary: claude.fork.as_ref().map(|fork| fork.boundary.to_string()),
+            transcript: claude.transcript.clone(),
+        })),
+        hooks: Vec::new(),
+        permission_prompt: false,
+        system_prompt: None,
+    };
+    let context = DraftContext {
+        draft_path: draft.draft_path(),
+        instructions: draft.meta.settings.instructions.clone().unwrap_or_default(),
+        target: Box::new(target_syntax(draft)),
+    };
+    let (agent, events, records) = ClaudeAgent::new(spec, CLAUDE_CONFIG, context)?;
+    Ok((Arc::new(agent), events, records))
+}
+
+/// Reads `draft`'s target from its `meta.json`, which the app keeps
+/// current, as the pi extension does; the last one read if that fails.
+fn target_syntax(draft: &Draft) -> impl Fn() -> Option<String> + std::marker::Send + Sync + use<> {
+    let store = draft.dir.parent().map(Store::new);
+    let id = draft.id.clone();
+    let last = Mutex::new(draft.meta.target);
+    move || {
+        let mut last = last.lock().unwrap();
+        if let Some(Ok(loaded)) = store.as_ref().map(|store| store.load(&id)) {
+            *last = loaded.meta.target;
+        }
+        Some(crate::selection::syntax(*last).to_owned())
+    }
 }
 
 /// Show custom agent directories; the standard Pi directory needs no label.

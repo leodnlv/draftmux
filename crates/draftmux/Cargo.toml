@@ -12,6 +12,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 claude-convert = { path = "../claude-convert" }
 clap = { version = "4.6.7", features = ["derive"] }
 draftmux-agent = { path = "../agent" }
+draftmux-claude-rpc = { path = "../claude-rpc" }
 draftmux-core = { path = "../core" }
 draftmux-pi-profiles = { path = "../pi-profiles" }
 draftmux-pi-rpc = { path = "../pi-rpc" }
@@ -30,6 +31,7 @@ shell-env = { path = "../shell-env" }
 sha2 = "0.10.9"
 similar = "2.7.0"
 tempfile = "3.27.0"
+uuid = { version = "1.29.1", features = ["v4"] }
 
 # The performance test includes the editor highlighter by path.
 [package.metadata.cargo-machete]

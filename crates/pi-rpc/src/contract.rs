@@ -112,7 +112,8 @@ fn error(error: Error) -> contract::Error {
 fn state_from(state: State) -> contract::State {
     contract::State {
         model: state.model.map(model_from),
-        thinking: state.thinking_level.as_str().to_owned(),
+        thinking: Some(state.thinking_level.as_str().to_owned()),
+        running: None,
     }
 }
 

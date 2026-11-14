@@ -155,6 +155,11 @@ pub struct ClaudeSession {
     /// in the draft's `session/`; none for a session of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<ClaudeFork>,
+    /// The model the user chose for the draft, as Claude Code's `--model`
+    /// takes it, such as `sonnet`; passed to every process. None continues
+    /// on the session's own model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Where a draft's Claude Code session forked its source (see
@@ -545,7 +550,8 @@ mod tests {
     "fork": {
       "source_session_id": "6c1d1b9e-2f4a-4b8e-9d3c-7a5e1f0b2c4d",
       "boundary": "0cf5a4d1-79c4-4901-a3ef-8d3611211105"
-    }
+    },
+    "model": "sonnet"
   },
   "first_draft_pending": true,
   "settings": {
@@ -582,12 +588,13 @@ mod tests {
         backend.remove("transcript");
         backend.remove("config_dir");
         backend.remove("fork");
+        backend.remove("model");
         let meta = parse(value.clone()).unwrap();
         let Backend::Claude(claude) = &meta.backend else {
             panic!("not Claude");
         };
         assert_eq!((&claude.transcript, &claude.config_dir), (&None, &None));
-        assert_eq!(claude.fork, None);
+        assert_eq!((&claude.fork, &claude.model), (&None, &None));
         assert_eq!(serde_json::to_value(&meta).unwrap(), value);
     }
 
@@ -605,7 +612,7 @@ mod tests {
             }),
             ("null backend", |v| v["backend"] = serde_json::Value::Null),
             ("unknown Claude field", |v| {
-                v["backend"]["model"] = "opus".into()
+                v["backend"]["effort"] = "high".into()
             }),
             ("Claude with a pi profile", |v| {
                 v["pi_agent_dir"] = "/Users/me/.pi/agent".into();

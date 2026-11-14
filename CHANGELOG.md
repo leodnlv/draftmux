@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Draft with Claude Code instead of pi: `draftmux open --backend claude`
+  continues a Claude Code transcript as the draft's own Claude Code session,
+  forked from a copy of the transcript, so the original conversation is left
+  as it was. Claude Code may edit only the draft and runs without project
+  settings, CLAUDE.md, hooks or MCP servers. The model chip switches the
+  draft's model, and the choice is kept for later sessions. Selection actions
+  aren't available for these drafts yet. Needs Claude Code 2.1.293 or later.
+  Drafts are still created with pi unless you ask for Claude Code.
 - A handed-off draft whose first draft was never started, because Draftmux
   quit or pi failed before taking the request, asks pi for it again the next
   time it opens, instead of staying empty. Once pi has taken the request it is

@@ -99,9 +99,15 @@ impl std::error::Error for Error {}
 /// The model and thinking setting the agent resolved for the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
+    /// The model the conversation is set to; none when the backend picks
+    /// it.
     pub model: Option<Model>,
-    /// The thinking setting as the backend names it.
-    pub thinking: String,
+    /// The thinking setting as the backend names it; none when the backend
+    /// has no setting Draftmux controls.
+    pub thinking: Option<String>,
+    /// The model id the backend reported a run used, when that is a
+    /// different name than `model`, such as the id an alias resolved to.
+    pub running: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +119,8 @@ pub struct Model {
 /// What the agent reports, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// A new agent process is ready and resolved this state.
+    /// A new agent process is ready and resolved this state, or the
+    /// running process reported a change to it.
     Ready(State),
     /// The agent started a run, for a prompt or on its own.
     RunStarted,

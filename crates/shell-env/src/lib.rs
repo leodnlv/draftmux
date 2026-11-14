@@ -3,7 +3,7 @@
 //! Apps launched from Finder or the Dock inherit launchd's minimal `PATH` and
 //! none of the variables exported in shell profiles, such as provider API
 //! keys. [`init`] captures the login shell's environment once at startup and
-//! resolves `pi` against it. Commands are spawned through
+//! resolves `pi` and `claude` against it. Commands are spawned through
 //! [`ShellEnv::command`] so they see that environment.
 
 mod capture;
@@ -30,19 +30,22 @@ pub struct ShellEnv {
     /// (with common install directories added to `PATH`) is used instead.
     capture_error: Option<String>,
     pi: Option<PathBuf>,
+    claude: Option<PathBuf>,
 }
 
-/// pi wasn't found. Its `Display` is a message for the user.
+/// A tool wasn't found. Its `Display` is a message for the user.
 #[derive(Debug, Clone)]
-pub struct PiMissing {
+pub struct Missing {
+    tool: &'static str,
     capture_error: Option<String>,
 }
 
-impl fmt::Display for PiMissing {
+impl fmt::Display for Missing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tool = self.tool;
         write!(
             f,
-            "pi wasn't found on your login shell's PATH. Install pi or add its \
+            "{tool} wasn't found on your login shell's PATH. Install {tool} or add its \
              directory to PATH in your shell profile, then restart Draftmux."
         )?;
         if let Some(err) = &self.capture_error {
@@ -52,7 +55,7 @@ impl fmt::Display for PiMissing {
     }
 }
 
-impl std::error::Error for PiMissing {}
+impl std::error::Error for Missing {}
 
 impl ShellEnv {
     /// Captures the login shell's environment now, blocking for up to the
@@ -73,16 +76,35 @@ impl ShellEnv {
         let path = capture::get(&vars, "PATH").map(OsString::as_os_str);
         Self {
             pi: find_executable("pi", path),
+            claude: find_executable("claude", path),
             vars,
             capture_error,
         }
     }
 
     /// The pi executable, or an error to show in place of the agent.
-    pub fn pi(&self) -> Result<&Path, PiMissing> {
-        self.pi.as_deref().ok_or_else(|| PiMissing {
+    pub fn pi(&self) -> Result<&Path, Missing> {
+        self.found(self.pi.as_deref(), "pi")
+    }
+
+    /// The first `claude` on the PATH, which may be a script that runs
+    /// Claude Code, never a shell alias or function. An error to show in
+    /// place of the agent when there is none.
+    pub fn claude(&self) -> Result<&Path, Missing> {
+        self.found(self.claude.as_deref(), "Claude Code")
+    }
+
+    fn found<'a>(&self, path: Option<&'a Path>, tool: &'static str) -> Result<&'a Path, Missing> {
+        path.ok_or_else(|| Missing {
+            tool,
             capture_error: self.capture_error.clone(),
         })
+    }
+
+    /// The captured variables, for a process that builds its own
+    /// environment from them.
+    pub fn vars(&self) -> &[(OsString, OsString)] {
+        &self.vars
     }
 
     /// A command for `program` with exactly the captured environment. Callers
@@ -116,6 +138,7 @@ impl fmt::Debug for ShellEnv {
             )
             .field("capture_error", &self.capture_error)
             .field("pi", &self.pi)
+            .field("claude", &self.claude)
             .finish()
     }
 }
@@ -154,9 +177,10 @@ fn log_summary(env: &ShellEnv, started: Instant) {
             .map_or("missing".to_string(), |p| p.display().to_string())
     };
     eprintln!(
-        "shell-env: {source} in {} ms; pi: {}",
+        "shell-env: {source} in {} ms; pi: {}; claude: {}",
         started.elapsed().as_millis(),
         tool(&env.pi),
+        tool(&env.claude),
     );
 }
 

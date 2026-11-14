@@ -1462,6 +1462,7 @@ dependencies = [
  "claude-convert",
  "comrak",
  "draftmux-agent",
+ "draftmux-claude-rpc",
  "draftmux-core",
  "draftmux-pi-profiles",
  "draftmux-pi-rpc",
@@ -1485,6 +1486,7 @@ dependencies = [
  "shell-env",
  "similar",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1499,7 +1501,10 @@ dependencies = [
 name = "draftmux-claude-rpc"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "draftmux-agent",
+ "draftmux-core",
+ "draftmux-storage",
  "futures",
  "libc",
  "serde",

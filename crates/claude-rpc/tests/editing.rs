@@ -9,127 +9,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use draftmux_agent::{Agent as _, Event, Stop};
-use draftmux_claude_rpc::{ClaudeAgent, Config, DraftContext, LaunchSpec, Session};
+use draftmux_claude_rpc::{ClaudeAgent, Config, DraftContext, LaunchSpec, Record, Session};
 use futures::StreamExt;
 use futures::executor::block_on;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+mod common;
 
-const INIT: &str = r#"
->>> {"type":"control_request","request_id":"init","request":{"subtype":"initialize","hooks":{"PreToolUse":[{"hookCallbackIds":["draftmux_hook_0"],"timeout":30}]}}}
-{"type":"control_response","response":{"subtype":"success","request_id":"init","response":{"models":[{"value":"haiku"}],"hooks_applied":true}}}
-"#;
-
-const SLACK: &str = "Markdown for a Slack message";
-
-fn line(value: Value) -> String {
-    value.to_string()
-}
-
-fn expect(value: Value) -> String {
-    format!(">>> {value}")
-}
-
-/// The prompt as written: `blocks` ahead of `text`, or `text` alone.
-fn prompt_in(blocks: &[String], text: &str) -> String {
-    let content = if blocks.is_empty() {
-        json!(text)
-    } else {
-        let blocks: Vec<Value> = blocks
-            .iter()
-            .map(String::as_str)
-            .chain([text])
-            .map(|text| json!({"type": "text", "text": text}))
-            .collect();
-        json!(blocks)
-    };
-    expect(
-        json!({"type": "user", "session_id": "", "parent_tool_use_id": null,
-        "message": {"role": "user", "content": content}}),
-    )
-}
-
-fn target_block(syntax: &str) -> String {
-    format!("<draftmux-context>\nTarget platform: {syntax}\n</draftmux-context>")
-}
-
-fn draft_block(text: &str) -> String {
-    let newline = if text.ends_with('\n') { "" } else { "\n" };
-    format!("<draftmux-draft>\n{text}{newline}</draftmux-draft>")
-}
-
-fn state(state: &str) -> String {
-    line(json!({"type": "system", "subtype": "session_state_changed", "state": state}))
-}
-
-fn settle(terminal: &str) -> String {
-    let aborted = terminal.starts_with("aborted");
-    [
-        line(
-            json!({"type": "result", "is_error": aborted, "terminal_reason": terminal,
-            "subtype": if aborted { "error_during_execution" } else { "success" }}),
-        ),
-        state("idle"),
-    ]
-    .join("\n")
-}
-
-fn tool_use(id: &str, name: &str, input: Value) -> String {
-    line(
-        json!({"type": "assistant", "message": {"id": format!("m-{id}"),
-        "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}),
-    )
-}
-
-fn hook(request: &str, tool_use_id: &str, name: &str, input: Value) -> String {
-    line(
-        json!({"type": "control_request", "request_id": request, "request": {
-        "subtype": "hook_callback", "callback_id": "draftmux_hook_0", "tool_use_id": tool_use_id,
-        "input": {"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": input,
-            "tool_use_id": tool_use_id}}}),
-    )
-}
-
-fn permission(request: &str, tool_use_id: &str, name: &str, input: Value) -> String {
-    line(
-        json!({"type": "control_request", "request_id": request, "request": {
-        "subtype": "can_use_tool", "tool_name": name, "input": input,
-        "tool_use_id": tool_use_id}}),
-    )
-}
-
-fn answer(request: &str, response: Value) -> String {
-    expect(json!({"type": "control_response", "response":
-        {"subtype": "success", "request_id": request, "response": response}}))
-}
-
-fn proceed(request: &str) -> String {
-    answer(request, json!({}))
-}
-
-/// The hook's refusal, whatever its reason.
-fn denied(reason: &str) -> Value {
-    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-        "permissionDecision": "deny", "permissionDecisionReason": reason}})
-}
-
-fn tool_result(id: &str, is_error: bool) -> String {
-    let mut block = json!({"type": "tool_result", "tool_use_id": id, "content": "done"});
-    if is_error {
-        block["is_error"] = json!(true);
-    }
-    line(json!({"type": "user", "message": {"role": "user", "content": [block]}}))
-}
-
-fn write_file(path: &Path, text: &str) -> String {
-    format!("### write {} {}", path.display(), json!(text))
-}
+use common::*;
 
 struct Harness {
     agent: Option<ClaudeAgent>,
     events: std_mpsc::Receiver<Event>,
+    records: futures::channel::mpsc::UnboundedReceiver<Record>,
     dir: TempDir,
     draft: PathBuf,
     target: Arc<Mutex<Option<String>>>,
@@ -175,7 +68,7 @@ impl Harness {
             request_timeout: Duration::from_secs(5),
             max_record: 1 << 20,
         };
-        let (agent, mut stream) = ClaudeAgent::new(spec, config, context).unwrap();
+        let (agent, mut stream, records) = ClaudeAgent::new(spec, config, context).unwrap();
         let (tx, events) = std_mpsc::channel();
         std::thread::spawn(move || {
             while let Some(event) = block_on(stream.next()) {
@@ -187,6 +80,7 @@ impl Harness {
         Self {
             agent: Some(agent),
             events,
+            records,
             dir,
             draft,
             target,
@@ -249,25 +143,11 @@ impl Harness {
     fn text(&self) -> String {
         std::fs::read_to_string(&self.draft).unwrap()
     }
-}
 
-/// `(id, draft_write, is_error)` of each finished tool.
-fn finished_tools(events: &[Event]) -> Vec<(String, bool, bool)> {
-    events
-        .iter()
-        .filter_map(|event| match event {
-            Event::ToolFinished {
-                id,
-                result,
-                draft_write,
-            } => Some((id.clone(), *draft_write, result.is_error)),
-            _ => None,
-        })
-        .collect()
-}
-
-fn edit(path: &Path, old: &str, new: &str) -> Value {
-    json!({"file_path": path, "old_string": old, "new_string": new, "replace_all": false})
+    /// The records reported so far.
+    fn records_now(&mut self) -> Vec<Record> {
+        std::iter::from_fn(|| self.records.try_recv().ok()).collect()
+    }
 }
 
 #[test]
@@ -652,7 +532,11 @@ fn a_failed_login_is_shown_once() {
             Event::AssistantStarted,
             Event::AssistantEnded {
                 text: String::new(),
-                stop: Stop::Error(Some("Not logged in · Please run /login".into())),
+                stop: Stop::Error(Some(
+                    "Not logged in · Please run /login\n\nClaude Code isn't logged in. Run \
+                     `claude` in a terminal and log in, then send again."
+                        .into()
+                )),
             },
             Event::RunSettled { aborted: false },
         ]
@@ -709,4 +593,66 @@ fn streamed_messages_end_with_their_blocks() {
             Event::RunSettled { aborted: false },
         ]
     );
+}
+
+#[test]
+fn a_switched_model_is_recorded_reported_and_passed_to_the_next_process() {
+    let mut h = Harness::new("Hello\n", |_, _| {
+        let first = [
+            INIT.into(),
+            expect(json!({"type": "control_request", "request_id": "m",
+                "request": {"subtype": "set_model", "model": "sonnet"}})),
+            line(json!({"type": "control_response", "response":
+                {"subtype": "success", "request_id": "m", "response": null}})),
+            prompt_in(&[target_block(SLACK), draft_block("Hello\n")], "a"),
+            state("running"),
+            line(json!({"type": "system", "subtype": "init", "model": "claude-sonnet-5-5"})),
+            settle("completed"),
+            "### eof".into(),
+        ];
+        let second: [String; 2] = [INIT.into(), "### eof".into()];
+        vec![first.join("\n"), second.join("\n")]
+    });
+    let unknown = block_on(h.agent().available_models()).unwrap_err();
+    assert!(unknown.message.contains("once it has started"), "{unknown}");
+    h.agent().focus().unwrap();
+    let state = |model: &str, running: Option<&str>| {
+        Event::Ready(draftmux_agent::State {
+            model: Some(draftmux_agent::Model {
+                provider: "claude".into(),
+                id: model.into(),
+            }),
+            thinking: None,
+            running: running.map(Into::into),
+        })
+    };
+    assert_eq!(h.next(), state("haiku", None));
+    let models = block_on(h.agent().available_models()).unwrap();
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["haiku"]
+    );
+
+    let switched = block_on(h.agent().switch_model(draftmux_agent::Model {
+        provider: "claude".into(),
+        id: "sonnet".into(),
+    }))
+    .unwrap();
+    assert_eq!(Event::Ready(switched), state("sonnet", None));
+    h.prompt("a");
+    let events = h.settled();
+    assert!(
+        events.contains(&state("sonnet", Some("claude-sonnet-5-5"))),
+        "{events:?}"
+    );
+
+    h.agent().blur();
+    h.finished(0);
+    h.agent().focus().unwrap();
+    assert_eq!(h.next(), state("sonnet", None));
+    let args = h.record(1)["args"].to_string();
+    assert!(args.contains(r#""--model","sonnet""#), "{args}");
+    let mut records = h.records_now();
+    records.retain(|record| matches!(record, Record::Model(_)));
+    assert_eq!(records, [Record::Model("sonnet".into())]);
 }

@@ -1,10 +1,16 @@
 //! `draftmux open`: hands a session off to a new draft.
 //!
-//! Creates the draft directory itself with the draft's pi session, forked
-//! from a pi source or converted from a Claude Code transcript, then asks the
-//! app (launching it if needed) to focus the draft. The draft exists even if
-//! the app can't be reached.
+//! Creates the draft directory itself with the draft's session, then asks
+//! the app (launching it if needed) to focus the draft. The draft exists even
+//! if the app can't be reached.
+//!
+//! A draft runs on pi unless `--backend claude` is given: its pi session is
+//! forked from a pi source or converted from a Claude Code transcript. With
+//! `--backend claude` a Claude Code transcript is continued as a native
+//! Claude Code session, forked from a snapshot of it taken into the draft's
+//! session directory.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,9 +18,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use claude_convert::ModelSelection;
+use draftmux_claude_rpc::Snapshot;
 use draftmux_pi_rpc::{ForkSpec, ModelOverride};
 use draftmux_settings::Settings;
-use draftmux_storage::{Backend, Draft, NewDraft, PiSession, Source, SourceKind, Store, Target};
+use draftmux_storage::{
+    Backend, ClaudeFork, ClaudeSession, Draft, NewDraft, PiSession, Source, SourceKind, Store,
+    Target,
+};
 
 use crate::{ipc, resources, source};
 
@@ -27,6 +37,11 @@ const FORK_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Args {
     /// pi session file or Claude Code transcript to hand off from.
     session_file: PathBuf,
+    /// Agent the draft runs on. `claude` continues a Claude Code transcript
+    /// as a native Claude Code session; a pi session can only continue on
+    /// pi.
+    #[arg(long, value_enum, default_value_t = BackendArg::Pi)]
+    backend: BackendArg,
     /// pi profile to pin the draft to (`PI_CODING_AGENT_DIR`). Defaults to the
     /// profile the session file is stored in, else the profile Draftmux's
     /// settings give the session's directory, else ~/.pi/agent.
@@ -43,6 +58,12 @@ pub struct Args {
     /// a first draft written by Draftmux's agent.
     #[arg(long, value_name = "PATH")]
     draft_file: Option<PathBuf>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendArg {
+    Pi,
+    Claude,
 }
 
 /// Parses `--target`, offering every target's name and accepting its
@@ -104,6 +125,18 @@ fn create(
     let path = std::path::absolute(&args.session_file)
         .with_context(|| format!("resolving {}", args.session_file.display()))?;
     let info = source::inspect(&path)?;
+    if args.backend == BackendArg::Claude {
+        if info.kind == SourceKind::Pi {
+            bail!(
+                "{} is a pi session, and Claude Code can only continue its own sessions; \
+                 leave out --backend claude to continue it on pi",
+                path.display()
+            );
+        }
+        if args.pi_agent_dir.is_some() {
+            bail!("--pi-agent-dir is for drafts on pi; leave it out with --backend claude");
+        }
+    }
     // Read before the draft exists, so a missing file creates nothing.
     let text = match &args.draft_file {
         Some(file) => {
@@ -113,6 +146,39 @@ fn create(
     };
     let home = std::env::home_dir().context("no home directory")?;
     let resolved = settings.resolve(&info.cwd, &home);
+    let target = args.target.unwrap_or(resolved.target.value);
+    if args.backend == BackendArg::Claude {
+        if resolved.model_override().is_some() {
+            eprintln!(
+                "draftmux: the drafting model setting is for pi; the Claude Code session \
+                 continues on its own model"
+            );
+        }
+        let mut settings = resolved.draft_settings();
+        // Pi's; Claude drafts have no selection actions yet.
+        settings.selection_model = None;
+        let session = ClaudeSession {
+            session_id: uuid::Uuid::new_v4(),
+            transcript: None,
+            config_dir: claude_config_dir(&path, &home, std::env::var_os("CLAUDE_CONFIG_DIR")),
+            fork: None,
+            model: None,
+        };
+        let new = NewDraft {
+            target,
+            title: String::new(),
+            source: Some(Source {
+                kind: info.kind,
+                path: path.clone(),
+            }),
+            cwd: info.cwd,
+            backend: Backend::Claude(session.clone()),
+            note: args.note.clone(),
+            settings,
+            text,
+        };
+        return create_claude(store, new, session, &path);
+    }
     let pi_agent_dir = source::resolve_profile(
         args.pi_agent_dir.as_deref(),
         &path,
@@ -120,9 +186,8 @@ fn create(
         resolved.profile.value.as_deref(),
         &home,
     )?;
-    let target = args.target.unwrap_or(resolved.target.value);
     let model = resolved.model_override();
-    // Every handoff runs on Pi; a Claude Code transcript is converted.
+    // A Claude Code transcript is converted to continue on pi.
     let new = |path, cwd, pi_agent_dir: &Path| NewDraft {
         target,
         title: String::new(),
@@ -181,6 +246,62 @@ fn create(
             })
         }
     }
+}
+
+/// Creates the Claude draft `new`, whose `session` forks a snapshot of
+/// `source`, the Claude Code transcript.
+fn create_claude(
+    store: &Store,
+    new: NewDraft,
+    session: ClaudeSession,
+    source: &Path,
+) -> Result<Draft> {
+    if !new.cwd.is_dir() {
+        bail!(
+            "{} was started in {}, which no longer exists",
+            source.display(),
+            new.cwd.display()
+        );
+    }
+    store.create_with_session(new, |draft| {
+        let snapshot = Snapshot::take(source, &draft.session_dir())
+            .map_err(|err| anyhow!("copying {}: {err}", source.display()))?;
+        // Inspected separately, so the source may have moved on in between.
+        if snapshot.cwd != draft.meta.cwd {
+            bail!(
+                "{} changed its working directory while being copied; try again",
+                source.display()
+            );
+        }
+        let uuid = |value: &str| {
+            uuid::Uuid::parse_str(value)
+                .with_context(|| format!("{} has an invalid id {value:?}", source.display()))
+        };
+        Ok(Backend::Claude(ClaudeSession {
+            fork: Some(ClaudeFork {
+                source_session_id: uuid(&snapshot.session_id)?,
+                boundary: uuid(&snapshot.boundary)?,
+            }),
+            ..session
+        }))
+    })
+}
+
+/// `CLAUDE_CONFIG_DIR` for a session forked from `source`: the directory
+/// Claude Code wrote the source under (`<dir>/projects/<project>/`), else
+/// the `caller`'s own, so the fork's transcript goes where the source's
+/// did. None for `~/.claude`, which Claude Code uses when it is unset; a
+/// login kept in the keychain is only found with it unset.
+fn claude_config_dir(source: &Path, home: &Path, caller: Option<OsString>) -> Option<PathBuf> {
+    let written_under = source
+        .parent()
+        .and_then(Path::parent)
+        .filter(|projects| projects.file_name() == Some("projects".as_ref()))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let dir =
+        written_under.or_else(|| caller.map(PathBuf::from).filter(|dir| dir.is_absolute()))?;
+    (dir != home.join(".claude")).then_some(dir)
 }
 
 /// The session continues on `model`, else the profile's default model. A
@@ -590,6 +711,173 @@ cat > /dev/null
 
         let entries = session_entries(&draft.meta.pi().unwrap().session_file.clone().unwrap());
         assert_eq!(entries.last().unwrap()["type"], "message");
+    }
+
+    const SOURCE_ID: &str = "6c1d1b9e-2f4a-4b8e-9d3c-7a5e1f0b2c4d";
+    const LEAF: &str = "0cf5a4d1-79c4-4901-a3ef-8d3611211105";
+
+    /// A Claude Code session in `cwd`, in a config dir's `projects/` under
+    /// `config`, ending with a complete answer and a line cut off mid-write.
+    fn native_transcript(config: &Path, cwd: &Path) -> PathBuf {
+        let dir = config.join("projects/-project");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{SOURCE_ID}.jsonl"));
+        let line = |value: Value| {
+            let mut value = value;
+            value["sessionId"] = SOURCE_ID.into();
+            value["cwd"] = cwd.to_str().unwrap().into();
+            value.to_string() + "\n"
+        };
+        let text = [
+            line(
+                json!({"type": "user", "uuid": "a2a9f0c6-55d6-4a9b-8d57-3f3f0b7c1e01",
+                "parentUuid": null, "message": {"role": "user", "content": "Write notes"}}),
+            ),
+            line(json!({"type": "assistant", "uuid": LEAF,
+                "parentUuid": "a2a9f0c6-55d6-4a9b-8d57-3f3f0b7c1e01",
+                "message": {"id": "m1", "role": "assistant",
+                    "content": [{"type": "text", "text": "Sure."}]}})),
+            r#"{"type":"user","uuid":"cut"#.into(),
+        ]
+        .concat();
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn claude_backend_forks_a_snapshot_of_a_claude_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        let config = tmp.path().join("claude-work");
+        let transcript = native_transcript(&config, &cwd);
+        let source_bytes = fs::read(&transcript).unwrap();
+        let store = Store::new(tmp.path().join("drafts"));
+        let mut settings = Settings::default();
+        settings.defaults.selection_model = Some(SelectionModel::Model(ModelOverride {
+            provider: "anthropic".into(),
+            model_id: "claude-haiku-5-5".into(),
+            thinking: ThinkingLevel::Low,
+        }));
+
+        let args = parse(&[transcript.to_str().unwrap(), "--backend", "claude"]);
+        let draft = create(&args, &store, &no_pi, &settings).unwrap();
+
+        let meta = store.load(&draft.id).unwrap().meta;
+        assert!(meta.pi().is_none());
+        assert_eq!(meta.source.as_ref().unwrap().kind, SourceKind::Claude);
+        assert_eq!(meta.cwd, cwd);
+        assert!(meta.first_draft_pending);
+        assert_eq!(meta.settings.selection_model, None);
+        let Backend::Claude(session) = &meta.backend else {
+            panic!("not Claude: {:?}", meta.backend);
+        };
+        assert_ne!(session.session_id.to_string(), SOURCE_ID);
+        assert_eq!(session.transcript, None);
+        assert_eq!(session.model, None);
+        assert_eq!(session.config_dir.as_deref(), Some(config.as_path()));
+        assert_eq!(
+            session.fork,
+            Some(ClaudeFork {
+                source_session_id: SOURCE_ID.parse().unwrap(),
+                boundary: LEAF.parse().unwrap(),
+            })
+        );
+        // The snapshot is in the draft's session directory, without the
+        // cut-off line, and the source is untouched.
+        let snapshot = fs::read(draft.session_dir().join("source.jsonl")).unwrap();
+        let complete = source_bytes.iter().rposition(|&b| b == b'\n').unwrap() + 1;
+        assert_eq!(snapshot, source_bytes[..complete]);
+        assert_eq!(fs::read(&transcript).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn claude_backend_refuses_a_pi_source_and_a_pi_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let session = pi_session(&tmp.path().join("agent"), &cwd);
+        let store = Store::new(tmp.path().join("drafts"));
+
+        let args = parse(&[session.to_str().unwrap(), "--backend", "claude"]);
+        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        assert!(err.to_string().contains("is a pi session"), "{err}");
+
+        let transcript = native_transcript(&tmp.path().join("config"), &cwd);
+        let profile = tmp.path().join("agent");
+        let profile = profile.to_str().unwrap();
+        let args = parse(&[
+            transcript.to_str().unwrap(),
+            "--backend",
+            "claude",
+            "--pi-agent-dir",
+            profile,
+        ]);
+        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--pi-agent-dir is for drafts on pi"),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read_dir(tmp.path().join("drafts")).map_or(0, |d| d.count()),
+            0
+        );
+
+        // Choosing pi explicitly keeps the profile override.
+        let args = parse(&[
+            session.to_str().unwrap(),
+            "--backend",
+            "pi",
+            "--pi-agent-dir",
+            profile,
+        ]);
+        assert_eq!(args.backend, BackendArg::Pi);
+        assert_eq!(parse(&[session.to_str().unwrap()]).backend, BackendArg::Pi);
+    }
+
+    #[test]
+    fn claude_backend_with_a_source_that_cant_be_forked_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("drafts"));
+        let gone = native_transcript(&tmp.path().join("config"), &tmp.path().join("deleted"));
+        let args = parse(&[gone.to_str().unwrap(), "--backend", "claude"]);
+        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        assert!(err.to_string().contains("no longer exists"), "{err}");
+
+        // Recognized as Claude Code, but without a complete message.
+        let cut = tmp.path().join("cut.jsonl");
+        let line = format!(
+            r#"{{"type":"user","uuid":"1","sessionId":"s","cwd":"{}","message":{{"content":"hi"}}}}"#,
+            tmp.path().display()
+        );
+        fs::write(&cut, line).unwrap();
+        let args = parse(&[cut.to_str().unwrap(), "--backend", "claude"]);
+        let err = create(&args, &store, &no_pi, &Settings::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("copying"), "{err:#}");
+        assert!(store.scan().unwrap().drafts.is_empty());
+        assert_eq!(fs::read_dir(tmp.path().join("drafts")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_claude_fork_uses_the_config_dir_its_source_was_written_under() {
+        let home = Path::new("/Users/me");
+        let config = |source: &str, caller: Option<&str>| {
+            claude_config_dir(Path::new(source), home, caller.map(Into::into))
+        };
+        assert_eq!(
+            config("/Users/me/.claude/projects/-a/s.jsonl", Some("/cfg")),
+            None
+        );
+        assert_eq!(
+            config("/Users/me/.claude-work/projects/-a/s.jsonl", None),
+            Some("/Users/me/.claude-work".into())
+        );
+        // Copied out of Claude's storage: the caller's, when absolute.
+        assert_eq!(config("/tmp/s.jsonl", Some("/cfg")), Some("/cfg".into()));
+        assert_eq!(config("/tmp/s.jsonl", Some("cfg")), None);
+        assert_eq!(config("/tmp/s.jsonl", Some("/Users/me/.claude")), None);
+        assert_eq!(config("/tmp/s.jsonl", None), None);
     }
 
     #[test]

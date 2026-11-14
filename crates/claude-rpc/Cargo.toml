@@ -20,5 +20,8 @@ test = false
 doc = false
 
 [dev-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+draftmux-core = { path = "../core" }
+draftmux-storage = { path = "../storage" }
 tempfile = "3.27.0"
 uuid = { version = "1.29.1", features = ["v4"] }

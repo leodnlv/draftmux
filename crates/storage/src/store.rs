@@ -554,6 +554,7 @@ mod tests {
             transcript: None,
             config_dir: None,
             fork: None,
+            model: None,
         })
     }
 
@@ -603,6 +604,7 @@ mod tests {
                     transcript: Some("/tmp/renamed copy.jsonl".into()),
                     config_dir: None,
                     fork: None,
+                    model: None,
                 }))
             })
             .unwrap_err();

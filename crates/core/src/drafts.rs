@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Datelike, Local, Utc};
-use draftmux_storage::{Autosave, Draft, Meta, Status, Store, Syntax, Target, by_activity};
+use draftmux_storage::{
+    Autosave, Backend, Draft, Meta, Status, Store, Syntax, Target, by_activity,
+};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(600);
 const TITLE_MAX_CHARS: usize = 80;
@@ -300,6 +302,22 @@ impl Drafts {
         Ok(())
     }
 
+    /// Changes `id`'s backend descriptor, as its agent reports what a later
+    /// start needs, such as where its transcript went. Not counted as
+    /// activity.
+    pub fn update_backend(&mut self, id: &str, update: impl FnOnce(&mut Backend)) -> Result<()> {
+        let meta = self
+            .store
+            .update_meta(id, |meta| update(&mut meta.backend))?;
+        if let Some(current) = &mut self.current
+            && current.draft.id == id
+        {
+            current.draft.meta = meta;
+        }
+        self.refresh();
+        Ok(())
+    }
+
     /// Archives `id`. When it is the selected draft, saves it first, clears
     /// the selection and returns the draft to select next: the row below,
     /// else the row above.
@@ -503,6 +521,35 @@ mod tests {
         let drafts = Drafts::new(store);
         assert_eq!(order(&drafts), [new.as_str(), old.as_str()]);
         assert_eq!(drafts.rows()[0].title, "new");
+    }
+
+    #[test]
+    fn a_backend_update_changes_only_that_drafts_descriptor() {
+        let (_root, store) = store();
+        let a = create(&store, "a", TimeDelta::hours(1));
+        let b = create(&store, "b", TimeDelta::zero());
+        let mut drafts = Drafts::new(store.clone());
+        drafts.select(&a).unwrap();
+        let before = store.load(&a).unwrap().meta;
+
+        let session = |draft: &Draft| draft.meta.pi().unwrap().session_file.clone();
+        let file = std::path::PathBuf::from("/tmp/s.jsonl");
+        for id in [&a, &b] {
+            drafts
+                .update_backend(id, |backend| {
+                    let Backend::Pi(pi) = backend else {
+                        unreachable!()
+                    };
+                    pi.session_file = Some(file.clone());
+                })
+                .unwrap();
+        }
+        assert_eq!(session(drafts.current().unwrap()), Some(file.clone()));
+        let after = store.load(&a).unwrap().meta;
+        assert_eq!(after.updated_at, before.updated_at, "not activity");
+        assert_eq!(order(&drafts), [b.as_str(), a.as_str()]);
+        let row = drafts.rows().iter().find(|row| row.draft.id == b).unwrap();
+        assert_eq!(session(&row.draft), Some(file));
     }
 
     fn archived_order(drafts: &Drafts) -> Vec<&str> {

@@ -24,6 +24,13 @@
 //!   means the hook isn't enforced: the process is stopped and later ones
 //!   start without Edit and Write.
 //!
+//! - **Model.** The model the user picks is switched live with
+//!   `set_model` and passed to every later process. The state reports the
+//!   chosen model and, once a run starts, the model claude says it used.
+//!
+//! What the draft's descriptor must keep, the transcript's path and the
+//! chosen model, arrives as [`Record`]s.
+//!
 //! Callbacks are answered on a thread of the agent's own, in order with
 //! the frames, not on the app's executor.
 
@@ -35,7 +42,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 use draftmux_agent as contract;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt, future};
 use serde_json::Value;
 
@@ -75,12 +82,28 @@ pub struct DraftContext {
     pub target: Box<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
+/// What changed that the draft's descriptor keeps, so a later start
+/// continues the same session on the same model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Record {
+    /// The session's transcript is now at this path
+    /// ([`AgentEvent::Transcript`]).
+    Transcript(PathBuf),
+    /// claude accepted this model for the session.
+    Model(String),
+}
+
 /// A draft's Claude [`Agent`] as a [`contract::Agent`].
 pub struct ClaudeAgent {
     agent: Arc<Agent>,
     context: Arc<DraftContext>,
     ledger: Arc<Mutex<Ledger>>,
-    models: Arc<Mutex<Vec<ModelInfo>>>,
+    /// The models the last process listed; none before one was ready.
+    models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
+    records: mpsc::UnboundedSender<Record>,
+    /// Resolves once the last history requested was read. A prompt waits
+    /// for it, so that history never includes the prompt.
+    history_read: Mutex<Option<future::Shared<oneshot::Receiver<()>>>>,
 }
 
 /// What the model was last sent or saw, so a prompt carries only what
@@ -97,13 +120,14 @@ struct Ledger {
 impl ClaudeAgent {
     /// Like [`Agent::new`], for a draft the agent may edit: the spec's
     /// tools, hooks, permission prompts and system prompt are set here.
-    /// Fails when the spec loads settings, which can add hooks and allow
-    /// tools, or when the draft's directory can't be resolved.
+    /// Returns the agent, its events and its [`Record`]s. Fails when the
+    /// spec loads settings, which can add hooks and allow tools, or when
+    /// the draft's directory can't be resolved.
     pub fn new(
         mut spec: LaunchSpec,
         config: Config,
         context: DraftContext,
-    ) -> Result<(Self, contract::Events), String> {
+    ) -> Result<(Self, contract::Events, mpsc::UnboundedReceiver<Record>), String> {
         if !spec.setting_sources.is_empty() {
             return Err("Claude Code settings can't be loaded for a draft yet".into());
         }
@@ -120,19 +144,20 @@ impl ClaudeAgent {
         }];
         spec.permission_prompt = true;
         spec.system_prompt = Some(system_prompt(&context));
-        let model = spec.model.clone();
         let (agent, mut raw) = Agent::new(spec, config);
         let agent = Arc::new(agent);
         let ledger = Arc::new(Mutex::new(Ledger::default()));
-        let models = Arc::new(Mutex::new(Vec::new()));
+        let models = Arc::new(Mutex::new(None));
         let (tx, events) = mpsc::unbounded();
+        let (records_tx, records) = mpsc::unbounded();
         let mut observer = Observer {
             agent: Arc::downgrade(&agent),
             policy,
             ledger: ledger.clone(),
             models: models.clone(),
-            model,
+            running: None,
             events: tx,
+            records: records_tx.clone(),
             calls: HashMap::new(),
             approved: Vec::new(),
             message: None,
@@ -152,15 +177,17 @@ impl ClaudeAgent {
             context: Arc::new(context),
             ledger,
             models,
+            records: records_tx,
+            history_read: Mutex::new(None),
         };
-        Ok((agent, events.boxed()))
+        Ok((agent, events.boxed(), records))
     }
 }
 
 impl contract::Agent for ClaudeAgent {
     fn capabilities(&self) -> contract::Capabilities {
         contract::Capabilities {
-            model_switching: false,
+            model_switching: true,
         }
     }
 
@@ -183,10 +210,19 @@ impl contract::Agent for ClaudeAgent {
             Box::new(move |first| blocks(&context, &mut ledger.lock().unwrap(), first))
                 as PromptContext
         });
-        self.agent
-            .prompt_with(text, context)
-            .map(|reply| reply.map(|()| contract::Prompted::Running).map_err(error))
-            .boxed()
+        let history_read = self.history_read.lock().unwrap().clone();
+        let agent = self.agent.clone();
+        async move {
+            if let Some(read) = history_read {
+                let _ = read.await;
+            }
+            agent
+                .prompt_with(text, context)
+                .await
+                .map(|()| contract::Prompted::Running)
+                .map_err(error)
+        }
+        .boxed()
     }
 
     fn abort(&self) -> future::BoxFuture<'static, Result<(), contract::Error>> {
@@ -196,11 +232,32 @@ impl contract::Agent for ClaudeAgent {
             .boxed()
     }
 
+    /// Read on a thread of its own: the transcript can be large.
     fn history(&self) -> future::BoxFuture<'static, Result<contract::History, contract::Error>> {
-        future::ready(self.agent.history().map_err(|message| contract::Error {
-            kind: contract::ErrorKind::Other,
-            message,
-        }))
+        let (tx, rx) = oneshot::channel();
+        let (read_tx, read_rx) = oneshot::channel();
+        *self.history_read.lock().unwrap() = Some(read_rx.shared());
+        let agent = self.agent.clone();
+        // Dropping `read_tx` once read, or if the thread can't start,
+        // releases the prompts waiting on it.
+        let read = thread::Builder::new()
+            .name("claude-history".into())
+            .spawn(move || {
+                let _ = tx.send(agent.history());
+                drop(read_tx);
+            });
+        async move {
+            let history = match read {
+                Ok(_) => rx
+                    .await
+                    .unwrap_or_else(|_| Err("reading the history failed".into())),
+                Err(err) => Err(err.to_string()),
+            };
+            history.map_err(|message| contract::Error {
+                kind: contract::ErrorKind::Other,
+                message,
+            })
+        }
         .boxed()
     }
 
@@ -208,17 +265,33 @@ impl contract::Agent for ClaudeAgent {
         &self,
     ) -> future::BoxFuture<'static, Result<Vec<contract::Model>, contract::Error>> {
         let models = self.models.lock().unwrap();
-        future::ready(Ok(models.iter().map(|m| model(&m.value)).collect())).boxed()
+        future::ready(match &*models {
+            Some(models) => Ok(models.iter().map(|m| model(&m.value)).collect()),
+            None => Err(contract::Error {
+                kind: contract::ErrorKind::Other,
+                message: "Claude Code lists its models once it has started.".into(),
+            }),
+        })
+        .boxed()
     }
 
     fn switch_model(
         &self,
-        _model: contract::Model,
+        choice: contract::Model,
     ) -> future::BoxFuture<'static, Result<contract::State, contract::Error>> {
-        future::ready(Err(contract::Error {
-            kind: contract::ErrorKind::Other,
-            message: "Switching models isn't available for Claude drafts yet.".into(),
-        }))
+        let id = choice.id;
+        let reply = self.agent.set_model(id.clone());
+        let records = self.records.clone();
+        async move {
+            reply.await.map_err(error)?;
+            let _ = records.unbounded_send(Record::Model(id.clone()));
+            Ok(contract::State {
+                model: Some(model(&id)),
+                thinking: None,
+                // Known again once a run reports it.
+                running: None,
+            })
+        }
         .boxed()
     }
 }
@@ -306,10 +379,11 @@ struct Observer {
     agent: Weak<Agent>,
     policy: DraftPolicy,
     ledger: Arc<Mutex<Ledger>>,
-    models: Arc<Mutex<Vec<ModelInfo>>>,
-    /// The model the agent was asked to start with.
-    model: Option<String>,
+    models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
+    /// The model the process's last run said it used.
+    running: Option<String>,
     events: mpsc::UnboundedSender<contract::Event>,
+    records: mpsc::UnboundedSender<Record>,
     /// The tool calls of the run so far, by `tool_use_id`: name and input.
     calls: HashMap<String, (String, Value)>,
     /// Draft writes the hook allowed whose result hasn't arrived, in the
@@ -328,15 +402,26 @@ impl Observer {
         let _ = self.events.unbounded_send(event);
     }
 
+    fn state(&self) -> contract::State {
+        contract::State {
+            model: self
+                .agent
+                .upgrade()
+                .and_then(|agent| agent.model())
+                .as_deref()
+                .map(model),
+            thinking: None,
+            running: self.running.clone(),
+        }
+    }
+
     fn on_event(&mut self, event: AgentEvent) {
         use contract::Event as E;
         match event {
             AgentEvent::Ready(init) => {
-                *self.models.lock().unwrap() = init.models;
-                self.emit(E::Ready(contract::State {
-                    model: self.model.as_deref().map(model),
-                    thinking: String::new(),
-                }));
+                *self.models.lock().unwrap() = Some(init.models);
+                self.running = None;
+                self.emit(E::Ready(self.state()));
             }
             AgentEvent::RunStarted => {
                 self.error_reported = false;
@@ -345,7 +430,10 @@ impl Observer {
             AgentEvent::Frame(frame) => self.on_frame(&frame),
             AgentEvent::Hook(request) => self.on_hook(request),
             AgentEvent::Permission(request) => self.on_permission(request),
-            AgentEvent::CallbackCancelled { .. } | AgentEvent::Transcript(_) => {}
+            AgentEvent::Transcript(path) => {
+                let _ = self.records.unbounded_send(Record::Transcript(path));
+            }
+            AgentEvent::CallbackCancelled { .. } => {}
             AgentEvent::RunSettled { aborted, error } => {
                 self.end_run(aborted);
                 if let Some(error) = error.filter(|_| !self.error_reported) {
@@ -400,6 +488,13 @@ impl Observer {
                 // The summary may have lost what the model was sent.
                 *self.ledger.lock().unwrap() = Ledger::default();
             }
+            Some("system") if frame["subtype"] == "init" => {
+                let running = frame["model"].as_str().map(str::to_owned);
+                if running.is_some() && running != self.running {
+                    self.running = running;
+                    self.emit(E::Ready(self.state()));
+                }
+            }
             _ => {}
         }
     }
@@ -431,8 +526,16 @@ impl Observer {
                 self.emit(contract::Event::ToolStarted(call));
             }
         }
-        if frame["error"].is_string() {
-            let text = self.message.take().map(|(_, texts)| texts.join("\n\n"));
+        if let Some(kind) = frame["error"].as_str() {
+            let mut text = self.message.take().map(|(_, texts)| texts.join("\n\n"));
+            if kind == "authentication_failed" {
+                let hint = "Claude Code isn't logged in. Run `claude` in a terminal and log in, \
+                            then send again.";
+                text = Some(match text.filter(|text| !text.is_empty()) {
+                    Some(text) => format!("{text}\n\n{hint}"),
+                    None => hint.into(),
+                });
+            }
             self.error_reported = true;
             self.emit(contract::Event::AssistantEnded {
                 text: String::new(),

@@ -5,7 +5,9 @@
 //! What it shows always comes from the agent: the owner passes the state of
 //! each new agent process ([`Event::Ready`](draftmux_agent::Event)), and a
 //! switch shows the state the agent reports after it. pi records a switch in
-//! the session, so the draft keeps the model across restarts.
+//! the session, and a Claude draft's descriptor keeps it, so the draft keeps
+//! the model across restarts. For Claude, the model a run reported using is
+//! shown beside the one chosen.
 
 use std::sync::Arc;
 
@@ -20,9 +22,18 @@ use crate::model_picker::{ModelPicker, PickerEvent};
 use crate::profiles::ModelList;
 use crate::theme;
 
+/// The kind of agent the label is for.
+pub enum Backend {
+    /// A pi agent on the profile with this name.
+    Pi {
+        profile_name: SharedString,
+    },
+    Claude,
+}
+
 pub struct ChatModel {
     agent: Arc<dyn Agent>,
-    profile_name: SharedString,
+    backend: Backend,
     state: Option<State>,
     picker: Option<(Entity<ModelPicker>, Subscription)>,
     /// The composer, focused again when the picker closes.
@@ -32,15 +43,10 @@ pub struct ChatModel {
 }
 
 impl ChatModel {
-    /// `profile_name` is the draft's pi profile, for the picker's messages.
-    pub fn new(
-        agent: Arc<dyn Agent>,
-        profile_name: impl Into<SharedString>,
-        composer: FocusHandle,
-    ) -> Self {
+    pub fn new(agent: Arc<dyn Agent>, backend: Backend, composer: FocusHandle) -> Self {
         Self {
             agent,
-            profile_name: profile_name.into(),
+            backend,
             state: None,
             picker: None,
             composer,
@@ -76,7 +82,10 @@ impl ChatModel {
             return;
         }
         let current = self.current();
-        let profile_name = self.profile_name.clone();
+        let profile_name: SharedString = match &self.backend {
+            Backend::Pi { profile_name } => profile_name.clone(),
+            Backend::Claude => "Claude Code".into(),
+        };
         let picker = cx.new(|cx| {
             let mut picker = ModelPicker::new(profile_name, ModelList::Loading, cx);
             picker.set_current(current, cx);
@@ -165,33 +174,64 @@ impl ChatModel {
         cx.notify();
     }
 
-    /// The model, and the thinking level when there is a model; the model
-    /// is what gets cut short when the row is narrow.
+    /// The model, and the thinking level or, for Claude, the model a run
+    /// used; the model is what gets cut short when the row is narrow.
     fn label(&self) -> (SharedString, Option<SharedString>) {
-        match &self.state {
-            None => ("π …".into(), None),
-            Some(State { model: None, .. }) => ("π no model".into(), None),
-            Some(State {
-                model: Some(model),
-                thinking,
-            }) => (
+        let prefix = match self.backend {
+            Backend::Pi { .. } => "π",
+            Backend::Claude => "Claude",
+        };
+        let Some(state) = &self.state else {
+            return (format!("{prefix} …").into(), None);
+        };
+        match (&self.backend, &state.model) {
+            (Backend::Pi { .. }, None) => ("π no model".into(), None),
+            (Backend::Pi { .. }, Some(model)) => (
                 format!("π {}/{}", model.provider, model.id).into(),
-                Some(format!("thinking {thinking}").into()),
+                state
+                    .thinking
+                    .as_ref()
+                    .map(|thinking| format!("thinking {thinking}").into()),
+            ),
+            (Backend::Claude, None) => match &state.running {
+                Some(running) => (format!("Claude {running}").into(), None),
+                None => ("Claude default model".into(), None),
+            },
+            (Backend::Claude, Some(model)) => (
+                format!("Claude {}", model.id).into(),
+                state
+                    .running
+                    .as_ref()
+                    .filter(|running| **running != model.id)
+                    .map(|running| running.clone().into()),
             ),
         }
     }
 
     fn tooltip(&self) -> SharedString {
-        match &self.state {
-            Some(State {
-                model: Some(model),
-                thinking,
-            }) => format!(
-                "{}/{} with thinking level {thinking}. Click to switch the model.",
-                model.provider, model.id,
+        let Some(state) = &self.state else {
+            return "Click to switch the model".into();
+        };
+        match (&self.backend, &state.model) {
+            (Backend::Pi { .. }, Some(model)) => format!(
+                "{}/{} with thinking level {}. Click to switch the model.",
+                model.provider,
+                model.id,
+                state.thinking.as_deref().unwrap_or("unknown"),
             )
             .into(),
-            _ => "Click to switch the model".into(),
+            (Backend::Pi { .. }, None) => "Click to switch the model".into(),
+            (Backend::Claude, model) => {
+                let chosen = match model {
+                    Some(model) => format!("Set to {}", model.id),
+                    None => "Continues on the session's own model".into(),
+                };
+                let ran = match &state.running {
+                    Some(running) => format!("; its last run used {running}"),
+                    None => String::new(),
+                };
+                format!("{chosen}{ran}. Click to switch the model.").into()
+            }
         }
     }
 }

@@ -408,7 +408,7 @@ fn live_draft_editing_is_limited_to_the_draft() {
         instructions: String::new(),
         target: Box::new(|| Some("Markdown for a forum post titled ZEBRA-7".into())),
     };
-    let (agent, mut stream) = ClaudeAgent::new(spec, config(), context).unwrap();
+    let (agent, mut stream, _records) = ClaudeAgent::new(spec, config(), context).unwrap();
     let (tx, events) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         while let Some(event) = block_on(stream.next()) {

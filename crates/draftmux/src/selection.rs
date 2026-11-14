@@ -205,8 +205,9 @@ const START: &str = "<<<SELECTION>>>";
 const END: &str = "<<<END SELECTION>>>";
 
 /// What the draft is written in. `pi-extension/draftmux.ts` describes the
-/// targets with the same text.
-fn syntax(target: Target) -> &'static str {
+/// targets with the same text, and Claude drafts get it as their target
+/// platform.
+pub(crate) fn syntax(target: Target) -> &'static str {
     match target {
         Target::Github => {
             "GitHub-flavored Markdown, rendered as in a GitHub comment: every line break inside a paragraph shows, so keep each paragraph on one line rather than wrapping it"
@@ -357,6 +358,7 @@ mod tests {
             transcript: None,
             config_dir: None,
             fork: None,
+            model: None,
         });
         assert!(new(&meta).is_none());
     }

@@ -440,6 +440,12 @@ impl Agent {
         }
     }
 
+    /// The model processes start with, as `--model` takes it; `None` for
+    /// the session's own.
+    pub(crate) fn model(&self) -> Option<String> {
+        self.shared.lock().model.clone()
+    }
+
     /// The conversation of a [`Session::Draft`] so far, read from its
     /// transcript; empty for other sessions. Reads files, but doesn't wait
     /// for claude.

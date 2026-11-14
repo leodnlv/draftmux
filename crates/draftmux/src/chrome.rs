@@ -872,6 +872,15 @@ impl Chrome {
                 }
                 self.apply(outcome, None, cx);
             }
+            ChatEvent::Recorded { id, record } => {
+                let recorded = self
+                    .session
+                    .drafts_mut()
+                    .update_backend(id, |backend| crate::chat::record(backend, record));
+                if let Err(err) = recorded {
+                    eprintln!("draftmux: recording draft {id}'s Claude Code session: {err:#}");
+                }
+            }
             ChatEvent::Running { id, running } => {
                 self.session.agent_running(id, *running);
                 if self.session.drafts().current_id() != Some(id.as_str()) {

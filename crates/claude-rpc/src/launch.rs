@@ -1,7 +1,7 @@
 //! The `claude` command line and environment of a draft's process.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::session::{DraftSession, Start};
@@ -13,6 +13,52 @@ use crate::session::{DraftSession, Start};
 const ENV_ALLOWLIST: &[&str] = &[
     "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM",
 ];
+
+/// The oldest Claude Code whose protocol this crate was checked against.
+const MIN_VERSION: [u32; 3] = [2, 1, 293];
+/// `program --version` with the variables of `env` a `claude` process
+/// gets. Its output goes to [`check_version`].
+pub fn version_command(program: &Path, env: &[(OsString, OsString)]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("--version")
+        .env_clear()
+        .envs(allowed(env).map(|(k, v)| (k, v)));
+    command
+}
+
+/// The version `program` printed for `--version` when this crate supports
+/// it, else a message for the user.
+pub fn check_version(program: &Path, output: &str) -> Result<String, String> {
+    supported(output.trim()).map_err(|found| {
+        format!(
+            "Draftmux needs Claude Code {} or later; {} reports {found}. Update Claude Code, \
+             then restart Draftmux.",
+            MIN_VERSION.map(|n| n.to_string()).join("."),
+            program.display(),
+        )
+    })
+}
+
+/// The version in `claude --version` output such as `2.1.293 (Claude
+/// Code)` when it is supported, else what was found.
+fn supported(output: &str) -> Result<String, String> {
+    let version = output.split_whitespace().next().unwrap_or_default();
+    let parts: Option<Vec<u32>> = version.split('.').map(|n| n.parse().ok()).collect();
+    match parts {
+        Some(parts) if parts.len() == 3 && parts[..] >= MIN_VERSION[..] => Ok(version.into()),
+        _ if output.is_empty() => Err("nothing".into()),
+        _ => Err(format!("\"{output}\"")),
+    }
+}
+
+/// The variables of `env` a `claude` process gets.
+fn allowed(env: &[(OsString, OsString)]) -> impl Iterator<Item = &(OsString, OsString)> {
+    env.iter().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        ENV_ALLOWLIST.contains(&name.as_ref()) || name.starts_with("LC_")
+    })
+}
 
 /// Everything needed to start a draft's `claude` process.
 pub struct LaunchSpec {
@@ -163,13 +209,10 @@ impl LaunchSpec {
             }
             None => {}
         }
-        command.current_dir(&self.cwd).env_clear();
-        for (key, value) in &self.env {
-            let name = key.to_string_lossy();
-            if ENV_ALLOWLIST.contains(&name.as_ref()) || name.starts_with("LC_") {
-                command.env(key, value);
-            }
-        }
+        command
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(allowed(&self.env).map(|(k, v)| (k, v)));
         command.envs(self.extra_env.iter().map(|(k, v)| (k, v)));
         // Claude must write where the agent looks for the transcript.
         if let Some(Session::Draft(draft)) = &self.session {
@@ -218,6 +261,39 @@ mod tests {
             permission_prompt: true,
             system_prompt: None,
         }
+    }
+
+    #[test]
+    fn versions_older_than_the_checked_one_are_refused() {
+        assert_eq!(supported("2.1.293 (Claude Code)"), Ok("2.1.293".into()));
+        assert_eq!(supported("2.2.0 (Claude Code)"), Ok("2.2.0".into()));
+        assert_eq!(supported("3.0.1"), Ok("3.0.1".into()));
+        assert_eq!(
+            supported("2.1.292 (Claude Code)"),
+            Err("\"2.1.292 (Claude Code)\"".into())
+        );
+        assert_eq!(supported("1.0"), Err("\"1.0\"".into()));
+        assert_eq!(supported(""), Err("nothing".into()));
+    }
+
+    #[test]
+    fn the_version_check_gets_only_the_allowlisted_variables() {
+        let env = [
+            ("PATH".into(), "/usr/bin".into()),
+            ("ANTHROPIC_API_KEY".into(), "secret".into()),
+        ];
+        let command = version_command(Path::new("/opt/claude"), &env);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--version"]);
+        let vars: Vec<_> = command.get_envs().map(|(k, _)| k).collect();
+        assert_eq!(vars, ["PATH"]);
+        let program = Path::new("/opt/claude");
+        assert_eq!(
+            check_version(program, "2.1.300 (Claude Code)\n"),
+            Ok("2.1.300".into())
+        );
+        let err = check_version(program, "2.0.1 (Claude Code)").unwrap_err();
+        assert!(err.contains("needs Claude Code 2.1.293 or later"), "{err}");
     }
 
     #[test]
