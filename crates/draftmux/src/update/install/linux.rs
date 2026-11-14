@@ -27,12 +27,9 @@ pub struct Installation {
 /// can write to.
 pub fn installation() -> Result<Installation, Ineligible> {
     let exe = crate::resources::exe().map_err(|_| Ineligible::Development)?;
-    let root = crate::resources::tree_root(&exe)
+    let root = crate::resources::release_root(&exe)
         .ok_or(Ineligible::Development)?
         .to_owned();
-    if !root.join(RELEASE_MARKER).is_file() {
-        return Err(Ineligible::Development);
-    }
     let dir = root.parent().ok_or(Ineligible::Development)?;
     let writable = tempfile::Builder::new()
         .prefix(".draftmux-write-test-")

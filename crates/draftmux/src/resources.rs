@@ -75,6 +75,12 @@ pub fn tree_root(exe: &Path) -> Option<&Path> {
     (bin.file_name()? == "bin" && root.join(TREE_MARKER).is_file()).then_some(root)
 }
 
+/// The app tree holding `exe` if a release script built it.
+#[cfg(not(target_os = "macos"))]
+pub fn release_root(exe: &Path) -> Option<&Path> {
+    tree_root(exe).filter(|root| root.join(RELEASE_MARKER).is_file())
+}
+
 fn tree_resources(exe: &Path) -> Option<PathBuf> {
     tree_root(exe).map(|root| root.join("share/draftmux"))
 }

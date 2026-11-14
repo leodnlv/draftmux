@@ -14,12 +14,7 @@ pub fn frame(
     title: &'static str,
 ) -> AnyElement {
     let palette = *crate::theme::palette(cx);
-    // Translucent surfaces need an opaque backing on non-blurred windows.
-    let content = div()
-        .size_full()
-        .bg(palette.pane)
-        .child(content)
-        .into_any_element();
+    let content = super::backed(content, cx);
     let Decorations::Client { mut tiling } = window.window_decorations() else {
         return content;
     };

@@ -148,8 +148,12 @@ pub fn frame(
     _close: Box<dyn gpui::Action>,
     _title: &'static str,
 ) -> gpui::AnyElement {
+    backed(content, cx)
+}
+
+/// Translucent surfaces need an opaque backing on non-blurred windows.
+fn backed(content: gpui::AnyElement, cx: &App) -> gpui::AnyElement {
     use gpui::{div, prelude::*};
-    // Translucent surfaces need an opaque backing on non-blurred windows.
     div()
         .size_full()
         .bg(crate::theme::palette(cx).pane)

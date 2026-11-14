@@ -172,7 +172,7 @@ pub fn run(
         .prefix("draftmux-selection-")
         .tempdir_in(temp_parent)
         .map_err(|err| format!("Couldn't create a temporary session directory: {err}"))?;
-    let (agent, command, input) = match backend {
+    let (agent, command) = match backend {
         Backend::Pi {
             pi,
             extension,
@@ -188,7 +188,7 @@ pub fn run(
                 temp.path(),
                 config,
             );
-            (Agent::Pi, command, Some(prompt.as_str()))
+            (Agent::Pi, command)
         }
         Backend::Claude {
             program,
@@ -203,11 +203,7 @@ pub fn run(
                 session,
                 model: config.model.clone(),
             };
-            (
-                Agent::Claude,
-                oneshot.command(temp.path())?,
-                Some(prompt.as_str()),
-            )
+            (Agent::Claude, oneshot.command(temp.path())?)
         }
     };
     let (leading, trailing) = surrounding_whitespace(request.selected());
@@ -222,7 +218,7 @@ pub fn run(
     let output = process::run_streaming(
         agent.name(),
         command,
-        input,
+        Some(prompt.as_str()),
         TIMEOUT,
         Some(cancel),
         |chunk| {

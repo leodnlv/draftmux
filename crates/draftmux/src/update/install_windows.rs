@@ -4,7 +4,6 @@
 use anyhow::Result;
 
 use super::{Ineligible, Release};
-use crate::resources::RELEASE_MARKER;
 
 /// No copy on Windows installs updates itself.
 pub enum Installation {}
@@ -13,12 +12,8 @@ pub enum Installation {}
 /// development build.
 pub fn installation() -> Result<Installation, Ineligible> {
     let exe = crate::resources::exe().map_err(|_| Ineligible::Development)?;
-    let root = crate::resources::tree_root(&exe).ok_or(Ineligible::Development)?;
-    if root.join(RELEASE_MARKER).is_file() {
-        Err(Ineligible::Manual)
-    } else {
-        Err(Ineligible::Development)
-    }
+    crate::resources::release_root(&exe).ok_or(Ineligible::Development)?;
+    Err(Ineligible::Manual)
 }
 
 pub fn install(_: &Release, installation: &Installation) -> Result<()> {

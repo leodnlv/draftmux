@@ -85,7 +85,6 @@ gpui_platform.workspace = true
 uds_windows = "1.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Threading",
 ] }
