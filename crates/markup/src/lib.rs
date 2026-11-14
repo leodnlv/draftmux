@@ -10,6 +10,7 @@ pub mod format;
 pub mod frontmatter;
 pub use emoji::replace_shortcodes;
 pub mod github;
+pub mod highlight;
 pub mod plain;
 pub mod rich;
 pub mod rich_text;

@@ -159,6 +159,28 @@ impl InlineText {
         }
     }
 
+    /// Whether the mark on `before` goes on into `after`, the next fragment
+    /// on its line, as one shape: the same mark on adjacent text of two
+    /// segments, such as differently colored code.
+    fn mark_continues(&self, pieces: &[Piece], before: &Frag, after: &Frag) -> bool {
+        let (first, second) = (&pieces[before.piece], &pieces[after.piece]);
+        let mark = |piece: &Piece| {
+            self.segments[piece.segment]
+                .mark
+                .as_ref()
+                .filter(|mark| mark.bar.is_none())
+        };
+        after.piece == before.piece + 1
+            && second.breaks == 0
+            && before.range.end == first.line.len()
+            && after.range.start == 0
+            && first.trail == px(0.)
+            && second.lead == px(0.)
+            && mark(first).zip(mark(second)).is_some_and(|(a, b)| {
+                a.hunk == b.hunk && a.background == b.background && a.ring == b.ring
+            })
+    }
+
     /// Height of an empty line; by default a full line.
     pub fn blank_line(mut self, height: Option<Pixels>) -> Self {
         self.blank_line = height;
@@ -372,13 +394,25 @@ impl Element for InlineText {
         let mut cursors: Vec<_> = shaped.pieces.iter().map(|p| p.line.cursor()).collect();
         for (line, top, left) in positioned(laid, bounds) {
             let baseline = top + shaped.baseline;
-            for frag in &line.frags {
+            for (ix, frag) in line.frags.iter().enumerate() {
                 let piece = &shaped.pieces[frag.piece];
                 let segment = &self.segments[piece.segment];
                 let part = cursors[frag.piece].take_until(frag.range.end);
                 let x = left + frag.x;
                 if let Some(mark) = &segment.mark {
-                    paint_mark(mark, piece, frag, &part, x, baseline, window);
+                    let joined = |before: &Frag, after: &Frag| {
+                        self.mark_continues(&shaped.pieces, before, after)
+                    };
+                    let opens = frag.range.start == 0
+                        && !ix
+                            .checked_sub(1)
+                            .is_some_and(|prev| joined(&line.frags[prev], frag));
+                    let closes = frag.range.end == piece.line.len()
+                        && !line
+                            .frags
+                            .get(ix + 1)
+                            .is_some_and(|next| joined(frag, next));
+                    paint_mark(mark, opens, closes, piece, frag, &part, x, baseline, window);
                 }
                 if let Some(chip) = &segment.chip {
                     paint_chip(chip, segment, piece, frag, &part, x, baseline, window, cx);
@@ -561,9 +595,13 @@ fn size_of(lines: &[Line], shaped: &Shaped) -> Size<Pixels> {
 }
 
 /// A mark's background and ring around one fragment of its text, as tall
-/// as the text's ascent and descent, rounded where the mark starts and ends.
+/// as the text's ascent and descent, rounded where the mark `opens` and
+/// `closes`.
+#[allow(clippy::too_many_arguments)]
 fn paint_mark(
     mark: &SegmentMark,
+    opens: bool,
+    closes: bool,
     piece: &Piece,
     frag: &Frag,
     part: &ShapedLine,
@@ -571,8 +609,6 @@ fn paint_mark(
     baseline: Pixels,
     window: &mut Window,
 ) {
-    let opens = frag.range.start == 0;
-    let closes = frag.range.end == piece.line.len();
     let (lead, trail) = frag.edges(piece);
     let bounds = Bounds::from_corners(
         point(x - lead, baseline - piece.line.ascent - px(1.)),

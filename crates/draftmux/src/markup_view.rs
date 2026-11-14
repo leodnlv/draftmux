@@ -21,6 +21,7 @@ use gpui::{
     relative, rgba, svg,
 };
 use markup::frontmatter::{FieldMap, Fields};
+use markup::highlight::Token;
 use markup::slack::{CodeLanguage, DiffRole};
 use markup::source_map::SourceMap;
 use markup::{AlertKind, Alignment, Block, Document, List, Span, Table};
@@ -96,6 +97,9 @@ pub struct MarkupStyle {
     pub code_wraps: bool,
     /// How code blocks with a language show; `None` shows them as others.
     pub language_code: Option<LanguageCode>,
+    /// Colors of code in a language with a grammar; `None` leaves code
+    /// uncolored.
+    pub syntax: Option<SyntaxColors>,
     pub radius: Pixels,
     pub quote_bar_width: Pixels,
     pub quote_bar_color: Hsla,
@@ -318,6 +322,75 @@ pub struct LanguageCode {
     pub muted: Hsla,
 }
 
+/// Colors of highlighted code by [`Token`] class.
+pub struct SyntaxColors {
+    pub comment: Hsla,
+    pub constant: Hsla,
+    pub entity: Hsla,
+    pub tag: Hsla,
+    pub keyword: Hsla,
+    pub string: Hsla,
+    pub variable: Hsla,
+    pub heading: Hsla,
+    pub list_marker: Hsla,
+    pub inserted: Hsla,
+    pub deleted: Hsla,
+    pub changed: Hsla,
+    pub diff_range: Hsla,
+    pub invalid: Hsla,
+}
+
+impl SyntaxColors {
+    /// Primer's `prettylights` syntax colors, as GitHub highlights code.
+    fn github(dark: bool) -> Self {
+        let c = |light: u32, dark_hex: u32| -> Hsla {
+            rgba(if dark { dark_hex } else { light }).into()
+        };
+        Self {
+            comment: c(0x59636eff, 0x9198a1ff),
+            constant: c(0x0550aeff, 0x79c0ffff),
+            entity: c(0x6639baff, 0xd2a8ffff),
+            tag: c(0x116329ff, 0x7ee787ff),
+            keyword: c(0xcf222eff, 0xff7b72ff),
+            string: c(0x0a3069ff, 0xa5d6ffff),
+            variable: c(0x953800ff, 0xffa657ff),
+            heading: c(0x0550aeff, 0x1f6febff),
+            list_marker: c(0x3b2300ff, 0xf2cc60ff),
+            inserted: c(0x116329ff, 0xaff5b4ff),
+            deleted: c(0x82071eff, 0xffdcd7ff),
+            changed: c(0x953800ff, 0xffdfb6ff),
+            diff_range: c(0x8250dfff, 0xd2a8ffff),
+            invalid: c(0x82071eff, 0xf85149ff),
+        }
+    }
+
+    /// `segment` drawn as `token`.
+    fn style(&self, segment: &mut Segment, token: Token) {
+        let (color, bold) = match token {
+            Token::Comment => (Some(self.comment), false),
+            Token::Constant => (Some(self.constant), false),
+            Token::Entity => (Some(self.entity), false),
+            Token::Tag => (Some(self.tag), false),
+            Token::Keyword => (Some(self.keyword), false),
+            Token::String => (Some(self.string), false),
+            Token::Variable => (Some(self.variable), false),
+            Token::RegexpEscape => (Some(self.tag), true),
+            Token::Heading => (Some(self.heading), true),
+            Token::ListMarker => (Some(self.list_marker), false),
+            Token::Bold => (None, true),
+            Token::Italic => (None, false),
+            Token::Inserted => (Some(self.inserted), false),
+            Token::Deleted => (Some(self.deleted), false),
+            Token::Changed => (Some(self.changed), false),
+            Token::DiffRange => (Some(self.diff_range), true),
+            Token::Invalid => (Some(self.invalid), false),
+        };
+        segment.color = color;
+        segment.weight = bold.then_some(FontWeight::BOLD);
+        segment.italic = token == Token::Italic;
+    }
+}
+
 impl LanguageCode {
     fn highlight(&self, role: DiffRole) -> HighlightStyle {
         let (color, background) = match role {
@@ -491,6 +564,7 @@ impl MarkupStyle {
             code_border: None,
             code_wraps: false,
             language_code: None,
+            syntax: Some(SyntaxColors::github(dark)),
             radius: px(6.),
             quote_bar_width: px(3.5),
             quote_bar_color: c(0xd1d9e0ff, 0x3d444dff),
@@ -597,6 +671,7 @@ impl MarkupStyle {
             rule_padding: px(0.),
             rule_height: px(2.),
             rule_color: c(0x9a9a9aff, 0x848484ff),
+            syntax: None,
             ..github
         }
     }
@@ -703,6 +778,7 @@ impl MarkupStyle {
             code_padding: px(8.),
             code_border: Some(code_border),
             code_wraps: true,
+            syntax: None,
             language_code: Some(LanguageCode {
                 background: c(0xf8f8f8ff, 0x212428ff),
                 border: c(0x1d1c1d0f, 0xf8f8f80f),
@@ -755,6 +831,9 @@ impl MarkupStyle {
 
 /// Registers the bundled fonts the styles use. Call once at startup.
 pub fn init(cx: &mut App) {
+    cx.background_executor()
+        .spawn(async { markup::highlight::load() })
+        .detach();
     let fonts = [
         include_bytes!("../assets/fonts/lato/Lato-Regular.ttf").as_slice(),
         include_bytes!("../assets/fonts/lato/Lato-Italic.ttf"),
@@ -1492,6 +1571,42 @@ impl<'a> Renderer<'a> {
             .selectable(self.select())
     }
 
+    /// `text`, code in `lang`, in the surrounding style, highlighted when the
+    /// style has [`MarkupStyle::syntax`] colors and `lang` a grammar.
+    fn code(&mut self, lang: Option<&str>, text: &str) -> InlineText {
+        let highlighted = self
+            .style
+            .syntax
+            .as_ref()
+            .zip(lang)
+            .and_then(|(colors, lang)| Some((colors, markup::highlight::highlight(lang, text)?)));
+        let Some((colors, tokens)) = highlighted else {
+            return self.plain(text);
+        };
+        let placed = |range: Range<usize>| {
+            let segment = Segment {
+                text: SharedString::from(text[range.clone()].to_owned()),
+                ..Segment::default()
+            };
+            Placed::new(segment, range)
+        };
+        let mut segments = Vec::with_capacity(tokens.len() * 2 + 1);
+        let mut at = 0;
+        for (range, token) in tokens.iter() {
+            if at < range.start {
+                segments.push(placed(at..range.start));
+            }
+            let mut token_segment = placed(range.clone());
+            colors.style(&mut token_segment.segment, *token);
+            segments.push(token_segment);
+            at = range.end;
+        }
+        if at < text.len() || segments.is_empty() {
+            segments.push(placed(at..text.len()));
+        }
+        self.inline(segments).selectable(self.select())
+    }
+
     /// The text of the node being rendered, in `segments`, with the
     /// redline's marks on it drawn.
     fn inline(&mut self, segments: Vec<Placed>) -> InlineText {
@@ -1772,14 +1887,14 @@ impl<'a> Renderer<'a> {
                 lang: Some(lang),
                 text,
             } if style.language_code.is_some() => self.language_code(lang, text),
-            Block::Code { text, .. } if style.code_wraps => self
+            Block::Code { lang, text } if style.code_wraps => self
                 .code_box()
                 .font_family(style.mono_family.clone())
                 .text_size(style.code_text_size)
                 .line_height(relative(style.code_line_height))
-                .child(self.plain(text))
+                .child(self.code(lang.as_deref(), text))
                 .into_any_element(),
-            Block::Code { text, .. } => self
+            Block::Code { lang, text } => self
                 .code_box()
                 .id(self.id())
                 .when_some(self.scroll_handle(), |div, scroll| {
@@ -1795,7 +1910,7 @@ impl<'a> Renderer<'a> {
                         .font_family(style.mono_family.clone())
                         .text_size(style.code_text_size)
                         .line_height(relative(style.code_line_height))
-                        .child(self.plain(text)),
+                        .child(self.code(lang.as_deref(), text)),
                 )
                 .into_any_element(),
             Block::Table(table) => self.table(table),
@@ -2978,6 +3093,24 @@ mod tests {
             drawn_after(Target::Slack, before, after),
             ["let a = 1;", "let b = [3;]"]
         );
+    }
+
+    #[test]
+    fn github_code_is_highlighted_under_changes() {
+        let before = "```rust\nlet a = 1;\nlet b = 2;\n```\n";
+        let after = "```rust\nlet a = 1;\nlet b = 3;\n```\n";
+        assert_eq!(
+            drawn_after(Target::Github, before, after),
+            ["let a = 1;\nlet b = [3][;]"]
+        );
+        let doc = super::preview_mapped(Target::Github, after).document;
+        let style = super::MarkupStyle::github(false);
+        let segments = &super::drawn(&doc, &style)[0].1;
+        let keyword = segments
+            .iter()
+            .find(|segment| segment.text == "let")
+            .expect("`let` is its own segment");
+        assert_eq!(keyword.color, Some(style.syntax.as_ref().unwrap().keyword));
     }
 
     #[test]

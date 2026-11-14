@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The GitHub preview highlights code blocks that name a language, in
+  GitHub's own syntax colors for light and dark mode. Review marks keep the
+  colors of the code they cover.
 - Draftmux on Linux keeps itself up to date like the macOS app. Once a day
   it checks GitHub for a newer release, downloads the tarball for its
   architecture, checks it against its checksum and that its binary runs on
