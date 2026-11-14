@@ -570,7 +570,7 @@ impl SettingsWindow {
                     true => own.backend,
                     false => Some(resolved.backend.value),
                 };
-                for backend in [DraftBackend::Pi, DraftBackend::SameAsSource] {
+                for backend in [DraftBackend::SameAsSource, DraftBackend::Pi] {
                     items.push(item(
                         backend_label(backend),
                         current == Some(backend),

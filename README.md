@@ -89,12 +89,13 @@ drafts work without either.
 
 ## Choosing the agent
 
-Drafts from pi sessions run on pi. Drafts from Claude Code sessions run on pi
-by default, converted from the transcript; to keep them on Claude Code, set
-Backend to Same as source in Settings, globally or for one directory. For a
-single draft, ask the skill (`/draftmux PR description, on Claude Code`) or
-pass `--backend claude` or `--backend pi` to `draftmux open`. A draft stays on
-the agent it was created with.
+A draft runs on the agent of the session it came from: pi sessions continue on
+pi and Claude Code sessions on Claude Code. To draft Claude Code sessions on pi
+instead, converted from the transcript, set Backend to pi in Settings, globally
+or for one directory. For a single draft, ask the skill
+(`/draftmux PR description, on pi`) or pass `--backend pi` or
+`--backend claude` to `draftmux open`. A draft stays on the agent it was
+created with.
 
 ## How it works with pi
 

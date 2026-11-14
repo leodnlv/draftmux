@@ -116,7 +116,7 @@ impl Settings {
                 |s| s.claude_selection_model.as_ref(),
                 ClaudeSelectionModel::Drafting,
             ),
-            backend: pick(&scopes, |s| s.backend.as_ref(), DraftBackend::Pi),
+            backend: pick(&scopes, |s| s.backend.as_ref(), DraftBackend::SameAsSource),
             target: pick(&scopes, |s| s.target.as_ref(), Target::Github),
             instructions: self.instructions(rules),
             context_files: pick(&scopes, |s| s.context_files.as_ref(), true),
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(resolved.instructions.value, None);
         assert!(resolved.context_files.value);
         assert_eq!(resolved.target.source, Source::Builtin);
-        assert_eq!(resolved.backend.value, DraftBackend::Pi);
+        assert_eq!(resolved.backend.value, DraftBackend::SameAsSource);
         assert_eq!(
             resolved.claude_drafting_model.value,
             ClaudeDraftingModel::Session

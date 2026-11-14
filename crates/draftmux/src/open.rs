@@ -652,6 +652,8 @@ cat > /dev/null
             transcript.to_str().unwrap(),
             "--pi-agent-dir",
             profile.to_str().unwrap(),
+            "--backend",
+            "pi",
         ]);
         let draft = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap();
         (store, draft)
@@ -712,6 +714,8 @@ cat > /dev/null
             tmp.path().to_str().unwrap(),
             "--draft-file",
             file.to_str().unwrap(),
+            "--backend",
+            "pi",
         ]);
         let draft = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap();
 
@@ -1070,6 +1074,7 @@ cat > /dev/null
         fs::write(&transcript, claude_transcript(&cwd)).unwrap();
         let store = Store::new(tmp.path().join("drafts"));
         let mut settings = rule_on(tmp.path(), &profile);
+        settings.defaults.backend = Some(DraftBackend::Pi);
 
         let draft = create(
             &parse(&[transcript.to_str().unwrap()]),
@@ -1257,6 +1262,8 @@ cat > /dev/null
             transcript.to_str().unwrap(),
             "--pi-agent-dir",
             profile.to_str().unwrap(),
+            "--backend",
+            "pi",
         ]);
         let model = ModelOverride {
             provider: "anthropic".into(),
