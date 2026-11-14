@@ -1,5 +1,5 @@
 //! The selection actions popover: actions for the editor selection, then the
-//! options pi returns, in a blurred popup window above the selection. A selection made in the preview selects its
+//! options the draft's agent returns, in a blurred popup window above the selection. A selection made in the preview selects its
 //! markdown in the editor, and the popover then sits above the preview's
 //! selection instead.
 //!
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use draftmux_storage::{Draft, Store};
+use draftmux_storage::{Backend, Draft, Store};
 use editor::{Editor, EditorEvent, EditorStyle};
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds, Context, Div,
@@ -53,7 +53,9 @@ use crate::app_settings::AppSettings;
 use crate::assets::{COMMENT_ICON, SEND_ICON};
 use crate::resources;
 use crate::selectable::TextSelection;
-use crate::selection::{self, Action as SelectionAction, Request, SelectionConfig};
+use crate::selection::{
+    self, Action as SelectionAction, Agent, Backend as SelectionBackend, Request, SelectionConfig,
+};
 use crate::theme::{self, Palette};
 
 actions!(selection_popover, [Dismiss, Confirm, Next, Previous, Back]);
@@ -170,9 +172,9 @@ enum Mode {
     Actions(Vec<draftmux_settings::SelectionAction>),
     /// This many ranges are selected; the only item is Comment.
     Several(usize),
-    /// A message to pi about the selections, being written.
+    /// A message to the draft's agent about the selections, being written.
     Comment(Entity<Editor>),
-    /// Dropping it cancels the call and kills pi.
+    /// Dropping it cancels the call and kills the agent.
     Running {
         /// What is being done, shown beside the spinner.
         label: SharedString,
@@ -330,6 +332,14 @@ impl SelectionPopover {
         self.dismiss(cx);
     }
 
+    /// Takes the current draft's newer metadata, such as its agent's model,
+    /// for later calls, leaving the popover as it is.
+    pub fn refresh_draft(&mut self, draft: Option<Draft>) {
+        if self.draft.as_ref().map(|d| &d.id) == draft.as_ref().map(|d| &d.id) {
+            self.draft = draft;
+        }
+    }
+
     /// Wraps the editor pane: adds the popover's key contexts and actions,
     /// and measures the pane for placing the popover.
     pub fn wrap(this: &Entity<Self>, editor: impl IntoElement, cx: &App) -> AnyElement {
@@ -436,13 +446,25 @@ impl SelectionPopover {
         self.preview.read(cx).range().is_some()
     }
 
-    /// Whether a draft is focused that selection calls can fork.
+    /// Whether a draft is focused that selection calls can fork: any
+    /// Claude draft, and a pi draft with a session.
     fn available(&self, cx: &App) -> bool {
         !self.editor.read(cx).is_read_only()
             && self
                 .draft
                 .as_ref()
-                .is_some_and(|draft| draft.meta.pi().is_some_and(|pi| pi.session_file.is_some()))
+                .is_some_and(|draft| match &draft.meta.backend {
+                    Backend::Pi(pi) => pi.session_file.is_some(),
+                    Backend::Claude(_) => true,
+                })
+    }
+
+    /// The name of the agent the draft runs on, which comments go to.
+    fn agent(&self) -> &'static str {
+        self.draft
+            .as_ref()
+            .map_or(Agent::Pi, |draft| Agent::of(&draft.meta.backend))
+            .name()
     }
 
     fn editor_event(&mut self, event: &EditorEvent, cx: &mut Context<Self>) {
@@ -762,41 +784,44 @@ impl SelectionPopover {
 
     fn run(&mut self, action: SelectionAction, label: SharedString, cx: &mut Context<Self>) {
         let Some(open) = &self.open else { return };
-        let Some(meta) = self.draft.as_ref().map(|draft| &draft.meta) else {
-            return;
-        };
-        let kept = meta.settings.clone();
-        let Some(request) = Request::new(meta, open.text.clone(), open.range.clone(), action)
-        else {
-            return;
-        };
-        let pi = match ShellEnv::global(cx) {
-            None => Err("Reading the login shell environment…".to_string()),
-            Some(env) => env
-                .pi()
-                .map(|pi| env.command(pi))
-                .map_err(|err| err.to_string()),
-        };
-        let extension = resources::pi_extension().map_err(|err| format!("{err:#}"));
-        let (pi, extension) = match (pi, extension) {
-            (Ok(pi), Ok(extension)) => (pi, extension),
-            (Err(err), _) | (_, Err(err)) => {
-                return self.set_mode(Mode::Error(err.into()), None, cx);
-            }
-        };
-
-        let cancel = Arc::new(AtomicBool::new(false));
+        let Some(draft) = &self.draft else { return };
+        let meta = &draft.meta;
+        let request = Request::new(meta, open.text.clone(), open.range.clone(), action);
         // The count is an app preference, read on every call; the rest is
         // what the draft kept at creation.
         let alternatives = AppSettings::global(cx).read(cx).settings.alternatives();
-        let config = SelectionConfig::for_draft(&kept, alternatives);
+        let config = SelectionConfig::for_draft(meta, alternatives);
+        let backend = (|| {
+            let env = ShellEnv::global(cx).ok_or("Reading the login shell environment…")?;
+            Ok::<_, String>(match &meta.backend {
+                Backend::Pi(pi) => SelectionBackend::Pi {
+                    pi: env.command(env.pi().map_err(|err| err.to_string())?),
+                    extension: resources::pi_extension().map_err(|err| format!("{err:#}"))?,
+                    session_file: pi
+                        .session_file
+                        .clone()
+                        .ok_or("This draft has no pi session yet.")?,
+                    agent_dir: pi.agent_dir.clone(),
+                },
+                Backend::Claude(claude) => SelectionBackend::Claude {
+                    program: env.claude().map_err(|err| err.to_string())?.to_path_buf(),
+                    env: env.vars().to_vec(),
+                    session: crate::chat::draft_session(draft, claude),
+                },
+            })
+        })();
+        let backend = match backend {
+            Ok(backend) => backend,
+            Err(err) => return self.set_mode(Mode::Error(err.into()), None, cx),
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
         let (send, updates) = async_channel::unbounded();
         let call = cx.background_executor().spawn({
             let cancel = cancel.clone();
             async move {
                 selection::run(
-                    pi,
-                    &extension,
+                    backend,
                     &request,
                     &config,
                     &std::env::temp_dir(),
@@ -1199,10 +1224,12 @@ impl SelectionPopover {
                 .into_any_element(),
             Mode::Comment(field) => {
                 let empty = field.read(cx).text().trim().is_empty();
+                let agent = self.agent();
                 let placeholder: SharedString = match self.editor.read(cx).selected_ranges().len() {
-                    1 => "Tell pi what to change here…".into(),
-                    n => format!("Tell pi what to do with these {n} selections…").into(),
+                    1 => format!("Tell {agent} what to change here…").into(),
+                    n => format!("Tell {agent} what to do with these {n} selections…").into(),
                 };
+                let send = format!("↵ send to {agent}");
                 let focus = field.focus_handle(cx);
                 div()
                     .w(COMMENT_WIDTH - PADDING * 2.)
@@ -1284,7 +1311,7 @@ impl SelectionPopover {
                     // The field's edge sets the hints apart, so they need no
                     // rule.
                     .child(
-                        hints(&["↵ send to pi", "⇧↵ newline", "esc back"], &palette)
+                        hints(&[&send, "⇧↵ newline", "esc back"], &palette)
                             .mt(px(6.))
                             .pb(px(3.)),
                     )
@@ -1583,6 +1610,81 @@ mod tests {
             assert!(popover.read(cx).open.is_none());
         });
         assert_eq!(*sent.borrow(), ["Make it formal"]);
+    }
+
+    #[gpui::test]
+    fn newer_metadata_keeps_a_running_call_and_another_draft_ends_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::app_settings::init(config.path().to_owned(), cx));
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        let popover = window
+            .update(cx, |_, window, cx| {
+                let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
+                let preview = cx.new(TextSelection::new);
+                let store = Store::new(config.path().join("drafts"));
+                cx.new(|cx| SelectionPopover::new(editor, preview, store, window, cx))
+            })
+            .unwrap();
+        let draft = |id: &str, model: Option<&str>| Draft {
+            id: id.into(),
+            dir: "/drafts/x".into(),
+            meta: draftmux_storage::Meta {
+                target: draftmux_storage::Target::Github,
+                syntax: None,
+                status: draftmux_storage::Status::Active,
+                title: String::new(),
+                source: None,
+                cwd: "/repo".into(),
+                backend: Backend::Claude(draftmux_storage::ClaudeSession {
+                    session_id: "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60".parse().unwrap(),
+                    transcript: None,
+                    config_dir: None,
+                    fork: None,
+                    model: model.map(str::to_owned),
+                    selection_model: None,
+                }),
+                note: None,
+                first_draft_pending: false,
+                settings: Default::default(),
+                created_at: Default::default(),
+                updated_at: Default::default(),
+            },
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            popover.update(cx, |popover, cx| {
+                popover.set_draft(Some(draft("a", None)), cx);
+                assert_eq!(popover.agent(), "Claude Code");
+                popover.open = Some(Open {
+                    text: "Hi there\n".into(),
+                    range: 3..9,
+                    highlighted: None,
+                    mode: Mode::Running {
+                        label: "Generating alternatives…".into(),
+                        previews: Vec::new(),
+                        _cancel: CancelOnDrop(cancel.clone()),
+                        _task: Task::ready(()),
+                    },
+                });
+                popover.refresh_draft(Some(draft("a", Some("opus"))));
+                assert!(popover.open.is_some());
+                let meta = &popover.draft.as_ref().unwrap().meta;
+                assert_eq!(
+                    SelectionConfig::for_draft(meta, 3).model.as_deref(),
+                    Some("opus")
+                );
+                // Not the draft the popover is for.
+                popover.refresh_draft(Some(draft("b", Some("haiku"))));
+                assert_eq!(popover.draft.as_ref().unwrap().id, "a");
+                assert!(!cancel.load(Ordering::Relaxed));
+
+                popover.set_draft(Some(draft("b", None)), cx);
+                assert!(popover.open.is_none());
+            });
+        });
+        assert!(cancel.load(Ordering::Relaxed));
     }
 
     #[test]

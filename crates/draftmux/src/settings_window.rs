@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use draftmux_pi_profiles::{Availability, ModelRef, availability};
 use draftmux_pi_rpc::{ModelOverride, ThinkingLevel};
 use draftmux_settings::{
-    ALTERNATIVES, DraftingModel, PiReads, Resolved, Rule, Scope, SelectionModel, Settings, Source,
-    Trust, default_profile, pi_reads, tilde_path,
+    ALTERNATIVES, ClaudeSelectionModel, DraftingModel, PiReads, Resolved, Rule, Scope,
+    SelectionModel, Settings, Source, Trust, default_profile, pi_reads, tilde_path,
 };
 use draftmux_storage::Target;
 use editor::{Editor, EditorEvent, EditorStyle};
@@ -104,6 +104,25 @@ enum Field {
     Target,
     ContextFiles,
     Alternatives,
+    ClaudeSelection,
+}
+
+/// The Claude Code models the selection model menu offers, by `--model`
+/// alias.
+const CLAUDE_MODELS: &[(&str, &str)] =
+    &[("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
+
+/// What the Claude selection model field shows.
+fn claude_selection_label(model: &ClaudeSelectionModel) -> SharedString {
+    match model.model() {
+        None => "Same as drafting".into(),
+        Some(model) => CLAUDE_MODELS
+            .iter()
+            .find(|(alias, _)| *alias == model)
+            .map_or(model, |(_, name)| name)
+            .to_owned()
+            .into(),
+    }
 }
 
 impl ModelField {
@@ -166,6 +185,7 @@ enum Choice {
     Thinking(ModelField, ThinkingLevel),
     Target(Target),
     Alternatives(usize),
+    ClaudeSelection(ClaudeSelectionModel),
 }
 
 pub struct SettingsWindow {
@@ -423,6 +443,10 @@ impl SettingsWindow {
                     (model_field.label(inherited), !model_field.is_set(&own))
                 }
                 Field::Target => (inherited.target.value.label().into(), own.target.is_none()),
+                Field::ClaudeSelection => (
+                    claude_selection_label(&inherited.claude_selection_model.value),
+                    own.claude_selection_model.is_none(),
+                ),
                 Field::Thinking(_) | Field::ContextFiles | Field::Alternatives => return None,
             };
             Some(item(
@@ -512,6 +536,29 @@ impl SettingsWindow {
                     ));
                 }
             }
+            Field::ClaudeSelection => {
+                let current = match is_rule {
+                    true => own.claude_selection_model.as_ref(),
+                    false => Some(&resolved.claude_selection_model.value),
+                };
+                let mut choices = vec![ClaudeSelectionModel::Drafting];
+                choices.extend(
+                    CLAUDE_MODELS
+                        .iter()
+                        .map(|(alias, _)| ClaudeSelectionModel::Model((*alias).into())),
+                );
+                // One set by hand in settings.json.
+                if let Some(other) = current.filter(|model| !choices.contains(model)) {
+                    choices.push(other.clone());
+                }
+                for choice in choices {
+                    items.push(item(
+                        claude_selection_label(&choice),
+                        current == Some(&choice),
+                        Choice::ClaudeSelection(choice),
+                    ));
+                }
+            }
             Field::ContextFiles => {}
         }
         items
@@ -550,6 +597,9 @@ impl SettingsWindow {
                 }
             }
             Choice::Target(target) => self.update_scope(|scope| scope.target = Some(target), cx),
+            Choice::ClaudeSelection(model) => {
+                self.update_scope(|scope| scope.claude_selection_model = Some(model), cx)
+            }
             Choice::Alternatives(count) => self.update(
                 |settings| {
                     settings.alternatives =
@@ -582,6 +632,7 @@ impl SettingsWindow {
                     scope.selection_model = None
                 }
                 Field::Target => scope.target = None,
+                Field::ClaudeSelection => scope.claude_selection_model = None,
                 Field::ContextFiles => scope.context_files = None,
                 Field::Alternatives => {}
             },
@@ -1167,6 +1218,26 @@ impl SettingsWindow {
         form.push(group(c, vec![target_row, instructions]).into_any_element());
         form.push(group_title(c, "pi setup").into_any_element());
         form.push(group(c, vec![context_row]).into_any_element());
+        let claude_selection = self.scoped_row(
+            Field::ClaudeSelection,
+            "Selection model",
+            vec![description(
+                c,
+                "Alternatives and actions on selected text in drafts on Claude Code",
+            )],
+            own.claude_selection_model.is_some(),
+            inherited.map(|i| i.claude_selection_model.source),
+            self.popup(
+                Field::ClaudeSelection,
+                claude_selection_label(&resolved.claude_selection_model.value),
+                own.claude_selection_model.is_none(),
+                Some(190.),
+                cx,
+            ),
+            cx,
+        );
+        form.push(group_title(c, "Claude Code").into_any_element());
+        form.push(group(c, vec![claude_selection]).into_any_element());
         form
     }
 
@@ -1183,7 +1254,7 @@ impl SettingsWindow {
             ModelField::Drafting => ("Drafting model", "Chat and draft edits"),
             ModelField::Selection => (
                 "Selection model",
-                "Alternatives and actions on selected text",
+                "Alternatives and actions on selected text in drafts on pi",
             ),
         };
         let set = field.is_set(own);
@@ -1776,9 +1847,10 @@ impl SettingsWindow {
             note(
                 c,
                 "Selecting text in the editor offers Alternatives and your actions. Each runs \
-                 as a one-off pi call on the draft's session that leaves no session behind, \
-                 with the Selection model setting of the draft's directory. For anything \
-                 else, ask in the chat: the selection is attached to your next message.",
+                 as a one-off call on a copy of the draft's conversation, on pi or Claude Code \
+                 as the draft does, without tools and leaving no session behind, with the \
+                 draft's selection model. For anything else, ask in the chat: the selection \
+                 is attached to your next message.",
             )
             .into_any_element(),
             group_title(c, "Actions").into_any_element(),

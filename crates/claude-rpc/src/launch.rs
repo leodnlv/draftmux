@@ -19,11 +19,15 @@ const MIN_VERSION: [u32; 3] = [2, 1, 293];
 /// `program --version` with the variables of `env` a `claude` process
 /// gets. Its output goes to [`check_version`].
 pub fn version_command(program: &Path, env: &[(OsString, OsString)]) -> Command {
-    let mut command = Command::new(program);
+    let mut command = clean_command(program, env);
+    command.arg("--version");
     command
-        .arg("--version")
-        .env_clear()
-        .envs(allowed(env).map(|(k, v)| (k, v)));
+}
+
+/// `program` with only the variables of `env` a `claude` process gets.
+pub(crate) fn clean_command(program: &Path, env: &[(OsString, OsString)]) -> Command {
+    let mut command = Command::new(program);
+    command.env_clear().envs(allowed(env).map(|(k, v)| (k, v)));
     command
 }
 
@@ -50,6 +54,15 @@ fn supported(output: &str) -> Result<String, String> {
         _ if output.is_empty() => Err("nothing".into()),
         _ => Err(format!("\"{output}\"")),
     }
+}
+
+/// The `HOME` a `claude` process gets: the first one in `vars`, else this
+/// process's.
+pub(crate) fn home<'a>(mut vars: impl Iterator<Item = &'a (OsString, OsString)>) -> PathBuf {
+    vars.find(|(key, _)| key == "HOME")
+        .map(|(_, home)| PathBuf::from(home))
+        .or_else(std::env::home_dir)
+        .unwrap_or_default()
 }
 
 /// The variables of `env` a `claude` process gets.
@@ -169,7 +182,7 @@ impl LaunchSpec {
         tools: &[Tool],
         start: Option<&Start>,
     ) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command = clean_command(&self.program, &self.env);
         command
             .args([
                 "--output-format",
@@ -209,10 +222,7 @@ impl LaunchSpec {
             }
             None => {}
         }
-        command
-            .current_dir(&self.cwd)
-            .env_clear()
-            .envs(allowed(&self.env).map(|(k, v)| (k, v)));
+        command.current_dir(&self.cwd);
         command.envs(self.extra_env.iter().map(|(k, v)| (k, v)));
         // Claude must write where the agent looks for the transcript.
         if let Some(Session::Draft(draft)) = &self.session {

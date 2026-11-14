@@ -18,6 +18,9 @@
 //!   CLI withdraws a pending callback with `control_cancel_request`.
 //! - Closing stdin doesn't cancel a run; the CLI finishes it first.
 //!
+//! [`Oneshot`] runs one-off requests, such as selection actions, on a copy
+//! of a draft's conversation.
+//!
 //! The crate doesn't depend on gpui: requests return futures and events
 //! arrive on a `futures` channel, both usable from gpui's executors.
 
@@ -26,6 +29,7 @@ mod connection;
 mod contract;
 mod history;
 mod launch;
+mod oneshot;
 mod policy;
 mod protocol;
 mod session;
@@ -37,5 +41,6 @@ pub use history::history;
 pub use launch::{
     LaunchSpec, PreToolUseHook, Session, SettingSource, Tool, check_version, version_command,
 };
+pub use oneshot::{Oneshot, Reply};
 pub use protocol::{Init, ModelInfo};
 pub use session::{DraftSession, Missing, Snapshot};

@@ -160,6 +160,10 @@ pub struct ClaudeSession {
     /// on the session's own model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model selection actions run on, as `--model` takes it, kept from
+    /// the settings at creation. None uses `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_model: Option<String>,
 }
 
 /// Where a draft's Claude Code session forked its source (see
@@ -551,7 +555,8 @@ mod tests {
       "source_session_id": "6c1d1b9e-2f4a-4b8e-9d3c-7a5e1f0b2c4d",
       "boundary": "0cf5a4d1-79c4-4901-a3ef-8d3611211105"
     },
-    "model": "sonnet"
+    "model": "sonnet",
+    "selection_model": "haiku"
   },
   "first_draft_pending": true,
   "settings": {
@@ -589,12 +594,14 @@ mod tests {
         backend.remove("config_dir");
         backend.remove("fork");
         backend.remove("model");
+        backend.remove("selection_model");
         let meta = parse(value.clone()).unwrap();
         let Backend::Claude(claude) = &meta.backend else {
             panic!("not Claude");
         };
         assert_eq!((&claude.transcript, &claude.config_dir), (&None, &None));
         assert_eq!((&claude.fork, &claude.model), (&None, &None));
+        assert_eq!(claude.selection_model, None);
         assert_eq!(serde_json::to_value(&meta).unwrap(), value);
     }
 

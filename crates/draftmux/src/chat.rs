@@ -21,6 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -2132,19 +2133,42 @@ fn pi_agent(
 }
 
 /// The `claude` on the login shell's PATH, once its version is supported.
-/// Blocks while it runs claude. Only a supported version is remembered, so
-/// a failed check is tried again for the next draft.
+/// Blocks while it runs claude.
 fn claude_program(env: &ShellEnv) -> Result<PathBuf, String> {
-    static SUPPORTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     let program = env.claude().map_err(|err| err.to_string())?.to_path_buf();
-    if !SUPPORTED.lock().unwrap().contains(&program) {
-        let command = draftmux_claude_rpc::version_command(&program, env.vars());
-        let output = crate::process::run("Claude Code", command, None, VERSION_TIMEOUT, None)?;
-        let version = draftmux_claude_rpc::check_version(&program, &output)?;
-        eprintln!("draftmux: Claude Code {version} at {}", program.display());
-        SUPPORTED.lock().unwrap().push(program.clone());
-    }
+    check_claude(&program, env.vars())?;
     Ok(program)
+}
+
+/// Fails unless `program`'s Claude Code version is supported. Blocks while
+/// it runs claude with `env`'s allowlisted variables. Only a supported
+/// version is remembered, so a failed check is tried again next time.
+pub(crate) fn check_claude(program: &Path, env: &[(OsString, OsString)]) -> Result<(), String> {
+    static SUPPORTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    if !SUPPORTED
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|known| known == program)
+    {
+        let command = draftmux_claude_rpc::version_command(program, env);
+        let output = crate::process::run("Claude Code", command, None, VERSION_TIMEOUT, None)?;
+        let version = draftmux_claude_rpc::check_version(program, &output)?;
+        eprintln!("draftmux: Claude Code {version} at {}", program.display());
+        SUPPORTED.lock().unwrap().push(program.to_owned());
+    }
+    Ok(())
+}
+
+/// `draft`'s Claude Code session, from its descriptor.
+pub(crate) fn draft_session(draft: &Draft, claude: &ClaudeSession) -> DraftSession {
+    DraftSession {
+        id: claude.session_id.to_string(),
+        dir: draft.session_dir(),
+        config_dir: claude.config_dir.clone(),
+        fork_boundary: claude.fork.as_ref().map(|fork| fork.boundary.to_string()),
+        transcript: claude.transcript.clone(),
+    }
 }
 
 fn claude_agent(
@@ -2161,13 +2185,9 @@ fn claude_agent(
         model: claude.model.clone(),
         tools: Vec::new(),
         setting_sources: Vec::new(),
-        session: Some(draftmux_claude_rpc::Session::Draft(DraftSession {
-            id: claude.session_id.to_string(),
-            dir: draft.session_dir(),
-            config_dir: claude.config_dir.clone(),
-            fork_boundary: claude.fork.as_ref().map(|fork| fork.boundary.to_string()),
-            transcript: claude.transcript.clone(),
-        })),
+        session: Some(draftmux_claude_rpc::Session::Draft(draft_session(
+            draft, claude,
+        ))),
         hooks: Vec::new(),
         permission_prompt: false,
         system_prompt: None,

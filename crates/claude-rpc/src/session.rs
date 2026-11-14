@@ -113,7 +113,8 @@ impl DraftSession {
         if let Some(recorded) = self.transcript.as_ref().filter(|path| path.is_file()) {
             return Ok(Some(recorded.clone()));
         }
-        native(storage, &self.id)
+        // An adoption that finished since the first check moved it here.
+        Ok(native(storage, &self.id)?.or_else(|| owned.is_file().then_some(owned)))
     }
 
     /// Moves a transcript found outside the draft to [`DraftSession::owned`]
@@ -154,29 +155,34 @@ impl DraftSession {
         Ok(Start::New(self.id.clone()))
     }
 
+    /// The file holding the conversation so far, left where it is: the
+    /// session's transcript, or before a fork's first run its snapshot.
+    /// None before a session of its own has started.
+    pub(crate) fn conversation(&self, storage: &Path) -> Result<Option<PathBuf>, String> {
+        if let Some(path) = self.locate(storage).map_err(|err| err.to_string())? {
+            return Ok(Some(path));
+        }
+        if let Some(recorded) = &self.transcript {
+            return Err(Missing::Transcript(recorded.clone()).to_string());
+        }
+        if self.fork_boundary.is_none() {
+            return Ok(None);
+        }
+        let snapshot = self.snapshot();
+        if !snapshot.is_file() {
+            return Err(Missing::Snapshot(snapshot).to_string());
+        }
+        Ok(Some(snapshot))
+    }
+
     /// The conversation so far. Before a fork's first run it is the
     /// snapshot's, all of it earlier messages.
     pub fn history(&self, storage: &Path) -> Result<History, String> {
-        let path = match self.locate(storage).map_err(|err| err.to_string())? {
-            Some(path) => path,
-            None => match &self.transcript {
-                Some(recorded) => {
-                    return Err(Missing::Transcript(recorded.clone()).to_string());
-                }
-                None if self.fork_boundary.is_some() => {
-                    let snapshot = self.snapshot();
-                    if !snapshot.is_file() {
-                        return Err(Missing::Snapshot(snapshot).to_string());
-                    }
-                    snapshot
-                }
-                None => {
-                    return Ok(History {
-                        earlier: 0,
-                        messages: Vec::new(),
-                    });
-                }
-            },
+        let Some(path) = self.conversation(storage)? else {
+            return Ok(History {
+                earlier: 0,
+                messages: Vec::new(),
+            });
         };
         let file =
             fs::File::open(&path).map_err(|err| format!("opening {}: {err}", path.display()))?;

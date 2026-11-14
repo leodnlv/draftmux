@@ -54,6 +54,12 @@ draftmux open "$@" --target github --note 'PR description for the retry change'
   `rich` for emails and documents with formatting such as bold and lists,
   `plain` for plain text. Leave it out when the user hasn't said where the
   message goes; Draftmux then uses its default for the directory.
+- `--backend claude`: only when the user asks for the draft to run on Claude
+  Code. The draft then continues this conversation as its own Claude Code
+  session instead of on pi. It works only from a Claude Code session and
+  doesn't take `--pi-agent-dir`, so run `draftmux open "$f" --backend claude`
+  with the other flags, without the `set --` lines. Without it, every draft
+  runs on pi.
 - `--note`: one line saying what message to write, such as who it's for and
   what it should cover. Draftmux's agent writes the first draft from this
   conversation and the note, so include anything the conversation leaves

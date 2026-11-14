@@ -155,7 +155,7 @@ fn create(
             );
         }
         let mut settings = resolved.draft_settings();
-        // Pi's; Claude drafts have no selection actions yet.
+        // Pi's; the Claude session keeps its own.
         settings.selection_model = None;
         let session = ClaudeSession {
             session_id: uuid::Uuid::new_v4(),
@@ -163,6 +163,11 @@ fn create(
             config_dir: claude_config_dir(&path, &home, std::env::var_os("CLAUDE_CONFIG_DIR")),
             fork: None,
             model: None,
+            selection_model: resolved
+                .claude_selection_model
+                .value
+                .model()
+                .map(str::to_owned),
         };
         let new = NewDraft {
             target,
@@ -759,6 +764,9 @@ cat > /dev/null
             model_id: "claude-haiku-5-5".into(),
             thinking: ThinkingLevel::Low,
         }));
+        settings.defaults.claude_selection_model = Some(
+            draftmux_settings::ClaudeSelectionModel::Model("haiku".into()),
+        );
 
         let args = parse(&[transcript.to_str().unwrap(), "--backend", "claude"]);
         let draft = create(&args, &store, &no_pi, &settings).unwrap();
@@ -775,6 +783,7 @@ cat > /dev/null
         assert_ne!(session.session_id.to_string(), SOURCE_ID);
         assert_eq!(session.transcript, None);
         assert_eq!(session.model, None);
+        assert_eq!(session.selection_model.as_deref(), Some("haiku"));
         assert_eq!(session.config_dir.as_deref(), Some(config.as_path()));
         assert_eq!(
             session.fork,

@@ -89,6 +89,7 @@ impl App {
                 config_dir: Some(self.config()),
                 fork: None,
                 model: None,
+                selection_model: None,
             }),
             note: None,
             settings: DraftSettings::default(),

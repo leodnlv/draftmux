@@ -880,6 +880,10 @@ impl Chrome {
                 if let Err(err) = recorded {
                     eprintln!("draftmux: recording draft {id}'s Claude Code session: {err:#}");
                 }
+                // Selection calls use the draft's model and transcript.
+                let draft = self.session.drafts().current().cloned();
+                self.selection
+                    .update(cx, |selection, _| selection.refresh_draft(draft));
             }
             ChatEvent::Running { id, running } => {
                 self.session.agent_running(id, *running);

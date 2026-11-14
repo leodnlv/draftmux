@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use draftmux_pi_rpc::ModelOverride;
 use draftmux_storage::{DraftSettings, ModelChoice, Target};
 
-use crate::{DraftingModel, Scope, SelectionModel, Settings, expand_home};
+use crate::{ClaudeSelectionModel, DraftingModel, Scope, SelectionModel, Settings, expand_home};
 
 /// Where a resolved value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,7 @@ pub struct Resolved {
     pub profile: Sourced<Option<PathBuf>>,
     pub drafting_model: Sourced<DraftingModel>,
     pub selection_model: Sourced<SelectionModel>,
+    pub claude_selection_model: Sourced<ClaudeSelectionModel>,
     pub target: Sourced<Target>,
     /// The innermost scope that contributed is the source.
     pub instructions: Sourced<Option<String>>,
@@ -99,6 +100,11 @@ impl Settings {
                 &scopes,
                 |s| s.selection_model.as_ref(),
                 SelectionModel::Drafting,
+            ),
+            claude_selection_model: pick(
+                &scopes,
+                |s| s.claude_selection_model.as_ref(),
+                ClaudeSelectionModel::Drafting,
             ),
             target: pick(&scopes, |s| s.target.as_ref(), Target::Github),
             instructions: self.instructions(rules),
@@ -320,6 +326,41 @@ mod tests {
                 model_id: "haiku".into(),
                 thinking: "xhigh".into(),
             })
+        );
+    }
+
+    #[test]
+    fn claude_selection_model_resolves_apart_from_pi_s() {
+        let (_t, home) = home();
+        let mut settings = Settings::default();
+        let resolved = settings.resolve(&home, &home);
+        assert_eq!(
+            resolved.claude_selection_model.value,
+            ClaudeSelectionModel::Drafting
+        );
+        settings.defaults.claude_selection_model =
+            Some(ClaudeSelectionModel::Model("haiku".into()));
+        let resolved = settings.resolve(&home, &home);
+        assert_eq!(resolved.claude_selection_model.value.model(), Some("haiku"));
+        assert_eq!(
+            resolved.claude_selection_model.source,
+            Source::AllDirectories
+        );
+        assert_eq!(resolved.draft_settings().selection_model, None);
+
+        // A rule's "same as drafting" overrides an inherited model.
+        let mut rule = Rule::new(home.clone());
+        rule.scope.claude_selection_model = Some(ClaudeSelectionModel::Drafting);
+        settings.directories.push(rule);
+        let resolved = settings.resolve(&home, &home);
+        assert_eq!(resolved.claude_selection_model.value.model(), None);
+        assert_eq!(resolved.claude_selection_model.source, Source::Rule(0));
+        assert_eq!(settings.directories[0].override_count(), 1);
+
+        let json = serde_json::to_value(&settings.defaults).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"claude_selection_model": {"model": "haiku"}})
         );
     }
 }

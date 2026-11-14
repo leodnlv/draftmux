@@ -26,8 +26,8 @@ Status: early release; expect rough edges.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
   text or plain text. `⌘+` and `⌘−` change the text size, and `⌘0` resets it.
 - **Selection actions.** Select text for alternatives, Shorten or Tighten, or
-  your own actions. Options appear as previews while pi generates the rest;
-  choose one when the request finishes. With text selected, a chat message
+  your own actions. Options appear as previews while the agent generates the
+  rest; choose one when the request finishes. With text selected, a chat message
   changes only that part. Hold `⌘` while dragging to select more passages; a
   chat message then edits each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
@@ -99,6 +99,24 @@ formatting is built in for GitHub and rich-text drafts.
 - Selection actions run in a throwaway fork of the draft's session with tools
   blocked.
 - The original agent reads the finished draft with `draftmux show`.
+
+## Drafting with Claude Code
+
+Drafts run on pi unless you ask for Claude Code. From a Claude Code session,
+ask the skill for it (`/draftmux PR description, on Claude Code`) or run
+`draftmux open <transcript> --backend claude`. Needs Claude Code 2.1.293 or
+later.
+
+- The draft continues your conversation as its own Claude Code session, forked
+  from a copy of the transcript kept with the draft. Your original session is
+  untouched.
+- Claude Code may read files but edit only the draft. It runs without your
+  project settings, `CLAUDE.md`, hooks or MCP servers.
+- The model chip switches the draft's model, and later sessions keep it.
+- Selection actions run on a copy of the conversation as a session that isn't
+  saved, with no tools. Settings has a separate Claude Code selection model;
+  by default they use the draft's model.
+- A draft stays on the agent it was created with.
 
 ## Configuration
 

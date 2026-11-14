@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use draftmux_agent::History;
 
 use crate::connection::{Closed, Connection, EXIT_BOUND, Exit, Message, Ticket};
-use crate::launch::{LaunchSpec, Session, Tool};
+use crate::launch::{LaunchSpec, Session, Tool, home};
 use crate::protocol::{self, Init};
 use crate::session::{self, DraftSession, Missing, Start};
 
@@ -311,13 +311,7 @@ impl Agent {
         let tools = spec.tools.clone();
         let (storage, recorded) = match &spec.session {
             Some(Session::Draft(draft)) => {
-                // The `HOME` claude gets.
-                let home = (spec.extra_env.iter().rev())
-                    .chain(&spec.env)
-                    .find(|(key, _)| key == "HOME")
-                    .map(|(_, home)| PathBuf::from(home))
-                    .or_else(std::env::home_dir)
-                    .unwrap_or_default();
+                let home = home(spec.extra_env.iter().rev().chain(&spec.env));
                 (Some(draft.storage(&home)), draft.transcript.clone())
             }
             _ => (None, None),

@@ -1,11 +1,39 @@
-//! Complete-option previews from pi's one-shot JSON event stream.
+//! Complete-option previews from the agent's one-shot JSON event stream:
+//! pi's events, or Claude Code's stream-json frames.
 
+use draftmux_claude_rpc::Reply;
 use serde_json::Value;
 
 const MAX_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Agent {
+    #[default]
+    Pi,
+    Claude,
+}
+
+impl Agent {
+    /// The agent a draft on `backend` runs on.
+    pub fn of(backend: &draftmux_storage::Backend) -> Self {
+        match backend {
+            draftmux_storage::Backend::Pi(_) => Agent::Pi,
+            draftmux_storage::Backend::Claude(_) => Agent::Claude,
+        }
+    }
+
+    /// The agent's name in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Pi => "pi",
+            Agent::Claude => "Claude Code",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Stream {
+    agent: Agent,
     line: Vec<u8>,
     text: String,
     shown: Vec<String>,
@@ -14,23 +42,85 @@ pub(super) struct Stream {
 }
 
 impl Stream {
+    pub fn new(agent: Agent) -> Self {
+        Self {
+            agent,
+            ..Self::default()
+        }
+    }
+
     pub fn feed(
         &mut self,
         bytes: &[u8],
         count: usize,
         preview: &mut impl FnMut(Vec<String>),
     ) -> Result<(), String> {
+        let name = self.agent.name();
         for part in bytes.split_inclusive(|b| *b == b'\n') {
             if self.line.len() + part.len() > MAX_BYTES {
-                return Err("pi's selection event was too large".into());
+                return Err(format!("{name}'s selection event was too large"));
             }
             self.line.extend_from_slice(part);
             if part.last() == Some(&b'\n') {
                 let event: Value = serde_json::from_slice(&self.line)
-                    .map_err(|_| "pi printed an invalid selection event")?;
+                    .map_err(|_| format!("{name} printed an invalid selection event"))?;
                 self.line.clear();
-                self.event(event, count, preview)?;
+                match self.agent {
+                    Agent::Pi => self.event(event, count, preview)?,
+                    Agent::Claude => self.claude_event(&event, count, preview)?,
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// The error the agent reported, if any, which says more than its exit
+    /// status. Claude Code exits non-zero after reporting a failed login.
+    pub fn reported_error(&self) -> Option<String> {
+        match (&self.result, self.agent) {
+            (Some(Err(error)), Agent::Claude) => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    /// Appends streamed text and previews the options it completes.
+    fn text(
+        &mut self,
+        text: &str,
+        count: usize,
+        preview: &mut impl FnMut(Vec<String>),
+    ) -> Result<(), String> {
+        if self.text.len() + text.len() > MAX_BYTES {
+            return Err(format!(
+                "{}'s selection reply was too large",
+                self.agent.name()
+            ));
+        }
+        self.text.push_str(text);
+        self.publish(completed_options(&self.text, count), preview);
+        Ok(())
+    }
+
+    fn claude_event(
+        &mut self,
+        frame: &Value,
+        count: usize,
+        preview: &mut impl FnMut(Vec<String>),
+    ) -> Result<(), String> {
+        if self.settled {
+            return Ok(());
+        }
+        match Reply::of(frame) {
+            Reply::Message => self.reset(preview),
+            Reply::TextBlock if !self.text.is_empty() => self.text("\n\n", count, preview)?,
+            Reply::Text(text) => self.text(text, count, preview)?,
+            Reply::Done(reply) => {
+                let result = reply.and_then(|text| super::parse(self.agent.name(), text, count));
+                self.publish(result.as_ref().cloned().unwrap_or_default(), preview);
+                self.result = Some(result);
+                self.settled = true;
+            }
+            Reply::TextBlock | Reply::Other => {}
         }
         Ok(())
     }
@@ -64,20 +154,13 @@ impl Stream {
                 let delta = &event["assistantMessageEvent"];
                 match delta["type"].as_str() {
                     Some("text_start") if !self.text.is_empty() => {
-                        if self.text.len() + 2 > MAX_BYTES {
-                            return Err("pi's selection reply was too large".into());
-                        }
-                        self.text.push_str("\n\n");
+                        self.text("\n\n", count, preview)?;
                     }
                     Some("text_delta") => {
                         let text = delta["delta"]
                             .as_str()
                             .ok_or("pi sent an invalid text delta")?;
-                        if self.text.len() + text.len() > MAX_BYTES {
-                            return Err("pi's selection reply was too large".into());
-                        }
-                        self.text.push_str(text);
-                        self.publish(completed_options(&self.text, count), preview);
+                        self.text(text, count, preview)?;
                     }
                     _ => {}
                 }
@@ -93,7 +176,7 @@ impl Stream {
                         .filter_map(|part| part["text"].as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    super::parse(&text, count)
+                    super::parse("pi", &text, count)
                 } else {
                     Err(match message["stopReason"].as_str() {
                         Some("length") => "pi's selection reply was truncated".into(),
@@ -117,17 +200,18 @@ impl Stream {
     }
 
     pub fn finish(self) -> Result<Vec<String>, String> {
+        let name = self.agent.name();
         if !self.line.is_empty() {
-            return Err("pi's selection event was incomplete".into());
+            return Err(format!("{name}'s selection event was incomplete"));
         }
         if let Some(Err(error)) = &self.result {
             return Err(error.clone());
         }
         if !self.settled {
-            return Err("pi didn't finish the selection request".into());
+            return Err(format!("{name} didn't finish the selection request"));
         }
         self.result
-            .unwrap_or_else(|| Err("pi's reply had no alternatives".into()))
+            .unwrap_or_else(|| Err(format!("{name}'s reply had no alternatives")))
     }
 }
 
@@ -198,7 +282,7 @@ mod tests {
             send(&mut stream, delta(&char.to_string()), &mut updates);
         }
         assert_eq!(updates.iter().map(Vec::len).collect::<Vec<_>>(), [1, 2, 3]);
-        assert_eq!(updates[2], super::super::parse(text, 3).unwrap());
+        assert_eq!(updates[2], super::super::parse("pi", text, 3).unwrap());
         assert_eq!(completed_options(text, 1).len(), 1);
         for text in [
             r#"{"alternatives":["unfinished"#,
@@ -313,5 +397,92 @@ mod tests {
         let mut stream = Stream::default();
         stream.feed(b"{", 3, &mut |_| {}).unwrap();
         assert!(stream.finish().is_err());
+    }
+
+    fn claude_send(stream: &mut Stream, frame: Value, updates: &mut Vec<Vec<String>>) {
+        let mut bytes = serde_json::to_vec(&frame).unwrap();
+        bytes.push(b'\n');
+        stream
+            .feed(&bytes, 3, &mut |options| updates.push(options))
+            .unwrap();
+    }
+
+    fn claude_delta(text: &str) -> Value {
+        json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":text}}})
+    }
+
+    fn claude_result(text: &str) -> Value {
+        json!({"type":"result","subtype":"success","is_error":false,"result":text,"stop_reason":"end_turn"})
+    }
+
+    #[test]
+    fn claude_previews_reset_per_message_and_the_result_decides() {
+        let mut stream = Stream::new(Agent::Claude);
+        let mut updates = Vec::new();
+        let start = json!({"type":"stream_event","event":{"type":"message_start","message":{}}});
+        claude_send(&mut stream, start.clone(), &mut updates);
+        claude_send(
+            &mut stream,
+            claude_delta(r#"{"alternatives":["old","#),
+            &mut updates,
+        );
+        // A message claude asks for after a reply it couldn't use.
+        claude_send(&mut stream, start, &mut updates);
+        assert_eq!(updates, [vec!["old".to_string()], Vec::new()]);
+        claude_send(
+            &mut stream,
+            claude_delta(r#"{"alternatives":["new","#),
+            &mut updates,
+        );
+        claude_send(
+            &mut stream,
+            claude_result("```json\n{\"alternatives\":[\"new\",\"two\"]}\n```"),
+            &mut updates,
+        );
+        // Nothing after the result counts.
+        claude_send(
+            &mut stream,
+            claude_result(r#"{"alternatives":["late"]}"#),
+            &mut updates,
+        );
+        assert_eq!(updates.last().unwrap(), &["new", "two"]);
+        assert_eq!(stream.reported_error(), None);
+        assert_eq!(stream.finish().unwrap(), ["new", "two"]);
+    }
+
+    #[test]
+    fn claude_errors_are_reported_and_retract_previews() {
+        let mut stream = Stream::new(Agent::Claude);
+        let mut updates = Vec::new();
+        claude_send(
+            &mut stream,
+            claude_delta(r#"{"alternatives":["old","#),
+            &mut updates,
+        );
+        claude_send(
+            &mut stream,
+            json!({"type":"result","subtype":"success","is_error":false,"result":"{\"alternatives\":[\"cut","stop_reason":"max_tokens"}),
+            &mut updates,
+        );
+        assert!(updates.last().unwrap().is_empty());
+        let error = stream.reported_error().unwrap();
+        assert!(error.contains("cut off"), "{error}");
+        assert_eq!(stream.finish().unwrap_err(), error);
+
+        // pi's errors stay with its exit status, as before.
+        let mut stream = Stream::default();
+        send(
+            &mut stream,
+            end(r#"{"alternatives":["x"]}"#, "error"),
+            &mut Vec::new(),
+        );
+        assert_eq!(stream.reported_error(), None);
+
+        assert_eq!(
+            Stream::new(Agent::Claude)
+                .feed(b"nope\n", 3, &mut |_| {})
+                .unwrap_err(),
+            "Claude Code printed an invalid selection event"
+        );
     }
 }

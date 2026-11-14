@@ -596,6 +596,7 @@ mod tests {
             config_dir: None,
             fork: None,
             model: None,
+            selection_model: None,
         })
     }
 
@@ -646,6 +647,7 @@ mod tests {
                     config_dir: None,
                     fork: None,
                     model: None,
+                    selection_model: None,
                 }))
             })
             .unwrap_err();

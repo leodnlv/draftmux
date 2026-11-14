@@ -8,8 +8,13 @@
   as it was. Claude Code may edit only the draft and runs without project
   settings, CLAUDE.md, hooks or MCP servers. The model chip switches the
   draft's model, and the choice is kept for later sessions. Selection actions
-  aren't available for these drafts yet. Needs Claude Code 2.1.293 or later.
-  Drafts are still created with pi unless you ask for Claude Code.
+  work on these drafts too: each runs on a copy of the conversation, without
+  tools and without saving a session, so the draft and its conversation stay
+  as they were until you pick an option. They use the draft's model unless
+  Settings gives a Claude Code selection model for its directory. The
+  `draftmux` agent skill passes `--backend claude` when you ask for Claude
+  Code. Needs Claude Code 2.1.293 or later. Drafts are still created with pi
+  unless you ask for Claude Code.
 - Changes to a draft's details from the app and from `draftmux restore` at
   the same moment no longer undo one another.
 - A handed-off draft whose first draft was never started, because Draftmux

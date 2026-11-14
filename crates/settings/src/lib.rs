@@ -109,6 +109,9 @@ pub struct Scope {
     pub drafting_model: Option<DraftingModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_model: Option<SelectionModel>,
+    /// The selection model of drafts on Claude Code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_selection_model: Option<ClaudeSelectionModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
     /// Never empty; clearing the text unsets it.
@@ -147,6 +150,7 @@ impl Rule {
             s.profile.is_some(),
             s.drafting_model.is_some(),
             s.selection_model.is_some(),
+            s.claude_selection_model.is_some(),
             s.target.is_some(),
             s.instructions.is_some() || self.replace_instructions,
             s.context_files.is_some(),
@@ -189,6 +193,25 @@ impl SelectionModel {
         match self {
             SelectionModel::Drafting => None,
             SelectionModel::Model(model) => Some(model),
+        }
+    }
+}
+
+/// The model selection actions run on in drafts on Claude Code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeSelectionModel {
+    /// The draft's model.
+    Drafting,
+    /// A model as Claude Code's `--model` takes it, such as `haiku`.
+    Model(String),
+}
+
+impl ClaudeSelectionModel {
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            ClaudeSelectionModel::Drafting => None,
+            ClaudeSelectionModel::Model(model) => Some(model),
         }
     }
 }
