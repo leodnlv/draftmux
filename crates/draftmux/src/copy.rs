@@ -26,25 +26,30 @@ pub fn init(cx: &mut App) {
 /// Copies `text`, a draft in `target`'s syntax, and returns the confirmation
 /// to show.
 pub fn copy(target: Target, text: &str, cx: &mut App) -> &'static str {
-    let text = copy_body(text);
+    let body = copy_body(text);
     match target {
         Target::Github => {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            cx.write_to_clipboard(ClipboardItem::new_string(body.to_owned()));
             "Copied markdown for GitHub"
         }
+        // Frontmatter in a repository file is part of the file.
+        Target::GithubFile => {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            "Copied markdown for a GitHub file"
+        }
         Target::Rich => {
-            if write_rich_text(text, cx) {
+            if write_rich_text(body, cx) {
                 "Copied as rich text"
             } else {
                 "Rich copy unavailable; copied plain text"
             }
         }
         Target::Plain => {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            cx.write_to_clipboard(ClipboardItem::new_string(body.to_owned()));
             "Copied plain text"
         }
         Target::Slack => {
-            if write_slack(text, cx) {
+            if write_slack(body, cx) {
                 "Copied as rich text for Slack"
             } else {
                 "Rich copy unavailable; copied plain text for Slack"

@@ -47,10 +47,11 @@ set -- "$f"
 draftmux open "$@" --target github --note 'PR description for the retry change'
 ```
 
-- `--target`: `github` for GitHub markdown, `slack` for Slack messages,
-  `rich` for emails and documents with formatting such as bold and lists,
-  `plain` for plain text. Leave it out when the user hasn't said where the
-  message goes; Draftmux then uses its default for the directory.
+- `--target`: `github` for a GitHub comment, issue or PR, `github-file` for
+  a Markdown file in a repository such as README.md, `slack` for Slack
+  messages, `rich` for emails and documents with formatting such as bold and
+  lists, `plain` for plain text. Leave it out when the user hasn't said where
+  the message goes; Draftmux then uses its default for the directory.
 - `--backend`: leave it out unless the user names the agent the draft should
   run on, then pass `--backend claude` or `--backend pi`. Also pass
   `--backend pi` when `open` reports that Claude Code can't be used and the
@@ -64,7 +65,9 @@ When the message is already written in a file, such as a draft the user asked
 you to write earlier, pass `--draft-file <path>` instead of `--note`. The
 draft starts with the file's text unchanged and Draftmux's agent doesn't write
 a first draft. Pass the path as is; don't read, copy or rewrite the file
-first.
+first. To polish a Markdown file in the repository, such as README.md, pass
+the file itself: Draftmux previews a file that git doesn't ignore as
+`github-file` unless `--target` says otherwise.
 
 It prints the draft ID. Tell the user the ID and that Draftmux is writing the
 first draft, or with `--draft-file` that the draft is open in Draftmux, then
@@ -105,9 +108,12 @@ Markdown; for one that takes Slack mrkdwn, change only `**bold**` to
 `*bold*`, `*italic*` to `_italic_`, `~~strike~~` to `~strike~` and
 `[text](url)` to `<url|text>`. Do not send or post until the user asks.
 
-A GitHub draft keeps each paragraph on one line. When it goes into a Markdown
-file in a repository instead, wrap paragraphs and list items to the
-repository's Markdown line length, if it has one; change nothing else.
+A `github-file` draft is the file's complete text, frontmatter included and
+already wrapped. Write the raw draft to the file unchanged, for example
+`cp "$(draftmux show --source "$f" --path)" README.md`. A `github` draft
+keeps each paragraph on one line; when it goes into a Markdown file instead,
+wrap paragraphs and list items to the repository's Markdown line length, if
+it has one, and change nothing else.
 
 `draftmux show --path` returns the raw file's path, frontmatter included: use
 it for editing, not as a `--body-file`.

@@ -28,21 +28,23 @@ use draftmux_core::session::{Effect, Outcome, Session};
 use draftmux_storage::{Store, Target};
 use editor::{Editor, EditorEvent, Redo, Undo};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, BoxShadow, Context, CursorStyle, DragMoveEvent,
-    Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, MouseButton, Pixels,
-    Point, PromptLevel, ScrollHandle, SharedString, StyleRefinement, Subscription, Task, Window,
-    WindowControlArea, actions, div, ease_out_quint, point, prelude::*, px, svg,
+    Anchor, Animation, AnimationExt, AnyElement, App, BoxShadow, Context, CursorStyle,
+    DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    MouseButton, Pixels, Point, PromptLevel, ScrollHandle, SharedString, StyleRefinement,
+    Subscription, Task, Transformation, Window, WindowControlArea, actions, anchored, deferred,
+    div, ease_out_quint, percentage, point, prelude::*, px, svg,
 };
 use markup::Document;
 
 use crate::app_settings::AppSettings;
-use crate::assets::{EDITOR_PANE_ICON, PREVIEW_ICON};
+use crate::assets::{CHEVRON_ICON, EDITOR_PANE_ICON, PREVIEW_ICON};
 use crate::chat::{Chat, ChatEvent};
 use crate::copy::{self, Copy};
 use crate::drafts::{self, tilde};
 use crate::file_watch;
 use crate::format::{Format, Formatter, Wrap};
 use crate::markup_view;
+use crate::menu::{MenuItem, menu_panel};
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
 use crate::selectable::{Pos, Scroller, SelectionChanged, SelectionStarted, TextSelection};
 use crate::selection_popover::{SelectionPopover, SelectionPopoverEvent};
@@ -154,6 +156,10 @@ pub struct Chrome {
     /// The Copy button shows a checkmark while this is set, with a serial
     /// so each copy replays it; the task clears it.
     copied: Option<(usize, Task<()>)>,
+    /// Whether the GitHub segment's menu of GitHub targets is open.
+    github_menu: bool,
+    /// Drafts whose hint to preview them as a GitHub file was dismissed.
+    file_hint_dismissed: HashSet<String>,
     /// The sidebar row context menu, while it is open.
     row_menu: Option<sidebar::RowMenu>,
     /// The drafts the sidebar listed when it last rendered.
@@ -568,6 +574,8 @@ impl Chrome {
             review: None,
             review_focus: cx.focus_handle(),
             copied: None,
+            github_menu: false,
+            file_hint_dismissed: HashSet::new(),
             row_menu: None,
             seen_rows: RefCell::default(),
             leaving_rows: Vec::new(),
@@ -588,6 +596,21 @@ impl Chrome {
             &chrome.preview,
             |this, _, event: &preview::FieldCopied, cx| {
                 this.show_toast(format!("Copied {}", event.0), cx);
+            },
+        ));
+        chrome._subscriptions.push(cx.subscribe(
+            &chrome.preview,
+            |this, _, event: &preview::FileHint, cx| match event {
+                preview::FileHint::Accept => this.set_target(Target::GithubFile, cx),
+                preview::FileHint::Dismiss => {
+                    if let Some(id) = this.session.drafts().current_id() {
+                        this.file_hint_dismissed.insert(id.to_owned());
+                    }
+                    this.preview.update(cx, |preview, cx| {
+                        preview.file_hint = false;
+                        cx.notify();
+                    });
+                }
             },
         ));
         if let Some(home) = std::env::home_dir() {
@@ -987,6 +1010,13 @@ impl Chrome {
             .drafts()
             .current()
             .map(|draft| draft.meta.target);
+        let file_hint = target == Some(Target::Github)
+            && self
+                .session
+                .drafts()
+                .current_id()
+                .is_some_and(|id| !self.file_hint_dismissed.contains(id))
+            && preview.as_ref().is_some_and(markup_view::looks_wrapped);
         self.preview_source = if preview.is_some() {
             self.editor.read(cx).text().to_owned()
         } else {
@@ -1001,6 +1031,7 @@ impl Chrome {
             this.copied_task = Task::ready(());
             this.document = preview;
             this.target = target;
+            this.file_hint = file_hint;
             cx.notify();
         });
         self.preview_map = None;
@@ -1504,7 +1535,7 @@ impl Chrome {
                             .group_hover("toggle-preview", |style| style.text_color(palette.text)),
                     ),
             )
-            .child(target_switch(target, palette, cx))
+            .child(target_switch(target, self.github_menu, palette, cx))
             .child(copy::button(
                 palette,
                 self.copied.as_ref().map(|(serial, _)| *serial),
@@ -1518,31 +1549,52 @@ impl Chrome {
     }
 }
 
-/// The segmented control with every target.
+/// The segmented control with every target. Both GitHub targets share one
+/// segment, whose menu switches between them.
 fn target_switch(
     selected: Target,
+    github_menu: bool,
     palette: &Palette,
     cx: &mut Context<Chrome>,
 ) -> impl IntoElement {
     let palette = *palette;
-    let segment = |target: Target| -> AnyElement {
-        let label = target.label();
+    let is_github = |target: Target| matches!(target, Target::Github | Target::GithubFile);
+    let segment = |target: Target, cx: &mut Context<Chrome>| -> AnyElement {
+        let github = is_github(target);
+        let on = target == selected || github && is_github(selected);
+        let label = if on { selected.label() } else { target.label() };
         let segment = div()
-            .id(label)
+            .id(target.name())
             .h(px(20.))
             .px(px(9.))
             .flex()
             .items_center()
+            .gap(px(4.))
             .rounded(px(5.5))
             .text_size(px(12.))
-            .child(label);
-        if target != selected {
+            .child(label)
+            .when(github, |segment| {
+                segment.mr(px(-2.)).child(
+                    svg()
+                        .path(CHEVRON_ICON)
+                        .size(px(8.))
+                        .text_color(palette.muted)
+                        .with_transformation(Transformation::rotate(percentage(0.25))),
+                )
+            });
+        if !on {
             return segment
                 .active(|style| style.opacity(0.8))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_target(target, cx)))
                 .into_any_element();
         }
-        segment
+        let segment = segment
+            .when(github, |segment| {
+                segment.on_click(cx.listener(|this, _, _, cx| {
+                    this.github_menu = !this.github_menu;
+                    cx.notify();
+                }))
+            })
             .with_animation(
                 ("segment-on", target as usize),
                 Animation::new(SEGMENT_FADE).with_easing(ease_out_quint()),
@@ -1552,7 +1604,20 @@ fn target_switch(
                         shadow(palette.segment_drop.opacity(delta), 1., 2.5, 0.),
                     ])
                 },
-            )
+            );
+        div()
+            .relative()
+            .child(segment)
+            .when(github && github_menu, |group| {
+                group.child(
+                    div().absolute().top_full().left_0().mt_1().child(deferred(
+                        anchored()
+                            .anchor(Anchor::TopLeft)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(github_menu_panel(selected, &palette, cx)),
+                    )),
+                )
+            })
             .into_any_element()
     };
     div()
@@ -1561,7 +1626,55 @@ fn target_switch(
         .gap(px(2.))
         .rounded(px(7.))
         .bg(palette.segment_track)
-        .children(Target::ALL.iter().map(|&target| segment(target)))
+        .children(
+            Target::ALL
+                .iter()
+                .filter(|&&target| target != Target::GithubFile)
+                .map(|&target| segment(target, cx))
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// The GitHub segment's menu: a comment, issue or PR, or a file in a
+/// repository.
+fn github_menu_panel(
+    selected: Target,
+    palette: &Palette,
+    cx: &mut Context<Chrome>,
+) -> impl IntoElement + use<> {
+    let item = |label: &'static str, detail: Option<&'static str>, target| MenuItem {
+        label: label.into(),
+        checked: selected == target,
+        enabled: true,
+        action: Some(target),
+        detail: detail.map(Into::into),
+        heading: false,
+    };
+    let items = [
+        item("Comment, Issue or PR", None, Target::Github),
+        item("Repository File", Some("README, docs"), Target::GithubFile),
+    ];
+    let pick = cx.entity().downgrade();
+    let dismiss = cx.entity().downgrade();
+    menu_panel(
+        palette,
+        &items,
+        move |target, _, cx| {
+            pick.update(cx, |this, cx| {
+                this.github_menu = false;
+                this.set_target(target, cx);
+            })
+            .ok();
+        },
+        move |_, cx| {
+            dismiss
+                .update(cx, |this, cx| {
+                    this.github_menu = false;
+                    cx.notify();
+                })
+                .ok();
+        },
+    )
 }
 
 /// A box shadow of `color` moved down by `y`. A zero blur with a spread draws
@@ -1711,6 +1824,7 @@ fn new_preview(
         cache: Default::default(),
         appearance: None,
         writing: false,
+        file_hint: false,
         redline: None,
         partner: None,
         marks: Default::default(),

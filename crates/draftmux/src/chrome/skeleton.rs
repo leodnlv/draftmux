@@ -37,7 +37,7 @@ fn outline(target: Target) -> &'static [Block] {
     use Block::*;
     match target {
         // Markdown documents: PR descriptions, issues, release notes.
-        Target::Github => &[
+        Target::Github | Target::GithubFile => &[
             Heading(0.26),
             Paragraph(&[0.97, 0.91, 0.42]),
             Paragraph(&[0.88, 0.64]),
@@ -64,7 +64,7 @@ fn outline(target: Target) -> &'static [Block] {
 /// Space between blocks, as the target's preview spaces paragraphs.
 fn block_gap(target: Target, style: &MarkupStyle) -> Pixels {
     match target {
-        Target::Github | Target::Plain => style.text_gap,
+        Target::Github | Target::GithubFile | Target::Plain => style.text_gap,
         // A blank line between Slack paragraphs is a short gap.
         Target::Slack => px(8.),
         // Mail's paragraph margins collapse to one line.

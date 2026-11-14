@@ -296,6 +296,9 @@ pub(crate) fn syntax(target: Target) -> &'static str {
         Target::Github => {
             "GitHub-flavored Markdown, rendered as in a GitHub comment: every line break inside a paragraph shows, so keep each paragraph on one line rather than wrapping it"
         }
+        Target::GithubFile => {
+            "GitHub-flavored Markdown for a file in a repository, such as README.md, rendered as GitHub shows a repository file: a single line break inside a paragraph shows as a space, so wrap paragraphs and list items to the width the file already uses; frontmatter is part of the file"
+        }
         Target::Slack => {
             "Markdown for a Slack message: every line break shows as written; **bold**, *italic*, ~~strike~~, `code`, [text](url) links; :shortcode: emoji and <@U…> mentions work; headings paste as a bold line and tables as a code block; keep list items to one line"
         }

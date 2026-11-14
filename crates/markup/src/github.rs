@@ -2,6 +2,8 @@
 //!
 //! Follows GitHub's comment rendering: single newlines inside a paragraph are
 //! line breaks, HTML comments are hidden, and other HTML is kept literally.
+//! The `file` parsers render a file in a repository, such as README.md, where
+//! a single newline is a space.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,13 +18,25 @@ use crate::{
 };
 
 pub fn parse(markdown: &str) -> Document {
-    Walk::new(markdown, false).document().0
+    Walk::new(markdown, false, "\n").document().0
 }
 
 /// [`parse`], with where each block and run of text came from in
 /// `markdown`.
 pub fn parse_mapped(markdown: &str) -> (Document, SourceMap) {
-    Walk::new(markdown, true).document()
+    Walk::new(markdown, true, "\n").document()
+}
+
+/// [`parse`] as GitHub renders a file in a repository: a single newline
+/// inside a paragraph is a space. Hard breaks still break the line.
+pub fn parse_file(markdown: &str) -> Document {
+    Walk::new(markdown, false, " ").document().0
+}
+
+/// [`parse_file`], with where each block and run of text came from in
+/// `markdown`.
+pub fn parse_file_mapped(markdown: &str) -> (Document, SourceMap) {
+    Walk::new(markdown, true, " ").document()
 }
 
 fn options() -> Options<'static> {
@@ -40,6 +54,8 @@ fn options() -> Options<'static> {
 struct Walk<'s> {
     source: &'s str,
     mapped: bool,
+    /// What a single newline inside a paragraph renders as.
+    soft_break: &'static str,
     /// Byte offset of each line's start.
     lines: Vec<usize>,
     /// Character references decoded so far.
@@ -54,7 +70,7 @@ struct Inline {
 }
 
 impl<'s> Walk<'s> {
-    fn new(source: &'s str, mapped: bool) -> Self {
+    fn new(source: &'s str, mapped: bool, soft_break: &'static str) -> Self {
         let lines = if mapped {
             std::iter::once(0)
                 .chain(source.match_indices('\n').map(|(ix, _)| ix + 1))
@@ -65,6 +81,7 @@ impl<'s> Walk<'s> {
         Walk {
             source,
             mapped,
+            soft_break,
             lines,
             entities: RefCell::default(),
         }
@@ -252,10 +269,14 @@ impl<'s> Walk<'s> {
                     }
                 }
                 NodeValue::SoftBreak | NodeValue::LineBreak => {
-                    push_span(&mut out.spans, "\n", style, link);
+                    let text = match node.data().value {
+                        NodeValue::SoftBreak => self.soft_break,
+                        _ => "\n",
+                    };
+                    push_span(&mut out.spans, text, style, link);
                     if self.mapped {
                         let source = self.inline_range(node, cell);
-                        out.pieces.whole("\n", source, self.source);
+                        out.pieces.whole(text, source, self.source);
                     }
                 }
                 NodeValue::Code(code) => {

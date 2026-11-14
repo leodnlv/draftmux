@@ -120,6 +120,36 @@ pub fn main(args: Args) -> Result<u8> {
     }
 }
 
+/// Whether `file` is Markdown that its git repository doesn't ignore, such
+/// as README.md, rather than a scratch file holding a message.
+fn is_repository_markdown(file: &Path) -> bool {
+    let markdown = file
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["md", "markdown", "mdx"]
+                .iter()
+                .any(|md| ext.eq_ignore_ascii_case(md))
+        });
+    let Ok(file) = std::path::absolute(file) else {
+        return false;
+    };
+    let Some(dir) = file.parent().filter(|_| markdown) else {
+        return false;
+    };
+    // `check-ignore` exits 1 for a file it doesn't ignore, 0 for an ignored
+    // one and 128 outside a repository.
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "-q", "--"])
+        .arg(&file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.code() == Some(1))
+}
+
 /// `pi` builds the base pi command; `claude` fails, with a message for the
 /// user, unless the app can run Claude Code. `settings` are resolved for the
 /// source session's directory and kept in the draft. Unless they set a
@@ -158,7 +188,17 @@ fn create(
         }
         None => String::new(),
     };
-    let target = args.target.unwrap_or(resolved.target.value);
+    let target = match (args.target, &args.draft_file) {
+        (Some(target), _) => target,
+        (None, Some(file)) if is_repository_markdown(file) => {
+            eprintln!(
+                "draftmux: previewing {} as a file in its repository",
+                file.display()
+            );
+            Target::GithubFile
+        }
+        (None, _) => resolved.target.value,
+    };
     if on_claude {
         let mut settings = resolved.draft_settings();
         // Pi's; the Claude session keeps its own.
@@ -724,6 +764,56 @@ cat > /dev/null
         assert!(!meta.first_draft_pending);
         assert!(meta.source.is_some());
         assert!(meta.pi().unwrap().session_file.is_some());
+    }
+
+    #[test]
+    fn draft_file_in_a_repository_previews_as_a_github_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("transcript.jsonl");
+        fs::write(&transcript, claude_transcript(tmp.path())).unwrap();
+        let store = Store::new(tmp.path().join("drafts"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("history")).unwrap();
+        let git = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(git.success());
+        fs::write(repo.join(".gitignore"), "history/\n").unwrap();
+        let readme = repo.join("README.md");
+        let scratch = repo.join("history/pr.md");
+        let outside = tmp.path().join("pr.md");
+        for file in [&readme, &scratch, &outside] {
+            fs::write(file, "# Title\n").unwrap();
+        }
+        let target = |file: &Path, extra: &[&str]| {
+            let mut argv = vec![
+                transcript.to_str().unwrap(),
+                "--pi-agent-dir",
+                tmp.path().to_str().unwrap(),
+                "--backend",
+                "pi",
+                "--draft-file",
+                file.to_str().unwrap(),
+            ];
+            argv.extend(extra);
+            let draft = create(
+                &parse(&argv),
+                &store,
+                &no_pi,
+                &no_claude,
+                &Settings::default(),
+            )
+            .unwrap();
+            draft.meta.target
+        };
+
+        assert_eq!(target(&readme, &[]), Target::GithubFile);
+        assert_eq!(target(&readme, &["--target", "github"]), Target::Github);
+        assert_eq!(target(&scratch, &[]), Target::Github);
+        assert_eq!(target(&outside, &[]), Target::Github);
     }
 
     #[test]

@@ -299,7 +299,12 @@ impl From<Meta> for MetaFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
+    /// GitHub Markdown as a comment, issue or PR shows it.
     Github,
+    /// GitHub Markdown as a file in a repository, such as README.md, shows
+    /// it: a single newline inside a paragraph is a space.
+    #[serde(rename = "github-file")]
+    GithubFile,
     Slack,
     /// Markdown pasted as rich text, such as into an email or a document.
     Rich,
@@ -311,12 +316,19 @@ pub enum Target {
 
 impl Target {
     /// Every target, in the order the app offers them.
-    pub const ALL: &[Target] = &[Target::Github, Target::Slack, Target::Rich, Target::Plain];
+    pub const ALL: &[Target] = &[
+        Target::Github,
+        Target::GithubFile,
+        Target::Slack,
+        Target::Rich,
+        Target::Plain,
+    ];
 
     /// The name settings, `meta.json` and `draftmux open --target` use.
     pub fn name(self) -> &'static str {
         match self {
             Target::Github => "github",
+            Target::GithubFile => "github-file",
             Target::Slack => "slack",
             Target::Rich => "rich",
             Target::Plain => "plain",
@@ -342,6 +354,7 @@ impl Target {
     pub fn label(self) -> &'static str {
         match self {
             Target::Github => "GitHub",
+            Target::GithubFile => "GitHub file",
             Target::Slack => "Slack",
             Target::Rich => "Rich text",
             Target::Plain => "Plain text",
@@ -508,6 +521,7 @@ mod tests {
     fn targets_are_stored_by_name() {
         for (target, json) in [
             (Target::Github, r#""github""#),
+            (Target::GithubFile, r#""github-file""#),
             (Target::Slack, r#""slack""#),
             (Target::Rich, r#""rich""#),
             (Target::Plain, r#""plain""#),

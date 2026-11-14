@@ -1108,11 +1108,46 @@ pub fn preview(target: Target, text: &str) -> Document {
     let text = draft.body;
     match target {
         Target::Github => markup::github::parse(text),
+        Target::GithubFile => markup::github::parse_file(text),
         Target::Slack => markup::slack::parse(text),
         Target::Rich => markup::rich_text::pasted(&markup::github::parse(text)),
         Target::Plain => markup::plain::parse(text),
     }
 }
+
+/// Whether a GitHub comment preview looks like prose wrapped at a fixed
+/// width, as a repository file often is: at least two lines inside
+/// paragraphs break after [`WRAPPED_LINE`] characters or more.
+pub fn looks_wrapped(document: &Document) -> bool {
+    fn wrapped_lines(blocks: &[Block]) -> usize {
+        blocks
+            .iter()
+            .map(|block| match block {
+                Block::Paragraph(spans) => {
+                    let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+                    let mut lines: Vec<_> = text.split('\n').collect();
+                    lines.pop();
+                    lines
+                        .iter()
+                        .filter(|line| line.chars().count() >= WRAPPED_LINE)
+                        .count()
+                }
+                Block::List(list) => list
+                    .items
+                    .iter()
+                    .map(|item| wrapped_lines(&item.blocks))
+                    .sum(),
+                Block::Quote(blocks) | Block::Alert { blocks, .. } => wrapped_lines(blocks),
+                _ => 0,
+            })
+            .sum()
+    }
+    wrapped_lines(&document.blocks) >= 2
+}
+
+/// The shortest line, in characters, that [`looks_wrapped`] counts as
+/// wrapped rather than broken on purpose.
+const WRAPPED_LINE: usize = 50;
 
 /// A draft parsed for previewing on a target, with where its text came
 /// from.
@@ -1135,6 +1170,7 @@ pub fn preview_mapped(target: Target, text: &str) -> Mapped {
     let body = draft.body;
     let (document, map) = match target {
         Target::Github => markup::github::parse_mapped(body),
+        Target::GithubFile => markup::github::parse_file_mapped(body),
         Target::Slack => {
             let (document, map) = markup::slack::parse_mapped(body);
             let map = markup::slack::posted_mapped(&document, &map).1;
@@ -1289,7 +1325,7 @@ pub fn field_segments(value: &str, index: usize, redline: &Redline) -> Vec<Segme
 /// The preview style for `target` in the light or dark appearance.
 pub fn style(target: Target, dark: bool) -> MarkupStyle {
     match target {
-        Target::Github => MarkupStyle::github(dark),
+        Target::Github | Target::GithubFile => MarkupStyle::github(dark),
         Target::Slack => MarkupStyle::slack(dark),
         Target::Rich => MarkupStyle::rich_text(dark),
         // The system font; nothing in plain text is styled.
@@ -2469,6 +2505,29 @@ fn is_openable(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrapped_paragraphs_look_wrapped() {
+        let wrapped = "Draftmux gives the message its own window. Hand it off from\n\
+                       Claude Code or pi, and an agent forked from the session writes\n\
+                       the first draft.\n";
+        let github = |text| super::preview(Target::Github, text);
+        assert!(super::looks_wrapped(&github(wrapped)));
+        let item = format!("- {}", wrapped.replace('\n', "\n  "));
+        assert!(super::looks_wrapped(&github(&item)));
+        // Short lines are broken on purpose, and one long break is not a
+        // pattern.
+        assert!(!super::looks_wrapped(&github(
+            "Thanks!\nI'll fix it today.\n"
+        )));
+        assert!(!super::looks_wrapped(&github(
+            "Draftmux gives the message its own window. Hand it off from\nhere.\n"
+        )));
+        assert!(!super::looks_wrapped(&super::preview(
+            Target::GithubFile,
+            wrapped
+        )));
+    }
+
     #[test]
     fn every_preview_format_excludes_frontmatter() {
         for target in draftmux_storage::Target::ALL {

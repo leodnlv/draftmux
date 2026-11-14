@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Preview a draft as a GitHub repository file, such as README.md, where a
+  single newline inside a paragraph shows as a space, as GitHub renders
+  files, rather than as a line break, as it renders comments. Pick
+  Repository File from the GitHub segment's menu, or pass
+  `--target github-file`. `draftmux open --draft-file` picks it on its own
+  for a Markdown file that its git repository doesn't ignore. A GitHub
+  comment draft with wrapped paragraphs offers the switch above the
+  preview. Copy keeps a file draft's frontmatter, and the drafting agent
+  wraps a file draft's paragraphs like the rest of the file.
 - An option applied from the selection popover, such as one of the
   alternatives, is recorded in the draft's edit history under the action's
   name, so Changes shows and can revert it like the agent's chat edits.

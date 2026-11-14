@@ -31,6 +31,9 @@ pub(super) struct Preview {
     /// draft; an empty preview shows a skeleton of the message instead of
     /// "Nothing to preview".
     pub writing: bool,
+    /// Offers the GitHub file target above the document, for a GitHub
+    /// comment draft whose paragraphs look wrapped.
+    pub file_hint: bool,
     /// While reviewing, the redline shown instead of the document.
     pub redline: Option<PreviewRedline>,
     /// Scrolls along with this one, to the same fraction of its height.
@@ -88,6 +91,15 @@ const REVEAL_MARGIN: Pixels = px(48.);
 
 pub(super) struct FieldCopied(pub String);
 impl gpui::EventEmitter<FieldCopied> for Preview {}
+
+/// The user's answer to the hint that a GitHub comment draft looks like a
+/// wrapped repository file.
+pub(super) enum FileHint {
+    /// Preview the draft as a repository file.
+    Accept,
+    Dismiss,
+}
+impl gpui::EventEmitter<FileHint> for Preview {}
 
 impl Render for Preview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -244,6 +256,79 @@ impl Preview {
 
     /// The frontmatter's fields, each with its review changes drawn on its
     /// value by `redline`.
+    fn file_hint(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if !self.file_hint || self.redline.is_some() {
+            return None;
+        }
+        let palette = theme::get(cx).palette;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .mx(px(-4.))
+                .mb(px(20.))
+                .pl(px(12.))
+                .pr(px(6.))
+                .py(px(7.))
+                .rounded(px(10.))
+                .bg(palette.accent_soft)
+                .text_size(px(12.5))
+                .line_height(px(17.))
+                .text_color(palette.text)
+                .child(div().flex_1().min_w_0().child(
+                    "Wrapped lines show as line breaks in a GitHub comment. \
+                     Is this a repository file, such as README.md?",
+                ))
+                .child(
+                    div()
+                        .id("file-hint-accept")
+                        .flex_none()
+                        .h(px(22.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .bg(palette.accent)
+                        .text_color(palette.on_accent)
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .hover(|style| style.opacity(0.9))
+                        .active(|style| style.opacity(0.8))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(FileHint::Accept);
+                        }))
+                        .child("Preview as File"),
+                )
+                .child(
+                    div()
+                        .id("file-hint-dismiss")
+                        .aria_label("Dismiss")
+                        .flex_none()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .hover(|style| style.bg(palette.hover))
+                        .active(|style| style.opacity(0.8))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(FileHint::Dismiss);
+                        }))
+                        .child(
+                            gpui::svg()
+                                .path(crate::assets::CLOSE_ICON)
+                                .size(px(10.))
+                                .text_color(palette.muted),
+                        ),
+                ),
+        )
+    }
+
     fn fields_card(&self, redline: Option<&Redline>, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let fields = self.shown_fields();
         if fields.is_empty() {
@@ -451,6 +536,7 @@ impl Preview {
             .px_6()
             .pt_5()
             .pb_10()
+            .children(self.file_hint(cx))
             .children(self.fields_card(redline.as_deref(), cx))
             .child(body)
             .child(canvas(|_, _, _| (), move |_, _, _, _| drop(frame)).absolute())

@@ -42,7 +42,8 @@ const PAD: f32 = 16.;
 /// Render fixture drafts to PNGs (development tool).
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Target whose preview style to use: github, slack, rich or plain.
+    /// Target whose preview style to use: github, github-file, slack, rich or
+    /// plain.
     #[arg(long)]
     target: String,
     /// Directory of `.md` fixture drafts.
@@ -61,6 +62,7 @@ pub struct Args {
 pub fn main(args: Args) -> u8 {
     let target = match args.target.as_str() {
         "github" => Target::Github,
+        "github-file" => Target::GithubFile,
         "slack" => Target::Slack,
         "rich" => Target::Rich,
         "plain" => Target::Plain,

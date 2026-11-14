@@ -31,6 +31,20 @@ fn line_breaks() {
 }
 
 #[test]
+fn file_line_breaks() {
+    assert_eq!(
+        github::parse_file("soft\nbreak\n\n- wrapped\n  item\n"),
+        github::parse("soft break\n\n- wrapped item\n")
+    );
+    let hard = "hard  \nbreak\n\nbackslash\\\nbreak\n";
+    assert_eq!(github::parse_file(hard), github::parse(hard));
+    assert_eq!(
+        github::parse_file_mapped("soft\nbreak\n").0,
+        github::parse_file("soft\nbreak\n")
+    );
+}
+
+#[test]
 fn links() {
     insta::assert_snapshot!(snapshot(
         "[**bold** label](https://a.example) and [ref][r] and <https://b.example>\n\n\

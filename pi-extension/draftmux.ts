@@ -16,7 +16,7 @@ export const CONTEXT_MESSAGE_TYPE = "draftmux-context";
 export const DRAFT_MESSAGE_TYPE = "draftmux-draft";
 export const TRUST_STATUS_KEY = "draftmux.trust";
 
-type Target = "github" | "slack" | "rich" | "plain";
+type Target = "github" | "github-file" | "slack" | "rich" | "plain";
 
 type Config =
 	| { mode: "selection" }
@@ -25,6 +25,8 @@ type Config =
 /** The same text as `syntax` in crates/draftmux/src/selection.rs. */
 const TARGET_SYNTAX: Record<Target, string> = {
 	github: "GitHub-flavored Markdown, rendered as in a GitHub comment: every line break inside a paragraph shows, so keep each paragraph on one line rather than wrapping it",
+	"github-file":
+		"GitHub-flavored Markdown for a file in a repository, such as README.md, rendered as GitHub shows a repository file: a single line break inside a paragraph shows as a space, so wrap paragraphs and list items to the width the file already uses; frontmatter is part of the file",
 	slack:
 		"Markdown for a Slack message: every line break shows as written; **bold**, *italic*, ~~strike~~, `code`, [text](url) links; :shortcode: emoji and <@U…> mentions work; headings paste as a bold line and tables as a code block; keep list items to one line",
 	rich: "Markdown, pasted as rich text into an email or document (headings, bold, italic, links, lists, quotes, code and tables carry over; no raw HTML, alerts or @mentions; no subject line)",

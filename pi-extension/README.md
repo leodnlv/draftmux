@@ -30,8 +30,8 @@ process. bash commands the agent runs inherit them.
 A missing or invalid value makes pi exit with status 1 and an error on stderr
 naming the variable, so pi never runs unguarded.
 
-The target platform comes from the `target` field (`github`, `slack`,
-`rich` or `plain`; `email` also means `plain`) of the `meta.json` beside
+The target platform comes from the `target` field (`github`, `github-file`,
+`slack`, `rich` or `plain`; `email` also means `plain`) of the `meta.json` beside
 `DRAFTMUX_DRAFT_PATH`, read before every run, so the app changes the target by
 writing `meta.json` without restarting pi.
 When the file can't be read or holds no valid target, the run keeps the last
