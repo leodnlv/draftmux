@@ -1255,8 +1255,7 @@ impl Chat {
             Some((
                 "No project settings".to_owned(),
                 "Claude Code runs this draft without project settings, CLAUDE.md, hooks or MCP \
-                 servers, and may edit only the draft. Selection actions aren't available for \
-                 Claude Code drafts yet."
+                 servers, and may edit only the draft."
                     .to_owned(),
             ))
         } else {
