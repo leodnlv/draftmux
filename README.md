@@ -19,15 +19,16 @@ Status: early release; expect rough edges.
 ## Features
 
 - **Hand-off from your session.** `/draftmux Slack update for the team` forks
-  the conversation into a [pi](https://github.com/earendil-works/pi) agent,
-  which writes the first draft from what you've already discussed.
-- **Chat with the draft's agent.** Ask for changes in plain words. It runs with
-  your pi profile, so your skills are available.
+  the conversation into a new pi or Claude Code session, which writes the first
+  draft from what you've already discussed.
+- **Chat with the draft's agent.** Ask for changes in plain words. On pi it runs
+  with your profile, so your skills are available.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
   text or plain text. `⌘+` and `⌘−` change the text size, and `⌘0` resets it.
 - **Selection actions.** Select text for alternatives, Shorten or Tighten, or
-  your own actions. With text selected, a chat message changes only that part. Hold `⌘` while dragging to select more passages; a
-  chat message then edits each of them.
+  your own actions. With text selected, a chat message changes only that part.
+  Hold `⌘` while dragging to select more passages; a chat message then edits
+  each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
 
@@ -58,17 +59,17 @@ Runs on x86_64 and arm64 with glibc 2.35 or later, such as Ubuntu 22.04 or
 Debian 12 and newer. The script installs the app in `~/.local/lib/draftmux`.
 Shortcuts use Ctrl where macOS uses Cmd.
 
-### pi
+### Agents
 
-By default, the agent features run [pi](https://github.com/earendil-works/pi):
+Drafts are written by [pi](https://github.com/earendil-works/pi) or Claude Code
+2.1.293 or later. Install whichever you use; for pi:
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-Without pi, drafts can still run on [Claude Code](#drafting-with-claude-code).
 Editing, previews, copying and Markdown formatting of GitHub and rich-text
-drafts work without any agent.
+drafts work without either.
 
 ## Quick start
 
@@ -86,6 +87,15 @@ drafts work without any agent.
 4. Back in the same session, say what to do with it, for example
    `done, open the PR`. From another session, run `/draftmux done, open the PR`.
 
+## Choosing the agent
+
+Drafts from pi sessions run on pi. Drafts from Claude Code sessions run on pi
+by default, converted from the transcript; to keep them on Claude Code, set
+Backend to Same as source in Settings, globally or for one directory. For a
+single draft, ask the skill (`/draftmux PR description, on Claude Code`) or
+pass `--backend claude` or `--backend pi` to `draftmux open`. A draft stays on
+the agent it was created with.
+
 ## How it works with pi
 
 - Each draft gets its own pi session, forked from your pi session or converted
@@ -99,17 +109,7 @@ drafts work without any agent.
   blocked.
 - The original agent reads the finished draft with `draftmux show`.
 
-## Drafting with Claude Code
-
-Drafts run on pi unless you ask for Claude Code. From a Claude Code session,
-ask the skill for it (`/draftmux PR description, on Claude Code`) or run
-`draftmux open <transcript> --backend claude`. To make it the default, set
-Backend to Same as source in Settings, globally or for one directory. Claude
-Code sessions then continue on Claude Code, and `--backend pi` puts a single
-draft on pi.
-
-Needs Claude Code 2.1.293 or later. If Draftmux can't run Claude Code, `open`
-reports an error instead of switching to pi.
+## How it works with Claude Code
 
 - The draft continues your conversation in its own Claude Code session. Your
   original session is untouched.
@@ -121,7 +121,8 @@ reports an error instead of switching to pi.
 - Selection actions run in a throwaway copy of the conversation with no tools.
   They use the draft's model unless Settings sets a Claude Code selection
   model.
-- A draft stays on the agent it was created with.
+- If Draftmux can't run Claude Code, `open` reports an error instead of
+  switching to pi.
 
 ## Configuration
 
