@@ -1,15 +1,12 @@
-//! Automatic updates of a released `Draftmux.app` from the GitHub releases
-//! of raine/draftmux. A Developer ID signed app checks for a newer release
-//! once a day, installs it in the background by swapping the bundle in place
-//! and offers to restart into it. Development builds and Linux never check
-//! on their own; Check for Updates still reports a newer release to them.
-//! The toolbar offers a newer release with what changed in it.
-
-// Linux only reports releases, so the install states go unused there.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+//! Automatic updates of a released Draftmux from the GitHub releases of
+//! raine/draftmux. A Developer ID signed `Draftmux.app`, or a Linux app tree
+//! from a release tarball, checks for a newer release once a day, installs
+//! it in the background by swapping the app in place and offers to restart
+//! into it. Development builds never check on their own; Check for Updates
+//! still reports a newer release to them. The toolbar offers a newer release
+//! with what changed in it.
 
 mod cache;
-#[cfg(target_os = "macos")]
 mod install;
 mod notes;
 mod release;
@@ -20,6 +17,7 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedSt
 use semver::Version;
 
 use crate::app_settings::AppSettings;
+use install::Installation;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `CFBundleIdentifier` in macos/Info.plist.
@@ -48,28 +46,30 @@ pub struct Release {
 /// Why this copy of Draftmux can't install updates itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ineligible {
-    /// Not a Developer ID signed `Draftmux.app`: built from source.
+    /// Not a Developer ID signed `Draftmux.app` or a Linux release tree:
+    /// built from source.
     Development,
-    /// The folder holding `Draftmux.app` isn't writable by this user.
+    /// The folder holding the app isn't writable by this user.
     Unwritable(String),
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    Unsupported,
 }
+
+/// The recipe that rebuilds and installs a development build.
+const INSTALL_RECIPE: &str = if cfg!(target_os = "macos") {
+    "just install-app"
+} else {
+    "just linux-install"
+};
 
 impl Ineligible {
     fn guidance(&self, version: &Version) -> String {
         match self {
             Self::Development => format!(
                 "Draftmux {version} is available. This is a development build: pull the \
-                 repository and run just install-app."
+                 repository and run {INSTALL_RECIPE}."
             ),
             Self::Unwritable(dir) => format!(
                 "Draftmux {version} is available, but Draftmux can't replace itself in {dir}. \
                  Download it from GitHub."
-            ),
-            Self::Unsupported => format!(
-                "Draftmux {version} is available. Download it from GitHub and run its install \
-                 script, or pull the repository and rebuild."
             ),
         }
     }
@@ -156,11 +156,8 @@ impl Updater {
         let previous = std::mem::replace(&mut self.status, Status::Checking);
         cx.notify();
         let task = cx.background_spawn(async move {
-            let eligibility = eligibility();
-            let built_here = matches!(
-                eligibility,
-                Err(Ineligible::Development | Ineligible::Unsupported)
-            );
+            let eligibility = install::installation();
+            let built_here = matches!(eligibility, Err(Ineligible::Development));
             if !manual && (built_here || !cache::check_due()) {
                 return Ok(None);
             }
@@ -213,7 +210,6 @@ impl Updater {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
     fn install(
         &mut self,
         release: Release,
@@ -232,7 +228,15 @@ impl Updater {
             let result = task.await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.status = Status::Ready(ready),
+                    Ok(()) => {
+                        // gpui would restart the binary the kernel now
+                        // reports as deleted; its path holds the new one.
+                        #[cfg(target_os = "linux")]
+                        if let Ok(exe) = crate::resources::exe() {
+                            cx.set_restart_path(exe);
+                        }
+                        this.status = Status::Ready(ready);
+                    }
                     Err(err) => {
                         this.status = Status::Idle;
                         if manual {
@@ -249,24 +253,6 @@ impl Updater {
         })
         .detach();
     }
-
-    #[cfg(not(target_os = "macos"))]
-    fn install(&mut self, _: Release, installation: Installation, _: bool, _: &mut Context<Self>) {
-        match installation {}
-    }
-}
-
-#[cfg(target_os = "macos")]
-use install::Installation;
-
-#[cfg(not(target_os = "macos"))]
-enum Installation {}
-
-fn eligibility() -> Result<Installation, Ineligible> {
-    #[cfg(target_os = "macos")]
-    return install::installation();
-    #[cfg(not(target_os = "macos"))]
-    Err(Ineligible::Unsupported)
 }
 
 /// Debug builds only: an offer of the next minor version, for looking at

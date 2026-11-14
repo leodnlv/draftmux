@@ -2,7 +2,8 @@
 # Builds a distributable Draftmux release on this Linux machine into
 # target/linux-release/VERSION: an optimized build of the relocatable app
 # tree as Draftmux-VERSION-linux-ARCH.tar.gz, plus its .sha256. Extracting
-# it and running draftmux-linux/install installs it for the current user.
+# it and running draftmux-linux/install installs it for the current user,
+# and the installed app then updates itself from later releases' tarballs.
 # Publishes nothing. The binary needs a glibc at least as new as the build
 # machine's.
 set -euo pipefail
@@ -21,7 +22,7 @@ rm -rf "$out"
 mkdir -p "$out"
 tree=$(mktemp -d)
 trap 'rm -rf "$tree"' EXIT
-"$root/scripts/assemble-linux-app" "$target/release/draftmux" "$tree" >/dev/null
+"$root/scripts/assemble-linux-app" "$target/release/draftmux" "$tree" "$version" >/dev/null
 name="Draftmux-$version-linux-$(uname -m)"
 tar -czf "$out/$name.tar.gz" -C "$tree" draftmux-linux
 (cd "$out" && sha256sum "$name.tar.gz" >"$name.sha256")

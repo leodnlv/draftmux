@@ -54,14 +54,25 @@ fn is_not_found(curl_error: &str) -> bool {
     curl_error.trim_end().ends_with("returned error: 404")
 }
 
-/// The macOS app archive of `version`, which the release must include with
-/// its checksum file.
+/// This platform's app archive of `version`, which the release must include
+/// with its checksum file: the macOS bundle, or the Linux tree for this
+/// architecture.
 pub fn archive_name(version: &Version) -> String {
-    format!("Draftmux-{version}-arm64-app.tar.gz")
+    format!("{}.tar.gz", asset_stem(version))
 }
 
 fn checksum_name(version: &Version) -> String {
-    format!("Draftmux-{version}-arm64-app.sha256")
+    format!("{}.sha256", asset_stem(version))
+}
+
+fn asset_stem(version: &Version) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Draftmux-{version}-arm64-app")
+    } else {
+        // Rust's names for the architectures match `uname -m`'s, which
+        // scripts/release-linux uses.
+        format!("Draftmux-{version}-linux-{}", std::env::consts::ARCH)
+    }
 }
 
 fn parse_release(release: GithubRelease) -> Result<Release> {
@@ -144,23 +155,52 @@ mod tests {
 
     #[test]
     fn release_names_its_app_archive_and_checksum() {
+        let version = Version::new(1, 2, 3);
+        let (archive, checksum) = (archive_name(&version), checksum_name(&version));
         let release = parse_release(github_release(
             "v1.2.3",
             &[
                 "Draftmux-1.2.3-arm64.dmg",
                 "Draftmux-1.2.3-arm64-app.tar.gz",
                 "Draftmux-1.2.3-arm64-app.sha256",
+                "Draftmux-1.2.3-linux-x86_64.tar.gz",
+                "Draftmux-1.2.3-linux-x86_64.sha256",
+                "Draftmux-1.2.3-linux-aarch64.tar.gz",
+                "Draftmux-1.2.3-linux-aarch64.sha256",
             ],
         ))
         .unwrap();
-        assert_eq!(release.version, Version::new(1, 2, 3));
+        assert_eq!(release.version, version);
         assert_eq!(
             release.archive_url,
-            "https://example.com/Draftmux-1.2.3-arm64-app.tar.gz"
+            format!("https://example.com/{archive}")
         );
         assert_eq!(
             release.checksum_url,
-            "https://example.com/Draftmux-1.2.3-arm64-app.sha256"
+            format!("https://example.com/{checksum}")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_takes_the_app_archive() {
+        assert_eq!(
+            archive_name(&Version::new(1, 2, 3)),
+            "Draftmux-1.2.3-arm64-app.tar.gz"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_takes_its_architecture_tarball() {
+        let name = archive_name(&Version::new(1, 2, 3));
+        assert!(
+            [
+                "Draftmux-1.2.3-linux-x86_64.tar.gz",
+                "Draftmux-1.2.3-linux-aarch64.tar.gz"
+            ]
+            .contains(&name.as_str()),
+            "{name}"
         );
     }
 
@@ -182,7 +222,7 @@ mod tests {
         let err = parse_release(github_release("v1.2.3", &["Draftmux-1.2.3-arm64.dmg"]))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Draftmux-1.2.3-arm64-app.tar.gz"), "{err}");
+        assert!(err.contains(&archive_name(&Version::new(1, 2, 3))), "{err}");
         assert!(parse_release(github_release("1.2.3", &[])).is_err());
         assert!(parse_release(github_release("vnext", &[])).is_err());
     }

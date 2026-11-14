@@ -59,8 +59,9 @@ Draftmux keeps itself up to date either way.
 ### Linux
 
 Runs on x86_64 and arm64 with glibc 2.35 or later, such as Ubuntu 22.04 or
-Debian 12 and newer. The script installs the app in `~/.local/lib/draftmux`.
-Shortcuts use Ctrl where macOS uses Cmd.
+Debian 12 and newer. The script installs the app in `~/.local/lib/draftmux`,
+and Draftmux keeps itself up to date there. Shortcuts use Ctrl where macOS
+uses Cmd.
 
 ### Agents
 

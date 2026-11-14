@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Draftmux on Linux keeps itself up to date like the macOS app. Once a day
+  it checks GitHub for a newer release, downloads the tarball for its
+  architecture, checks it against its checksum and that its binary runs on
+  your system, and replaces the app in `~/.local/lib/draftmux` in one step.
+  Restart to Update in the toolbar starts the new version. Settings has the
+  Updates section on Linux too, to turn the daily check off or check now.
+  Copies installed from 0.1.0 start updating once the install script has
+  installed a later release. Builds from source still only report a newer
+  release.
 - Switch a draft that continues no agent session, such as one opened with
   `draftmux <FILE>` or the sample draft, between Claude Code and pi from
   the agent name above the chat. The draft moves to a new conversation on

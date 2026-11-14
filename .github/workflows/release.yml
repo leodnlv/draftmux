@@ -1,10 +1,10 @@
 name: Release
 
-# A v* tag publishes a GitHub release of the signed, notarized macOS build,
-# which installed copies pick up through the app's automatic updates, and of
-# the x86_64 and arm64 Linux builds. Running
-# the workflow by hand builds, signs and notarizes the same files and keeps
-# them as workflow artifacts without publishing anything.
+# A v* tag publishes a GitHub release of the signed, notarized macOS build
+# and of the x86_64 and arm64 Linux builds, which installed copies pick up
+# through the app's automatic updates. Running the workflow by hand builds,
+# signs and notarizes the same files and keeps them as workflow artifacts
+# without publishing anything.
 on:
   push:
     tags: ['v*']

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Assemble a relocatable Linux app tree from an already-built binary.
+# Assemble a relocatable Linux app tree from an already-built binary. With
+# RELEASE_VERSION, the tree is marked as that release's, which installed
+# copies of it update themselves from.
 set -euo pipefail
-if [[ $# -ne 2 || ! -f $1 || ! -d $2 ]]; then
-  echo "usage: assemble-linux-app BINARY OUTPUT_DIR" >&2
+if [[ $# -lt 2 || $# -gt 3 || ! -f $1 || ! -d $2 ]]; then
+  echo "usage: assemble-linux-app BINARY OUTPUT_DIR [RELEASE_VERSION]" >&2
   exit 2
 fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,4 +21,5 @@ install -m644 "$root/linux/fi.zendit.Draftmux.desktop" "$app/share/applications/
 install -m644 "$root/macos/app-icon.png" "$app/share/icons/hicolor/1024x1024/apps/fi.zendit.Draftmux.png"
 install -m755 "$root/scripts/install-linux-app" "$app/install"
 printf 'draftmux\n' > "$app/.draftmux-bundle"
+if [[ $# -eq 3 ]]; then printf '%s\n' "$3" > "$app/.draftmux-release"; fi
 printf '%s\n' "$app"

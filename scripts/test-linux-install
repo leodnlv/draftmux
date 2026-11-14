@@ -6,12 +6,19 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/out" "$tmp/home"
 printf '#!/bin/sh\necho stub\n' > "$tmp/binary"
 app=$("$root/scripts/assemble-linux-app" "$tmp/binary" "$tmp/out")
+[[ ! -e $app/.draftmux-release ]]
+mkdir "$tmp/release"
+release=$("$root/scripts/assemble-linux-app" "$tmp/binary" "$tmp/release" 1.2.3)
+[[ $(cat "$release/.draftmux-release") == 1.2.3 ]]
 export HOME="$tmp/home" DRAFTMUX_INSTALL_PREFIX="$tmp/local space" XDG_DATA_HOME="$tmp/data"
 "$app/install" >/dev/null
 [[ $("$DRAFTMUX_INSTALL_PREFIX/bin/draftmux") == stub ]]
 cmp "$root/pi-extension/draftmux.ts" "$DRAFTMUX_INSTALL_PREFIX/lib/draftmux/share/draftmux/pi-extension/draftmux.ts"
 grep -Fx "Exec=\"$DRAFTMUX_INSTALL_PREFIX/lib/draftmux/bin/draftmux\" app" "$XDG_DATA_HOME/applications/fi.zendit.Draftmux.desktop"
+"$release/install" >/dev/null
+[[ $(cat "$DRAFTMUX_INSTALL_PREFIX/lib/draftmux/.draftmux-release") == 1.2.3 ]]
 "$app/install" >/dev/null
+[[ ! -e $DRAFTMUX_INSTALL_PREFIX/lib/draftmux/.draftmux-release ]]
 rm "$DRAFTMUX_INSTALL_PREFIX/bin/draftmux"
 printf 'unrelated\n' > "$DRAFTMUX_INSTALL_PREFIX/bin/draftmux"
 if "$app/install" >/dev/null 2>&1; then echo 'replaced unrelated command' >&2; exit 1; fi

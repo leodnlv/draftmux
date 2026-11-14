@@ -141,82 +141,85 @@ fn run_app() -> Result<()> {
     let config_dir = draftmux_storage::prepare_config_dir()?;
     let store = Store::open_default()?;
 
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            theme::init(cx);
-            shell_env::init(cx);
-            profiles::init(data_dir, &config_dir, cx);
-            app_settings::init(config_dir, cx);
-            editor::init(cx);
-            markup_view::init(cx);
-            selectable::init(cx);
-            format::init(cx);
-            copy::init(cx);
-            chat::init(cx);
-            model_picker::init(cx);
-            menu::init(cx);
-            chrome::init(cx);
-            selection_popover::init(cx);
-            settings_window::init(cx);
-            update::init(cx);
-            cx.bind_keys([KeyBinding::new(editor::secondary!("q"), Quit, None)]);
-            cx.set_menus([
-                Menu::new("Draftmux").items([
-                    MenuItem::action("Check for Updates…", update::CheckForUpdates),
-                    MenuItem::action("Settings…", settings_window::OpenSettings),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Draftmux", Quit),
-                ]),
-                Menu::new("Edit").items([
-                    MenuItem::action("Undo", editor::Undo),
-                    MenuItem::action("Redo", editor::Redo),
-                ]),
-                Menu::new("View").items([
-                    MenuItem::action("Actual Size", chrome::ResetZoom),
-                    MenuItem::action("Zoom In", chrome::ZoomIn),
-                    MenuItem::action("Zoom Out", chrome::ZoomOut),
-                ]),
-            ]);
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    // Linux restarts by running the binary again, which needs the command
+    // that starts the app; macOS reopens the bundle.
+    #[cfg(target_os = "linux")]
+    let application = application.with_restart_arguments(vec!["app".into()]);
+    application.run(move |cx: &mut App| {
+        theme::init(cx);
+        shell_env::init(cx);
+        profiles::init(data_dir, &config_dir, cx);
+        app_settings::init(config_dir, cx);
+        editor::init(cx);
+        markup_view::init(cx);
+        selectable::init(cx);
+        format::init(cx);
+        copy::init(cx);
+        chat::init(cx);
+        model_picker::init(cx);
+        menu::init(cx);
+        chrome::init(cx);
+        selection_popover::init(cx);
+        settings_window::init(cx);
+        update::init(cx);
+        cx.bind_keys([KeyBinding::new(editor::secondary!("q"), Quit, None)]);
+        cx.set_menus([
+            Menu::new("Draftmux").items([
+                MenuItem::action("Check for Updates…", update::CheckForUpdates),
+                MenuItem::action("Settings…", settings_window::OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit Draftmux", Quit),
+            ]),
+            Menu::new("Edit").items([
+                MenuItem::action("Undo", editor::Undo),
+                MenuItem::action("Redo", editor::Redo),
+            ]),
+            Menu::new("View").items([
+                MenuItem::action("Actual Size", chrome::ResetZoom),
+                MenuItem::action("Zoom In", chrome::ZoomIn),
+                MenuItem::action("Zoom Out", chrome::ZoomOut),
+            ]),
+        ]);
 
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
-                window_min_size: Some(size(px(900.), px(500.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::new_static("Draftmux")),
-                    appears_transparent: true,
-                    traffic_light_position: Some(chrome::TRAFFIC_LIGHT_POSITION),
-                }),
-                window_background: WindowBackgroundAppearance::Blurred,
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            };
-            let window = cx
-                .open_window(platform::window_options(options), |window, cx| {
-                    cx.new(|cx| chrome::Chrome::new(store, window, cx))
-                })
-                .expect("failed to open the main window");
-            // Closing the main window ends the app; Settings is secondary.
-            let main_id = window.window_id();
-            cx.on_window_closed(move |cx, closed| {
-                if closed == main_id {
-                    cx.quit();
-                }
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
+            window_min_size: Some(size(px(900.), px(500.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(SharedString::new_static("Draftmux")),
+                appears_transparent: true,
+                traffic_light_position: Some(chrome::TRAFFIC_LIGHT_POSITION),
+            }),
+            window_background: WindowBackgroundAppearance::Blurred,
+            app_owns_titlebar_drag: true,
+            ..Default::default()
+        };
+        let window = cx
+            .open_window(platform::window_options(options), |window, cx| {
+                cx.new(|cx| chrome::Chrome::new(store, window, cx))
             })
-            .detach();
-            // Quit from another window, such as Settings, saves the draft
-            // first and stays open if that fails, as the main window's own
-            // Quit handler does.
-            cx.on_action(move |_: &Quit, cx| {
-                let saved = window
-                    .update(cx, |chrome, _, cx| chrome.flush_before_exit(cx))
-                    .unwrap_or(true);
-                if saved {
-                    cx.quit();
-                }
-            });
-            server.serve(window, cx);
-            cx.activate(true);
+            .expect("failed to open the main window");
+        // Closing the main window ends the app; Settings is secondary.
+        let main_id = window.window_id();
+        cx.on_window_closed(move |cx, closed| {
+            if closed == main_id {
+                cx.quit();
+            }
+        })
+        .detach();
+        // Quit from another window, such as Settings, saves the draft
+        // first and stays open if that fails, as the main window's own
+        // Quit handler does.
+        cx.on_action(move |_: &Quit, cx| {
+            let saved = window
+                .update(cx, |chrome, _, cx| chrome.flush_before_exit(cx))
+                .unwrap_or(true);
+            if saved {
+                cx.quit();
+            }
         });
+        server.serve(window, cx);
+        cx.activate(true);
+    });
     Ok(())
 }

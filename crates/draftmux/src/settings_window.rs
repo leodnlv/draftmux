@@ -1843,48 +1843,44 @@ impl SettingsWindow {
             ))
             .into_any_element(),
         ];
-        if cfg!(target_os = "macos") {
-            page.extend([
-                group_title(c, "Updates").into_any_element(),
-                group(
-                    c,
-                    vec![
-                        row(
-                            "Check for updates automatically",
-                            vec![description(
-                                c,
-                                "Once a day, from GitHub. A new version installs in the background \
-                             and runs when you restart Draftmux",
-                            )],
-                            switch(
-                                c,
-                                "check-for-updates",
-                                check_updates,
-                                false,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.update(
-                                        |settings| {
-                                            settings.check_for_updates = Some(!check_updates)
-                                        },
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        )
-                        .into_any_element(),
-                        row(
-                            format!("Draftmux {}", crate::update::CURRENT_VERSION),
-                            Vec::new(),
-                            push_button(c, "check-now", "Check Now", |_, window, cx| {
-                                window.dispatch_action(Box::new(crate::update::CheckForUpdates), cx)
+        page.extend([
+            group_title(c, "Updates").into_any_element(),
+            group(
+                c,
+                vec![
+                    row(
+                        "Check for updates automatically",
+                        vec![description(
+                            c,
+                            "Once a day, from GitHub. A new version installs in the background \
+                         and runs when you restart Draftmux",
+                        )],
+                        switch(
+                            c,
+                            "check-for-updates",
+                            check_updates,
+                            false,
+                            cx.listener(move |this, _, _, cx| {
+                                this.update(
+                                    |settings| settings.check_for_updates = Some(!check_updates),
+                                    cx,
+                                )
                             }),
-                        )
-                        .into_any_element(),
-                    ],
-                )
-                .into_any_element(),
-            ]);
-        }
+                        ),
+                    )
+                    .into_any_element(),
+                    row(
+                        format!("Draftmux {}", crate::update::CURRENT_VERSION),
+                        Vec::new(),
+                        push_button(c, "check-now", "Check Now", |_, window, cx| {
+                            window.dispatch_action(Box::new(crate::update::CheckForUpdates), cx)
+                        }),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+        ]);
         page.extend([
             group_title(c, "Files").into_any_element(),
             group(

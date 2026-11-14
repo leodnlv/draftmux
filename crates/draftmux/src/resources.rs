@@ -4,15 +4,27 @@
 //! back to build-machine resources.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 
+/// In the root of a Linux app tree, which the install script requires.
+pub const LINUX_MARKER: &str = ".draftmux-bundle";
+
 /// The running binary with symlinks resolved, so a `draftmux` on `PATH` that
-/// links into a bundle is seen as bundled.
+/// links into a bundle is seen as bundled. Resolved once: after an update
+/// replaces the Linux tree, the kernel reports the running binary as
+/// deleted, while its path holds the new version's files.
 pub fn exe() -> Result<PathBuf> {
-    std::env::current_exe()
-        .and_then(|exe| exe.canonicalize())
-        .context("locating the draftmux binary")
+    static EXE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    EXE.get_or_init(|| {
+        std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(|err| err.to_string())
+    })
+    .clone()
+    .map_err(anyhow::Error::msg)
+    .context("locating the draftmux binary")
 }
 
 /// The `.app` directory holding `exe`, if it is `<name>.app/Contents/MacOS/<exe>`.
@@ -47,12 +59,16 @@ fn pi_extension_for(exe: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The marker distinguishes an installed tree from a development binary.
-fn linux_layout(exe: &Path) -> Option<PathBuf> {
+/// The Linux app tree holding `exe`, if it is `<root>/bin/<exe>`. The marker
+/// distinguishes an installed tree from a development binary.
+pub fn linux_root(exe: &Path) -> Option<&Path> {
     let bin = exe.parent()?;
     let root = bin.parent()?;
-    (bin.file_name()? == "bin" && root.join(".draftmux-bundle").is_file())
-        .then(|| root.join("share/draftmux"))
+    (bin.file_name()? == "bin" && root.join(LINUX_MARKER).is_file()).then_some(root)
+}
+
+fn linux_layout(exe: &Path) -> Option<PathBuf> {
+    linux_root(exe).map(|root| root.join("share/draftmux"))
 }
 
 #[cfg(test)]
@@ -89,7 +105,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app = tmp.path().join("app with spaces");
         fs::create_dir_all(app.join("bin")).unwrap();
-        fs::write(app.join(".draftmux-bundle"), "draftmux\n").unwrap();
+        fs::write(app.join(LINUX_MARKER), "draftmux\n").unwrap();
         let exe = app.join("bin/draftmux");
         assert!(pi_extension_for(&exe).is_err());
         let ext = app.join("share/draftmux/pi-extension/draftmux.ts");
