@@ -13,6 +13,32 @@ use crate::session::{DraftSession, Start};
 const ENV_ALLOWLIST: &[&str] = &[
     "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM",
 ];
+/// What Windows programs need on top: Node's runtime, the user's folders
+/// and the temporary directory. Names there are case-insensitive.
+#[cfg(windows)]
+const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "CommonProgramFiles",
+    "TEMP",
+    "TMP",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+];
 
 /// The oldest Claude Code whose protocol this crate was checked against.
 const MIN_VERSION: [u32; 3] = [2, 1, 293];
@@ -56,11 +82,23 @@ fn supported(output: &str) -> Result<String, String> {
     }
 }
 
-/// The `HOME` a `claude` process gets: the first one in `vars`, else this
-/// process's.
-pub(crate) fn home<'a>(mut vars: impl Iterator<Item = &'a (OsString, OsString)>) -> PathBuf {
-    vars.find(|(key, _)| key == "HOME")
-        .map(|(_, home)| PathBuf::from(home))
+/// The home directory a `claude` process gets, found as Node's
+/// `os.homedir()` finds it: the first `HOME` in `vars`, else on Windows the
+/// first `USERPROFILE`, else this process's.
+pub(crate) fn home<'a>(vars: impl Iterator<Item = &'a (OsString, OsString)> + Clone) -> PathBuf {
+    let find = |name| {
+        vars.clone()
+            .find(|(key, _)| is_var(key, name))
+            .map(|(_, home)| PathBuf::from(home))
+    };
+    find("HOME")
+        .or_else(|| {
+            if cfg!(windows) {
+                find("USERPROFILE")
+            } else {
+                None
+            }
+        })
         .or_else(std::env::home_dir)
         .unwrap_or_default()
 }
@@ -68,9 +106,22 @@ pub(crate) fn home<'a>(mut vars: impl Iterator<Item = &'a (OsString, OsString)>)
 /// The variables of `env` a `claude` process gets.
 fn allowed(env: &[(OsString, OsString)]) -> impl Iterator<Item = &(OsString, OsString)> {
     env.iter().filter(|(key, _)| {
-        let name = key.to_string_lossy();
-        ENV_ALLOWLIST.contains(&name.as_ref()) || name.starts_with("LC_")
+        #[cfg(windows)]
+        if WINDOWS_ENV_ALLOWLIST.iter().any(|name| is_var(key, name)) {
+            return true;
+        }
+        ENV_ALLOWLIST.iter().any(|name| is_var(key, name))
+            || key.to_string_lossy().starts_with("LC_")
     })
+}
+
+/// Whether `key` names the variable `name`, ignoring case on Windows.
+fn is_var(key: &OsString, name: &str) -> bool {
+    if cfg!(windows) {
+        key.eq_ignore_ascii_case(name)
+    } else {
+        key == name
+    }
 }
 
 /// Everything needed to start a draft's `claude` process.

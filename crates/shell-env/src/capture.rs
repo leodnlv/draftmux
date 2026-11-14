@@ -9,12 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
-pub(crate) type Vars = Vec<(OsString, OsString)>;
-
-/// The value of the first variable named `name`.
-pub(crate) fn get<'a>(vars: &'a Vars, name: &str) -> Option<&'a OsString> {
-    vars.iter().find(|(k, _)| k == name).map(|(_, v)| v)
-}
+use crate::{Vars, get};
 
 /// Variables that describe the capturing shell itself rather than the
 /// user's configuration.

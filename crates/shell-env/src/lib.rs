@@ -5,12 +5,15 @@
 //! keys. [`init`] captures the login shell's environment once at startup and
 //! resolves `pi` and `claude` against it. Commands are spawned through
 //! [`ShellEnv::command`] so they see that environment.
+//!
+//! Windows apps already inherit the user's environment from Explorer, so
+//! there the app's own environment is the snapshot.
 
+#[cfg(unix)]
 mod capture;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -20,7 +23,37 @@ use futures::FutureExt;
 use futures::future::Shared;
 use gpui::{App, Global, Task};
 
-use capture::{CaptureOptions, Vars};
+#[cfg(unix)]
+use capture::CaptureOptions;
+
+pub(crate) type Vars = Vec<(OsString, OsString)>;
+
+/// The value of the first variable named `name`, ignoring case on Windows,
+/// where variable names are case-insensitive.
+pub(crate) fn get<'a>(vars: &'a Vars, name: &str) -> Option<&'a OsString> {
+    vars.iter()
+        .find(|(k, _)| {
+            if cfg!(windows) {
+                k.eq_ignore_ascii_case(name)
+            } else {
+                k == name
+            }
+        })
+        .map(|(_, v)| v)
+}
+
+/// The file names `pi` and `claude` are found under. On Windows, pi's
+/// installers provide `pi.exe` or npm's `pi.cmd`; Claude Code needs its
+/// native `claude.exe`, since multi-line arguments can't be passed to a
+/// `.cmd` script.
+#[cfg(unix)]
+const PI: &[&str] = &["pi"];
+#[cfg(unix)]
+const CLAUDE: &[&str] = &["claude"];
+#[cfg(windows)]
+const PI: &[&str] = &["pi.exe", "pi.cmd"];
+#[cfg(windows)]
+const CLAUDE: &[&str] = &["claude.exe"];
 
 /// A snapshot of the login shell's environment and the tools found in its
 /// `PATH`. It doesn't change while the app runs.
@@ -43,6 +76,13 @@ pub struct Missing {
 impl fmt::Display for Missing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let tool = self.tool;
+        if cfg!(windows) {
+            return write!(
+                f,
+                "{tool} wasn't found on your PATH. Install {tool} or add its directory to \
+                 PATH, then restart Draftmux."
+            );
+        }
         write!(
             f,
             "{tool} wasn't found on your login shell's PATH. Install {tool} or add its \
@@ -61,9 +101,13 @@ impl ShellEnv {
     /// Captures the login shell's environment now, blocking for up to the
     /// capture timeout. The app uses [`init`] instead.
     pub fn capture() -> Self {
-        Self::capture_with(&CaptureOptions::from_process())
+        #[cfg(unix)]
+        return Self::capture_with(&CaptureOptions::from_process());
+        #[cfg(windows)]
+        return Self::new(std::env::vars_os().collect(), None);
     }
 
+    #[cfg(unix)]
     fn capture_with(options: &CaptureOptions) -> Self {
         let (vars, capture_error) = match capture::capture(options) {
             Ok(vars) => (vars, None),
@@ -73,10 +117,10 @@ impl ShellEnv {
     }
 
     fn new(vars: Vars, capture_error: Option<String>) -> Self {
-        let path = capture::get(&vars, "PATH").map(OsString::as_os_str);
+        let path = get(&vars, "PATH").map(OsString::as_os_str);
         Self {
-            pi: find_executable("pi", path),
-            claude: find_executable("claude", path),
+            pi: find_executable(PI, path),
+            claude: find_executable(CLAUDE, path),
             vars,
             capture_error,
         }
@@ -184,18 +228,57 @@ fn log_summary(env: &ShellEnv, started: Instant) {
     );
 }
 
-/// The first executable file named `name` in the absolute directories of
-/// `path`. Symlinks are kept unresolved so tool upgrades are followed.
-fn find_executable(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// The first executable file with one of `names` in the absolute directories
+/// of `path`, trying every name in a directory before the next. Symlinks are
+/// kept unresolved so tool upgrades are followed.
+fn find_executable(names: &[&str], path: Option<&OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| {
-            candidate
-                .metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.metadata().is_ok_and(|m| is_executable(&m)))
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Windows runs a file by its extension, which the names carry.
+#[cfg(windows)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file()
+}
+
+#[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn variables_are_found_whatever_their_case() {
+        let vars: Vars = vec![("Path".into(), "C:\\bin".into())];
+        assert_eq!(get(&vars, "PATH"), Some(&"C:\\bin".into()));
+    }
+
+    #[test]
+    fn tools_need_a_runnable_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let (npm, native) = (dir.path().join("npm"), dir.path().join("native"));
+        std::fs::create_dir(&npm).unwrap();
+        std::fs::create_dir(&native).unwrap();
+        // npm installs a shell script beside the cmd shim.
+        std::fs::write(npm.join("pi"), "").unwrap();
+        std::fs::write(npm.join("pi.cmd"), "").unwrap();
+        std::fs::write(npm.join("claude.cmd"), "").unwrap();
+        std::fs::write(native.join("claude.exe"), "").unwrap();
+        let path = std::env::join_paths([&npm, &native]).unwrap();
+        assert_eq!(find_executable(PI, Some(&path)), Some(npm.join("pi.cmd")));
+        assert_eq!(
+            find_executable(CLAUDE, Some(&path)),
+            Some(native.join("claude.exe"))
+        );
+    }
+}

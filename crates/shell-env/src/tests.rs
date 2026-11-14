@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::capture::{fallback_env, get, parse_env};
+use crate::capture::{fallback_env, parse_env};
 
 /// Writes through a child process so this process never has the script
 /// open for writing: a shell another test forks meanwhile would inherit that
@@ -90,16 +90,22 @@ fn find_executable_takes_first_absolute_executable_file() {
     std::os::unix::fs::symlink(second.join("pi"), link_dir.join("pi")).unwrap();
 
     let path = std::env::join_paths([&not_exec, &is_dir, &first, &second]).unwrap();
-    assert_eq!(find_executable("pi", Some(&path)), Some(first.join("pi")));
+    assert_eq!(
+        find_executable(&["pi"], Some(&path)),
+        Some(first.join("pi"))
+    );
     let path = std::env::join_paths([&link_dir, &first]).unwrap();
     assert_eq!(
-        find_executable("pi", Some(&path)),
+        find_executable(&["pi"], Some(&path)),
         Some(link_dir.join("pi"))
     );
     // Relative entries would resolve against whatever the cwd is.
     let path = OsString::from(format!("c:{}", second.display()));
-    assert_eq!(find_executable("pi", Some(&path)), Some(second.join("pi")));
-    assert_eq!(find_executable("pi", None), None);
+    assert_eq!(
+        find_executable(&["pi"], Some(&path)),
+        Some(second.join("pi"))
+    );
+    assert_eq!(find_executable(&["pi"], None), None);
 }
 
 #[test]
