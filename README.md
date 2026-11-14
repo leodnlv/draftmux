@@ -1,9 +1,9 @@
 # Draftmux
 
-Polish the messages your coding agent writes before they go out.
+Polish the text your coding agent writes before it goes out.
 
-Your agent knows the context, so it's the right one to write the PR description,
-the issue or the Slack update. But polishing that message inside an agent
+Your agent knows the context, so it should be the one writing the PR description,
+the issue or the Slack update. But refining that message inside an agent
 harness sucks.
 
 Draftmux is an editor built for iterating on a message with an agent. Hand the
