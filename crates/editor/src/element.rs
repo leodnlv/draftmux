@@ -297,8 +297,13 @@ impl Element for EditorElement {
         let max_scroll = (layout.content_height - bounds.size.height).max(Pixels::ZERO);
         let selection = editor.buffer.selection();
         let mut scroll_y = editor.scroll_y;
-        let marked = editor.marked.clone().filter(|_| editor.reveal_marked);
-        if let Some(marked) = marked {
+        let len = editor.buffer.len();
+        let shown = editor
+            .reveal
+            .clone()
+            .or_else(|| editor.marked.clone().filter(|_| editor.reveal_marked))
+            .filter(|range| range.end <= len);
+        if let Some(marked) = shown {
             let start = layout.caret_bounds(marked.start, Affinity::Downstream);
             let end = layout.caret_bounds(marked.end, Affinity::Upstream);
             let top = start.origin.y + style.padding_top;
@@ -328,6 +333,7 @@ impl Element for EditorElement {
             editor.scroll_y = scroll_y;
             editor.autoscroll = false;
             editor.reveal_marked = false;
+            editor.reveal = None;
             editor.layout = Some(layout.clone());
         });
         layout

@@ -12,6 +12,7 @@ mod copy;
 mod diagnostics;
 mod drafts;
 mod edit;
+mod edit_changes;
 mod file_watch;
 mod focus;
 mod fold;

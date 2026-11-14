@@ -317,6 +317,8 @@ pub struct Editor {
     pub(crate) marked: Option<Range<usize>>,
     /// Set when the mark changed, so the next layout scrolls it into view.
     pub(crate) reveal_marked: bool,
+    /// Text the next layout scrolls into view.
+    pub(crate) reveal: Option<Range<usize>>,
 }
 
 /// Text pointed out by a tint that fades away.
@@ -381,6 +383,7 @@ impl Editor {
             flash: None,
             marked: None,
             reveal_marked: false,
+            reveal: None,
         }
     }
 
@@ -551,6 +554,13 @@ impl Editor {
             started: Instant::now(),
             revision: self.buffer.revision(),
         });
+        cx.notify();
+    }
+
+    /// Scrolls `range` into view on the next layout, leaving the selection
+    /// where it is.
+    pub fn reveal(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.reveal = Some(range);
         cx.notify();
     }
 

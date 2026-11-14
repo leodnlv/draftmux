@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use draftmux_agent::quote::{self, Quote};
-use draftmux_agent::transcript::{self, DiffLine, Item, Retry, Target, Tool, Transcript};
+use draftmux_agent::transcript::{self, Item, Retry, Target, Tool, Transcript};
 use draftmux_agent::{Agent, Event, Events, History, Prompted, ToolKind};
 use draftmux_claude_rpc::{ClaudeAgent, DraftContext, DraftSession, Record};
 use draftmux_pi_rpc::{LaunchSpec, PiAgent};
@@ -52,6 +52,7 @@ use crate::assets::{
 use crate::bounce::{Bounce, ListBounce};
 use crate::chat_model::{self, ChatModel};
 use crate::chrome::shadow;
+use crate::edit_changes::{self, EditChange, EditHunk};
 use crate::markup_view::{self, MarkupStyle, SelectBody};
 use crate::profiles::ProfileCatalog;
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
@@ -159,6 +160,8 @@ pub struct Chat {
     style: MarkupStyle,
     /// The text zoom `style` was made for.
     style_zoom: f32,
+    /// The changes of each finished edit, by tool call id.
+    edit_hunks: RefCell<HashMap<String, Rc<Vec<EditHunk>>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -299,7 +302,21 @@ impl Chat {
             send_state: Cell::new((SendState::Disabled, SendState::Disabled)),
             style: message_style(theme::get(cx)),
             style_zoom: theme::get(cx).zoom,
+            edit_hunks: RefCell::default(),
         }
+    }
+
+    /// The changes a finished edit made, worked out once per edit.
+    fn edit_hunks(&self, tool: &Tool) -> Option<Rc<Vec<EditHunk>>> {
+        if !matches!(tool.kind, ToolKind::Edit { .. }) || tool.running() || tool.is_error() {
+            return None;
+        }
+        let patch = tool.patch.as_deref()?;
+        let mut cache = self.edit_hunks.borrow_mut();
+        let hunks = cache
+            .entry(tool.id.clone())
+            .or_insert_with(|| Rc::new(edit_changes::edit_hunks(patch)));
+        Some(hunks.clone())
     }
 
     fn session(&self) -> Option<&Session> {
@@ -1192,7 +1209,11 @@ impl Chat {
                 .when_some(finish, |icon, delta| icon.opacity(delta))
                 .into_any_element()
         };
-        let stats = tool.stats.filter(|_| !running);
+        let hunks = self.edit_hunks(tool);
+        let stats = tool.stats.filter(|_| !running && hunks.is_none());
+        let change_count = hunks
+            .as_ref()
+            .map(|hunks| hunks.iter().map(|hunk| hunk.changes.len()).sum::<usize>());
         let row = div()
             .id(("tool", index))
             .group("tool-row")
@@ -1262,6 +1283,15 @@ impl Chat {
                                 ))
                             })
                     })
+                    .when_some(change_count, |meta, count| {
+                        meta.child(div().text_size(px(11.)).text_color(palette.faint).child(
+                            match count {
+                                0 => "rewrapped".to_owned(),
+                                1 => "1 change".to_owned(),
+                                n => format!("{n} changes"),
+                            },
+                        ))
+                    })
                     .when_some(tool.duration(), |meta, duration| {
                         meta.child(
                             div()
@@ -1293,6 +1323,18 @@ impl Chat {
                         }
                     }),
             );
+        // Where each hunk's edited text is in the draft, if it still is.
+        let draft = self.draft_editor.clone();
+        let found: Vec<Option<usize>> = match &hunks {
+            Some(hunks) if tool.expanded => {
+                let text = draft.read(cx).text();
+                hunks
+                    .iter()
+                    .map(|hunk| text.find(hunk.text.trim_end_matches('\n')))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         div()
             .flex()
             .flex_col()
@@ -1301,7 +1343,10 @@ impl Chat {
                 ("tool-fold", index),
                 tool.expanded,
                 false,
-                || tool_body(tool, index, palette).into_any_element(),
+                || match hunks {
+                    Some(hunks) => changes_body(&hunks, &found, draft, index, palette),
+                    None => tool_body(tool, index, palette).into_any_element(),
+                },
                 window,
                 cx,
             ))
@@ -2140,52 +2185,20 @@ fn format_duration(duration: Duration) -> String {
 
 /// The expanded row: output keeps its whitespace and scrolls sideways.
 fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
-    let lines: Vec<AnyElement> = match tool.diff() {
-        Some(diff) => diff
-            .into_iter()
-            .map(|line| {
-                let (sign, text, color, background) = match line {
-                    DiffLine::Context(text) => (" ", text, palette.tool_text, None),
-                    DiffLine::Removed(text) => {
-                        ("-", text, palette.diff_removed, Some(palette.removed_bg))
-                    }
-                    DiffLine::Added(text) => {
-                        ("+", text, palette.diff_added, Some(palette.added_bg))
-                    }
-                };
-                div()
-                    .flex()
-                    .min_w_full()
-                    .pr(px(10.))
-                    .text_color(color)
-                    .when_some(background, |line, bg| line.bg(bg))
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .flex_none()
-                            .text_center()
-                            .text_color(palette.faint)
-                            .child(sign),
-                    )
-                    .child(div().whitespace_nowrap().child(blank_as_space(text)))
-                    .into_any_element()
-            })
-            .collect(),
-        None => tool
-            .body()
-            .into_iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let command = matches!(tool.kind, ToolKind::Bash { .. }) && i == 0;
-                div()
-                    .px(px(10.))
-                    .whitespace_nowrap()
-                    .when(command, |line| line.text_color(palette.faint).mb(px(4.)))
-                    .child(blank_as_space(line))
-                    .into_any_element()
-            })
-            .collect(),
-    };
+    let lines: Vec<AnyElement> = tool
+        .body()
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let command = matches!(tool.kind, ToolKind::Bash { .. }) && i == 0;
+            div()
+                .px(px(10.))
+                .whitespace_nowrap()
+                .when(command, |line| line.text_color(palette.faint).mb(px(4.)))
+                .child(blank_as_space(line))
+                .into_any_element()
+        })
+        .collect();
     div()
         .id(("tool-body", index))
         .ml(px(24.))
@@ -2200,6 +2213,134 @@ fn tool_body(tool: &Tool, index: usize, palette: &Palette) -> impl IntoElement {
         .line_height(px(17.))
         .text_color(palette.tool_text)
         .child(div().flex().flex_col().min_w_full().children(lines))
+}
+
+/// An expanded edit row: each change with a few words around it. Clicking
+/// one shows it in the draft, when the draft still has the edited text.
+fn changes_body(
+    hunks: &[EditHunk],
+    found: &[Option<usize>],
+    draft: Entity<Editor>,
+    index: usize,
+    palette: &Palette,
+) -> AnyElement {
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for (h, hunk) in hunks.iter().enumerate() {
+        let at = found.get(h).copied().flatten();
+        for change in &hunk.changes {
+            let number = rows.len() + 1;
+            let row = div()
+                .id(("tool-change", rows.len()))
+                .flex()
+                .gap(px(8.))
+                .py(px(6.))
+                .pl(px(10.))
+                .pr(px(12.))
+                .when(number > 1, |row| {
+                    row.border_t_1().border_color(palette.hairline)
+                })
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(palette.faint)
+                        .child(number.to_string()),
+                )
+                .child(div().min_w_0().child(change_text(change, palette)));
+            let row = match at {
+                Some(at) => {
+                    let target = at + change.target.start..at + change.target.end;
+                    let draft = draft.clone();
+                    row.hover(|style| style.bg(palette.hover))
+                        .active(|style| style.opacity(0.8))
+                        .tooltip(crate::tooltip::text("Show in draft"))
+                        .on_click(move |_, _, cx| {
+                            draft.update(cx, |editor, cx| {
+                                editor.reveal(target.clone(), cx);
+                                editor.flash(vec![target.clone()], cx);
+                            });
+                        })
+                        .into_any_element()
+                }
+                None => row.into_any_element(),
+            };
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        rows.push(
+            div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(palette.faint)
+                .child("Only line breaks changed")
+                .into_any_element(),
+        );
+    }
+    div()
+        .id(("tool-body", index))
+        .ml(px(24.))
+        .my(px(4.))
+        .py(px(2.))
+        .max_h(px(200.))
+        .overflow_y_scroll()
+        .rounded(px(7.))
+        .bg(palette.tool_body)
+        .text_size(px(12.5))
+        .line_height(px(19.))
+        .text_color(palette.muted)
+        .children(rows)
+        .into_any_element()
+}
+
+/// A change with its context: removed text struck through, added text
+/// tinted, and an arrow between them when there are both.
+fn change_text(change: &EditChange, palette: &Palette) -> StyledText {
+    let mut text = change.before.clone();
+    let mut highlights = Vec::new();
+    let mut push = |text: &mut String, part: &str, style: HighlightStyle| {
+        let start = text.len();
+        text.push_str(part);
+        highlights.push((start..text.len(), style));
+    };
+    if !change.removed.is_empty() {
+        push(
+            &mut text,
+            &change.removed,
+            HighlightStyle {
+                color: Some(palette.diff_removed),
+                strikethrough: Some(gpui::StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(palette.removed.opacity(0.55)),
+                }),
+                ..Default::default()
+            },
+        );
+    }
+    if !change.removed.is_empty() && !change.added.is_empty() {
+        push(
+            &mut text,
+            " → ",
+            HighlightStyle {
+                color: Some(palette.faint),
+                ..Default::default()
+            },
+        );
+    }
+    if !change.added.is_empty() {
+        push(
+            &mut text,
+            &change.added,
+            HighlightStyle {
+                color: Some(palette.diff_added),
+                background_color: Some(palette.added_bg),
+                ..Default::default()
+            },
+        );
+    }
+    text.push_str(&change.after);
+    StyledText::new(text).with_highlights(highlights)
 }
 
 /// Empty lines would collapse to no height.
