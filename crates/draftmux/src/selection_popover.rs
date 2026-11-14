@@ -125,6 +125,14 @@ pub enum SelectionPopoverEvent {
     /// The text the user wrote in the comment field about the editor's
     /// selections: send it to the chat's agent with them quoted.
     Comment(String),
+    /// The user replaced the selection with an option from the draft's
+    /// agent: the draft read `before`, now reads `text`, and the option
+    /// came from the action named `prompt`.
+    OptionApplied {
+        before: String,
+        text: String,
+        prompt: SharedString,
+    },
 }
 
 impl EventEmitter<SelectionPopoverEvent> for SelectionPopover {}
@@ -156,6 +164,9 @@ pub struct SelectionPopover {
     /// The panel is being opened; it is set once it has.
     opening: bool,
     main_bounds: Option<Bounds<Pixels>>,
+    /// The name of the action that was run last, which the edit history
+    /// shows for an option applied from it.
+    action_name: SharedString,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -323,6 +334,7 @@ impl SelectionPopover {
             reconcile_scheduled: false,
             opening: false,
             main_bounds: Some(window.bounds()),
+            action_name: SharedString::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -680,6 +692,7 @@ impl SelectionPopover {
         if index == actions.len() + 1 {
             self.start_comment(cx);
         } else if index == 0 {
+            self.action_name = "Alternatives".into();
             self.run(
                 SelectionAction::Alternatives,
                 "Generating alternatives…".into(),
@@ -687,6 +700,7 @@ impl SelectionPopover {
             );
         } else if let Some(action) = actions.get(index - 1) {
             let label = format!("{}…", action.name).into();
+            self.action_name = action.name.clone().into();
             self.run(
                 SelectionAction::Instruction(action.prompt.clone()),
                 label,
@@ -890,13 +904,22 @@ impl SelectionPopover {
         };
         self.changed(cx);
         self.focus_main(cx);
-        self.editor.update(cx, |editor, cx| {
-            if editor.text() == open.text && editor.selected_range() == open.range {
-                editor.replace_range(open.range.clone(), option, cx);
-                let inserted = open.range.start..editor.selected_range().end;
-                editor.flash(vec![inserted], cx);
+        let text = self.editor.update(cx, |editor, cx| {
+            if editor.text() != open.text || editor.selected_range() != open.range {
+                return None;
             }
+            editor.replace_range(open.range.clone(), option, cx);
+            let inserted = open.range.start..editor.selected_range().end;
+            editor.flash(vec![inserted], cx);
+            Some(editor.text().to_string())
         });
+        if let Some(text) = text {
+            cx.emit(SelectionPopoverEvent::OptionApplied {
+                before: open.text,
+                text,
+                prompt: self.action_name.clone(),
+            });
+        }
     }
 
     fn schedule_reconcile(&mut self, cx: &mut Context<Self>) {
@@ -1575,9 +1598,27 @@ mod tests {
                 (editor, popover)
             })
             .unwrap();
+        let applied = Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let applied = applied.clone();
+            cx.subscribe(&popover, move |_, event, _| {
+                if let SelectionPopoverEvent::OptionApplied {
+                    before,
+                    text,
+                    prompt,
+                } = event
+                {
+                    applied
+                        .borrow_mut()
+                        .push((before.clone(), text.clone(), prompt.to_string()));
+                }
+            })
+            .detach();
+        });
         cx.update(|cx| {
             editor.update(cx, |editor, cx| editor.select_range(3..9, cx));
             popover.update(cx, |popover, cx| {
+                popover.action_name = "Alternatives".into();
                 popover.open = Some(Open {
                     text: "Hi there\n".into(),
                     range: 3..9,
@@ -1604,6 +1645,15 @@ mod tests {
                 assert!(!editor.undo(cx));
             });
         });
+        // Only the applied option is reported, for the edit history.
+        assert_eq!(
+            *applied.borrow(),
+            [(
+                "Hi there\n".to_owned(),
+                "Hi friend\n".to_owned(),
+                "Alternatives".to_owned()
+            )]
+        );
     }
 
     #[gpui::test]
@@ -1624,12 +1674,11 @@ mod tests {
         let sent = Rc::new(std::cell::RefCell::new(Vec::new()));
         cx.update(|cx| {
             let sent = sent.clone();
-            cx.subscribe(
-                &popover,
-                move |_, SelectionPopoverEvent::Comment(text), _| {
+            cx.subscribe(&popover, move |_, event, _| {
+                if let SelectionPopoverEvent::Comment(text) = event {
                     sent.borrow_mut().push(text.clone())
-                },
-            )
+                }
+            })
             .detach();
             editor.update(cx, |editor, cx| editor.select_range(3..8, cx));
             let field = cx.new(|cx| Editor::new("", cx));

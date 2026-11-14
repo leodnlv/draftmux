@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-use draftmux_storage::{Conflict, Store};
+use draftmux_storage::{Conflict, Edit, Store};
 
 use crate::drafts::Drafts;
 use crate::history::{EditLog, Recorded, Turns};
@@ -455,6 +455,37 @@ impl Session {
             Outcome::default()
         };
         (recorded, outcome)
+    }
+
+    /// The user replaced part of the selected draft, which read `before` and
+    /// now reads `text`, with an option the agent offered for `prompt`.
+    /// Records it in the history like an agent turn's edit.
+    pub fn option_applied(
+        &mut self,
+        before: String,
+        text: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+    ) -> Result<Recorded> {
+        let Some(id) = self.drafts.current_id().map(str::to_owned) else {
+            return Ok(Recorded::Ignored);
+        };
+        let edit = Edit {
+            before,
+            at,
+            prompt: prompt.to_owned(),
+        };
+        let recorded = crate::history::record_edit(
+            self.drafts.store(),
+            &id,
+            edit,
+            text,
+            Some(self.review.log_mut()),
+        )?;
+        if recorded == Recorded::Added {
+            self.review.edit_added();
+        }
+        Ok(recorded)
     }
 
     /// Counts the change that left the selected draft's file holding `disk`

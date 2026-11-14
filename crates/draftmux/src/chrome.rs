@@ -435,12 +435,16 @@ impl Chrome {
                 },
             ),
             cx.subscribe(&chat, |this, _, event, cx| this.chat_event(event, cx)),
-            cx.subscribe(
-                &selection,
-                |this, _, SelectionPopoverEvent::Comment(text), cx| {
+            cx.subscribe(&selection, |this, _, event, cx| match event {
+                SelectionPopoverEvent::Comment(text) => {
                     this.chat.update(cx, |chat, cx| chat.comment(text, cx));
-                },
-            ),
+                }
+                SelectionPopoverEvent::OptionApplied {
+                    before,
+                    text,
+                    prompt,
+                } => this.option_applied(before.clone(), text, prompt, cx),
+            }),
             cx.subscribe(&editor, |this, editor, event, cx| match event {
                 EditorEvent::Edited => this.edited(editor.read(cx).text().to_owned(), cx),
                 // Selecting something else in the editor replaces the

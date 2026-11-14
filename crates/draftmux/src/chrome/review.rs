@@ -14,6 +14,7 @@ use std::time::Duration;
 use chrono::Utc;
 use draftmux_core::decorations::Side;
 use draftmux_core::diff::Hunk;
+use draftmux_core::history::Recorded;
 use draftmux_core::review::{Compared, Origin};
 use draftmux_core::session::Outcome;
 use draftmux_storage::Target;
@@ -158,6 +159,25 @@ impl Chrome {
 
     /// An agent turn added an edit to the selected draft's history, which
     /// the comparison now starts from.
+    /// Records an option the user applied from the selection popover as an
+    /// edit in the history, as the agent's edits are.
+    pub(super) fn option_applied(
+        &mut self,
+        before: String,
+        text: &str,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .session
+            .option_applied(before, text, prompt, Utc::now())
+        {
+            Ok(Recorded::Added) => self.edit_recorded(cx),
+            Ok(Recorded::Ignored) => {}
+            Err(err) => eprintln!("draftmux: saving the edit history: {err:#}"),
+        }
+    }
+
     pub(super) fn edit_recorded(&mut self, cx: &mut Context<Self>) {
         if let Some(review) = &mut self.review {
             review.menu_open = false;

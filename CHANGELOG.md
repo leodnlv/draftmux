@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- An option applied from the selection popover, such as one of the
+  alternatives, is recorded in the draft's edit history under the action's
+  name, so Changes shows and can revert it like the agent's chat edits.
 - Draft with Claude Code instead of pi: `draftmux open --backend claude`
   continues a Claude Code transcript as the draft's own Claude Code session,
   forked from a copy of the transcript, so the original conversation is left

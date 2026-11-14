@@ -89,18 +89,42 @@ impl Turns {
             at,
             prompt: turn.prompt.clone(),
         };
-        let history = save_edit(store, id, log.as_deref(), edit)?;
+        add_edit(store, id, edit, log)?;
         turn.recorded = true;
-        if let Some(log) = log {
-            if log.unreadable {
-                *log = EditLog::new(history);
-            } else {
-                log.since = history.edits.len() - 1;
-                log.history = history;
-            }
-        }
         Ok(Recorded::Added)
     }
+}
+
+/// Records the edit that took draft `id` from `edit.before` to `text`
+/// outside an agent turn, such as an option the agent offered for a
+/// selection. `log` is as for [`Turns::agent_wrote`].
+pub fn record_edit(
+    store: &Store,
+    id: &str,
+    edit: Edit,
+    text: &str,
+    log: Option<&mut EditLog>,
+) -> Result<Recorded> {
+    if same_lines(&edit.before, text) {
+        return Ok(Recorded::Ignored);
+    }
+    add_edit(store, id, edit, log)?;
+    Ok(Recorded::Added)
+}
+
+/// Saves `edit` in draft `id`'s history and has `log`, when given, compare
+/// from it.
+fn add_edit(store: &Store, id: &str, edit: Edit, log: Option<&mut EditLog>) -> Result<()> {
+    let history = save_edit(store, id, log.as_deref(), edit)?;
+    if let Some(log) = log {
+        if log.unreadable {
+            *log = EditLog::new(history);
+        } else {
+            log.since = history.edits.len() - 1;
+            log.history = history;
+        }
+    }
+    Ok(())
 }
 
 /// `a` and `b` read the same once their line endings are normalized, as the
@@ -311,6 +335,38 @@ mod tests {
         let history = save_edit(&store, &id, Some(&log), edit()).unwrap();
         assert_eq!(history.edits.len(), 2);
         assert_eq!(store.history(&id).unwrap().edits.len(), 2);
+    }
+
+    #[test]
+    fn applied_options_are_recorded_as_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let id = draft(&store);
+        let mut log = EditLog::load(&store, &id);
+        let option = |before: &str| Edit {
+            before: before.into(),
+            prompt: "Alternatives".into(),
+            ..edit()
+        };
+
+        let recorded = record_edit(
+            &store,
+            &id,
+            option("Hi there\n"),
+            "Hi friend\n",
+            Some(&mut log),
+        );
+        assert_eq!(recorded.unwrap(), Recorded::Added);
+        assert_eq!(log.edits().len(), 1);
+        assert_eq!(log.since(), 0);
+        let saved = store.history(&id).unwrap();
+        assert_eq!(saved.edits[0].before, "Hi there\n");
+        assert_eq!(saved.edits[0].prompt, "Alternatives");
+
+        // An option that only changes line endings isn't an edit.
+        let recorded = record_edit(&store, &id, option("a\r\n"), "a\n", Some(&mut log));
+        assert_eq!(recorded.unwrap(), Recorded::Ignored);
+        assert_eq!(store.history(&id).unwrap().edits.len(), 1);
     }
 
     #[test]
