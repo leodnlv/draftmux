@@ -66,9 +66,9 @@ By default, the agent features run [pi](https://github.com/earendil-works/pi):
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-Without pi, editing, previews, copying and Markdown formatting of GitHub and
-rich-text drafts still work. Drafts can also run on
-[Claude Code](#drafting-with-claude-code).
+Without pi, drafts can still run on [Claude Code](#drafting-with-claude-code).
+Editing, previews, copying and Markdown formatting of GitHub and rich-text
+drafts work without any agent.
 
 ## Quick start
 
