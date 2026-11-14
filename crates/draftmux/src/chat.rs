@@ -1278,10 +1278,10 @@ impl Chat {
             .child(
                 svg()
                     .path(if claude { CLAUDE_CODE_ICON } else { PI_ICON })
-                    // The crab is a 9×6 pixel grid; two points per pixel keep
-                    // its edges sharp and match the pi mark's height and
-                    // stroke weight.
-                    .when(claude, |icon| icon.w(px(18.)).h(px(12.)))
+                    // The crab is a 15×9 pixel grid. At 1.5 points per pixel
+                    // its edges land on whole pixels on Retina displays, and
+                    // it about matches the pi mark's weight.
+                    .when(claude, |icon| icon.w(px(22.5)).h(px(13.5)))
                     .when(!claude, |icon| icon.size(px(12.)))
                     .flex_none()
                     .text_color(palette.muted),
