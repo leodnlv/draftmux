@@ -125,6 +125,7 @@ pub fn move_popup(
     window: &NativeWindow,
     _: gpui::Bounds<gpui::Pixels>,
     _: gpui::Bounds<gpui::Pixels>,
+    _: bool,
 ) {
     match *window {}
 }

@@ -208,29 +208,49 @@ pub fn prepare_popup(window: &gpui::Window, keep_top: bool) -> Option<NativeWind
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         return None;
     };
-    // The names of `kCAGravityTopLeft` and `kCAGravityBottomLeft`; the
-    // view's layer isn't flipped, so they name the edges as seen.
-    let gravity = NSString::from_str(if keep_top { "topLeft" } else { "bottomLeft" });
     // SAFETY: gpui's AppKit handle points at the window's live content view,
-    // whose backing layer is gpui's Metal layer, and this runs on the main
-    // thread that owns them. Retaining the window keeps it valid to message
-    // after it closes.
+    // and this runs on the main thread that owns it. Retaining the window
+    // keeps it valid to message after it closes.
     unsafe {
         let view = handle.ns_view.as_ptr().cast::<AnyObject>();
-        let layer: *mut AnyObject = msg_send![view, layer];
-        if !layer.is_null() {
-            let _: () = msg_send![layer, setContentsGravity: &*gravity];
-        }
         let ns_window: *mut AnyObject = msg_send![view, window];
         let ns_window = Retained::retain(ns_window)?;
         // NSWindowAnimationBehaviorNone.
         let _: () = msg_send![&*ns_window, setAnimationBehavior: 2isize];
-        Some(NativeWindow(ns_window))
+        let window = NativeWindow(ns_window);
+        window.keep_edge(keep_top);
+        Some(window)
+    }
+}
+
+impl NativeWindow {
+    /// Pins a frame shown at another size to the window's top edge, or else
+    /// its bottom.
+    fn keep_edge(&self, keep_top: bool) {
+        use objc2::runtime::AnyObject;
+
+        // The names of `kCAGravityTopLeft` and `kCAGravityBottomLeft`; the
+        // view's layer isn't flipped, so they name the edges as seen.
+        let gravity = NSString::from_str(if keep_top { "topLeft" } else { "bottomLeft" });
+        // SAFETY: the retained window is valid to message on the main
+        // thread, and its content view's backing layer is gpui's Metal layer.
+        unsafe {
+            let view: *mut AnyObject = msg_send![&*self.0, contentView];
+            if view.is_null() {
+                return;
+            }
+            let layer: *mut AnyObject = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setContentsGravity: &*gravity];
+            }
+        }
     }
 }
 
 /// Moves a pop-up at once from `from` to `to`, in gpui's screen
-/// coordinates, and draws it at its new size before the move shows.
+/// coordinates, and draws it at its new size before the move shows. A
+/// frame shown at another size stays pinned to its top edge if `keep_top`,
+/// or else its bottom.
 ///
 /// gpui resizes a window later and draws it at the new size after that, so
 /// for a frame it would show its old contents in the new size. Call this
@@ -239,10 +259,12 @@ pub fn move_popup(
     window: &NativeWindow,
     from: gpui::Bounds<gpui::Pixels>,
     to: gpui::Bounds<gpui::Pixels>,
+    keep_top: bool,
 ) {
     use objc2::runtime::Bool;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
+    window.keep_edge(keep_top);
     let f = |pixels: gpui::Pixels| f64::from(pixels.as_f32());
     // SAFETY: the retained window is valid to message on the main thread.
     unsafe {

@@ -981,7 +981,7 @@ impl SelectionPopover {
                         })
                         .unwrap_or(false);
                     if current {
-                        crate::platform::move_popup(&native, from, bounds);
+                        crate::platform::move_popup(&native, from, bounds, side == Edge::Top);
                     }
                 })
                 .detach();
