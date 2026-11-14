@@ -38,9 +38,9 @@ use draftmux_storage::{Backend, Draft, Store};
 use editor::{Editor, EditorEvent, EditorStyle};
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds, Context, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, Pixels, SharedString, Size, Stateful,
-    Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions,
-    canvas, div, ease_out_quint, font, point,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, KeyBinding, Pixels,
+    SharedString, Size, Stateful, Subscription, Task, Window, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, actions, canvas, div, ease_out_quint, font, point,
     popup::{
         PopupAnchor, PopupConstraintAdjustment, PopupGravity, PopupNotSupportedError, PopupOptions,
     },
@@ -1108,25 +1108,26 @@ impl SelectionPopover {
                 })
         };
         // The highlight fades in when it lands on an item and drops off when
-        // it leaves, so sweeping across items doesn't leave a trail.
+        // it leaves, so sweeping across items doesn't leave a trail. The text
+        // fades with it, since white text shows before the accent does.
         let highlight = |index: usize, item: Stateful<Div>| -> AnyElement {
             if open.highlighted != Some(index) {
                 return item.into_any_element();
             }
-            item.text_color(palette.on_accent)
-                .with_animation(
-                    ("item-highlight", index),
-                    Animation::new(HIGHLIGHT_FADE).with_easing(ease_out_quint()),
-                    move |item, delta| item.bg(palette.accent.opacity(delta)),
-                )
-                .into_any_element()
+            item.with_animation(
+                ("item-highlight", index),
+                Animation::new(HIGHLIGHT_FADE).with_easing(ease_out_quint()),
+                move |item, delta| {
+                    item.bg(palette.accent.opacity(delta)).text_color(mix(
+                        palette.text,
+                        palette.on_accent,
+                        delta,
+                    ))
+                },
+            )
+            .into_any_element()
         };
         let comment_item = |index: usize| {
-            let color = if open.highlighted == Some(index) {
-                palette.on_accent
-            } else {
-                palette.text
-            };
             let item = item(index)
                 .flex_none()
                 .flex()
@@ -1135,12 +1136,12 @@ impl SelectionPopover {
                 .px(px(9.))
                 .py(px(5.))
                 .whitespace_nowrap()
-                .child(
-                    gpui::svg()
-                        .path(COMMENT_ICON)
-                        .size(px(13.))
-                        .text_color(color),
-                )
+                .child(tinted(
+                    gpui::svg().path(COMMENT_ICON).size(px(13.)),
+                    ("comment-icon-highlight", index),
+                    open.highlighted == Some(index),
+                    (palette.text, palette.on_accent),
+                ))
                 .child("Comment")
                 .on_click({
                     let this = this.clone();
@@ -1317,39 +1318,45 @@ impl SelectionPopover {
                     )
                     .into_any_element()
             }
+            // Previews take the rows the options will, so finishing only
+            // brings in the highlight and the keys.
             Mode::Running {
                 label, previews, ..
-            } => div()
+            } if !previews.is_empty() => div()
+                .w(RESULTS_WIDTH - PADDING * 2.)
                 .flex()
                 .flex_col()
-                .when(!previews.is_empty(), |view| {
-                    view.w(RESULTS_WIDTH - PADDING * 2.)
-                })
-                .children(previews.iter().map(|option| {
-                    div()
-                        .px(px(8.))
-                        .py(px(7.))
-                        .line_height(px(19.))
-                        .child(option.trim().to_string())
+                .gap(px(2.))
+                .children(previews.iter().enumerate().map(|(index, option)| {
+                    let number = option_number(index).text_color(palette.faint);
+                    option_row(div().id(("preview", index)), number, option)
+                        .text_color(palette.muted)
                 }))
-                .child(
+                .child(rule(
                     div()
-                        .px(px(10.))
-                        .py(px(8.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .text_color(palette.muted)
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .text_size(px(11.))
+                        .text_color(palette.faint)
                         .whitespace_nowrap()
                         .child(crate::chat::spinner(&palette))
-                        .child(label.clone()),
-                )
-                .when(!previews.is_empty(), |view| {
-                    view.child(footer(
-                        &["Preview · waiting to finish", "esc cancel"],
-                        &palette,
-                    ))
-                })
+                        .child(label.clone())
+                        .child(div().ml(px(4.)).child("esc cancel")),
+                    &palette,
+                ))
+                .into_any_element(),
+            Mode::Running { label, .. } => div()
+                .px(px(10.))
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_color(palette.muted)
+                .whitespace_nowrap()
+                .child(crate::chat::spinner(&palette))
+                .child(label.clone())
                 .into_any_element(),
             Mode::Results(options) => {
                 let keys = format!("1–{} or ↵ apply", options.len());
@@ -1359,30 +1366,16 @@ impl SelectionPopover {
                     .flex_col()
                     .gap(px(2.))
                     .children(options.iter().enumerate().map(|(index, option)| {
-                        let highlighted = open.highlighted == Some(index);
-                        let item = item(index)
-                            .flex()
-                            .gap(px(8.))
-                            .px(px(8.))
-                            .py(px(7.))
-                            .line_height(px(19.))
-                            .child(
-                                div()
-                                    .w(px(10.))
-                                    .flex_none()
-                                    .text_size(px(11.))
-                                    .text_color(if highlighted {
-                                        palette.on_accent_muted
-                                    } else {
-                                        palette.faint
-                                    })
-                                    .child((index + 1).to_string()),
-                            )
-                            .child(div().flex_1().min_w_0().child(option.trim().to_string()))
-                            .on_click({
-                                let this = this.clone();
-                                move |_, _, cx| this.update(cx, |this, cx| this.apply(index, cx))
-                            });
+                        let number = tinted(
+                            option_number(index),
+                            ("number-highlight", index),
+                            open.highlighted == Some(index),
+                            (palette.faint, palette.on_accent_muted),
+                        );
+                        let item = option_row(item(index), number, option).on_click({
+                            let this = this.clone();
+                            move |_, _, cx| this.update(cx, |this, cx| this.apply(index, cx))
+                        });
                         highlight(index, item)
                     }))
                     .child(footer(&[keys.as_str(), "↑↓ move", "esc cancel"], &palette))
@@ -1401,6 +1394,8 @@ impl SelectionPopover {
         let key = match &open.mode {
             Mode::Actions(_) | Mode::Several(_) => return content,
             Mode::Comment(_) => "popover-comment",
+            // The options replace their previews without fading in again.
+            Mode::Running { previews, .. } if !previews.is_empty() => "popover-results",
             Mode::Running { .. } => "popover-running",
             Mode::Results(_) => "popover-results",
             Mode::Error(_) => "popover-error",
@@ -1416,9 +1411,65 @@ impl SelectionPopover {
     }
 }
 
-fn footer(keys: &[&str], palette: &Palette) -> impl IntoElement {
-    hints(keys, palette)
-        .mt(px(4.))
+/// A row of the options, numbered.
+fn option_row(row: Stateful<Div>, number: impl IntoElement, option: &str) -> Stateful<Div> {
+    row.flex()
+        .gap(px(8.))
+        .px(px(8.))
+        .py(px(7.))
+        .line_height(px(19.))
+        .child(number)
+        .child(div().flex_1().min_w_0().child(option.trim().to_string()))
+}
+
+fn option_number(index: usize) -> Div {
+    div()
+        .w(px(10.))
+        .flex_none()
+        .text_size(px(11.))
+        .child((index + 1).to_string())
+}
+
+/// `element` in the first of `colors`, or fading to the second with an
+/// item's highlight while it's `highlighted`.
+fn tinted<E: Styled + IntoElement + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+    highlighted: bool,
+    (from, to): (Hsla, Hsla),
+) -> AnyElement {
+    if !highlighted {
+        return element.text_color(from).into_any_element();
+    }
+    element
+        .with_animation(
+            id,
+            Animation::new(HIGHLIGHT_FADE).with_easing(ease_out_quint()),
+            move |element, delta| element.text_color(mix(from, to, delta)),
+        )
+        .into_any_element()
+}
+
+/// `from` moved `t` of the way to `to`, alpha included.
+fn mix(from: Hsla, to: Hsla, t: f32) -> Hsla {
+    let (a, b) = (from.to_rgb(), to.to_rgb());
+    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    gpui::Rgba {
+        r: lerp(a.r, b.r),
+        g: lerp(a.g, b.g),
+        b: lerp(a.b, b.b),
+        a: lerp(a.a, b.a),
+    }
+    .into()
+}
+
+fn footer(keys: &[&str], palette: &Palette) -> gpui::Div {
+    rule(hints(keys, palette), palette)
+}
+
+/// `row` under a rule, as the popover's last line.
+fn rule(row: gpui::Div, palette: &Palette) -> gpui::Div {
+    row.mt(px(4.))
         .pt(px(6.))
         .pb(px(3.))
         .border_t_1()
