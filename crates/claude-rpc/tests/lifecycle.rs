@@ -281,7 +281,9 @@ fn launch_contract() {
 
 #[test]
 fn turns_stream_frames_and_settle_on_idle() {
-    let script = format!("{INIT}\n{}\n{}\n### eof", turn("one"), turn("two"));
+    // The first run stays open until the second prompt was refused.
+    let first = turn("one").replacen('\n', "\n### no-input 300\n", 1);
+    let script = format!("{INIT}\n{first}\n{}\n### eof", turn("two"));
     let mut h = Harness::new(&[&script]);
     resolve(h.agent().prompt("one".into())).unwrap();
     assert_eq!(
