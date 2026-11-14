@@ -461,6 +461,7 @@ printf '{"type":"response","id":"%s","command":"get_state","success":true,"data"
 cat > /dev/null
 "#;
 
+    #[cfg(unix)]
     fn fake_pi(args_file: &Path) -> impl Fn() -> Command + use<> {
         let args_file = args_file.to_owned();
         move || {
@@ -501,6 +502,7 @@ cat > /dev/null
         session
     }
 
+    #[cfg(unix)]
     #[test]
     fn pi_source_is_forked_into_the_draft_session() {
         let tmp = tempfile::tempdir().unwrap();
@@ -553,6 +555,7 @@ cat > /dev/null
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_fork_creates_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1006,6 +1009,7 @@ cat > /dev/null
         settings
     }
 
+    #[cfg(unix)]
     #[test]
     fn backend_setting_picks_the_backend_unless_the_flag_does() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1235,6 +1239,7 @@ cat > /dev/null
         assert_eq!(store.load(&draft.id).unwrap().meta, meta);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejected_model_override_still_creates_the_draft() {
         let tmp = tempfile::tempdir().unwrap();

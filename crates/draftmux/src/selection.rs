@@ -181,7 +181,6 @@ pub fn run(
         } => {
             let command = command(
                 pi,
-                &prompt,
                 request,
                 &session_file,
                 &agent_dir,
@@ -189,7 +188,7 @@ pub fn run(
                 temp.path(),
                 config,
             );
-            (Agent::Pi, command, None)
+            (Agent::Pi, command, Some(prompt.as_str()))
         }
         Backend::Claude {
             program,
@@ -248,7 +247,6 @@ pub fn run(
 #[allow(clippy::too_many_arguments)]
 fn command(
     mut pi: Command,
-    prompt: &str,
     request: &Request,
     session_file: &Path,
     agent_dir: &Path,
@@ -256,10 +254,11 @@ fn command(
     session_dir: &Path,
     config: &SelectionConfig,
 ) -> Command {
-    // `-p` takes the next argument as the prompt.
+    // The prompt goes to stdin, which pi reads as the prompt: Windows
+    // limits a command line to 32K characters, and a `.cmd` shim's arguments
+    // can't span lines.
     pi.args(["--mode", "json"])
         .arg("-p")
-        .arg(prompt)
         .arg("--fork")
         .arg(session_file)
         .arg("--session-dir")
@@ -559,7 +558,6 @@ mod tests {
         let build = |config: &SelectionConfig| {
             let command = command(
                 Command::new("pi"),
-                "PROMPT",
                 &request,
                 Path::new("/drafts/x/session/s.jsonl"),
                 Path::new("/profile"),
@@ -581,7 +579,6 @@ mod tests {
                 "--mode",
                 "json",
                 "-p",
-                "PROMPT",
                 "--fork",
                 "/drafts/x/session/s.jsonl",
                 "--session-dir",
@@ -597,10 +594,10 @@ mod tests {
         assert!(envs.contains(&("DRAFTMUX_INSTRUCTIONS".as_ref(), None)));
 
         config.thinking = Some(ThinkingLevel::High);
-        assert_eq!(build(&config).1.len(), 10, "thinking only with a model");
+        assert_eq!(build(&config).1.len(), 9, "thinking only with a model");
         config.model = Some("anthropic/claude-haiku-5-5".into());
         assert_eq!(
-            build(&config).1[10..],
+            build(&config).1[9..],
             [
                 "--model",
                 "anthropic/claude-haiku-5-5",
@@ -610,7 +607,7 @@ mod tests {
         );
 
         config.context_files = false;
-        assert_eq!(build(&config).1[10], "--no-context-files");
+        assert_eq!(build(&config).1[9], "--no-context-files");
     }
 
     #[test]
@@ -671,13 +668,15 @@ mod tests {
 
     /// A fake pi that records its arguments and checks the temp session dir
     /// exists while it runs.
+    #[cfg(unix)]
     #[test]
     fn run_returns_options_and_removes_the_temp_dir() {
         let bin = tempfile::tempdir().unwrap();
         let script = bin.path().join("pi");
         fs::write(
             &script,
-            r#"while [ "$1" ]; do [ "$1" = --session-dir ] && test -d "$2" && touch "$2/s.jsonl"; shift; done
+            r#"cat > "$0.stdin"
+while [ "$1" ]; do [ "$1" = --session-dir ] && test -d "$2" && touch "$2/s.jsonl"; shift; done
 echo '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"alternatives\":[\"over here\","}}'
 echo '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"{\"alternatives\":[\"over here\",\"here\"]}"}]}}'
 echo '{"type":"agent_settled","aborted":false}'"#,
@@ -700,11 +699,17 @@ echo '{"type":"agent_settled","aborted":false}'"#,
         )
         .unwrap();
         assert_eq!(options, ["over here\n", "here\n"]);
+        let prompt = fs::read_to_string(bin.path().join("pi.stdin")).unwrap();
+        assert!(
+            prompt.contains("<<<SELECTION>>>there\n<<<END SELECTION>>>"),
+            "{prompt}"
+        );
         assert_eq!(previews[0], ["over here\n"]);
         assert_eq!(previews.last().unwrap(), &options);
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_process_retracts_complete_previews() {
         let mut pi = Command::new("/bin/sh");
@@ -728,6 +733,7 @@ echo '{"type":"agent_settled","aborted":false}'"#,
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_reports_pi_errors() {
         let mut pi = Command::new("/bin/sh");
@@ -842,6 +848,7 @@ echo '{"type":"agent_settled","aborted":false}'"#,
     /// A fake `claude` (`claude.sh`) that answers `--version`, records its
     /// arguments and stdin in `args` and `stdin`, checks the conversation's
     /// copy exists while it runs, and prints `frames`.
+    #[cfg(unix)]
     fn fake_claude(dir: &Path, frames: &str, status: i32) -> PathBuf {
         let script = dir.join("claude.sh");
         fs::write(
@@ -888,6 +895,7 @@ exit {status}
         session
     }
 
+    #[cfg(unix)]
     fn run_claude(
         tmp: &Path,
         frames: &str,
@@ -927,6 +935,7 @@ exit {status}
         result
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_answers_from_a_copy_of_the_conversation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -964,6 +973,7 @@ exit {status}
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_failures_retract_previews_and_say_why() {
         // A missing login: claude reports it, then exits 1.
@@ -992,6 +1002,7 @@ exit {status}
         assert_eq!(err, "Claude Code didn't finish the selection request");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_claude_draft_whose_transcript_is_lost_runs_nothing() {
         let tmp = tempfile::tempdir().unwrap();

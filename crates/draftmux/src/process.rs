@@ -162,7 +162,8 @@ fn first_line(output: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-#[cfg(test)]
+// The tests run shell scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::sync::Arc;
