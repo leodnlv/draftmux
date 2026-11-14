@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- New: Draftmux runs on x64 Windows 10 version 1803 and later. Install it
+  from PowerShell with
+  `irm https://raw.githubusercontent.com/raine/draftmux/main/install.ps1 | iex`.
+  It tells you about new versions; run the script again to update. Claude
+  Code drafts need Claude Code's native `claude.exe`.
+
 ## v0.2.0 (2026-11-14)
 
 A big update, with new features and lots of polish throughout the app.

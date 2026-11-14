@@ -43,7 +43,11 @@ curl -fsSL https://raw.githubusercontent.com/raine/draftmux/main/install.sh | sh
 
 This installs the latest release and links the `draftmux` command in
 `~/.local/bin`; make sure that directory is on your PATH. On Linux, run it
-again to update.
+again to update. On Windows, use PowerShell instead:
+
+```powershell
+irm https://raw.githubusercontent.com/raine/draftmux/main/install.ps1 | iex
+```
 
 ### macOS
 
@@ -62,6 +66,20 @@ Runs on x86_64 and arm64 with glibc 2.35 or later, such as Ubuntu 22.04 or
 Debian 12 and newer. The script installs the app in `~/.local/lib/draftmux`,
 and Draftmux keeps itself up to date there. Shortcuts use Ctrl where macOS
 uses Cmd.
+
+### Windows
+
+Runs on x64 Windows 10 version 1803 or later. The script installs the app in
+`%LOCALAPPDATA%\Programs\Draftmux`, adds the `draftmux` command to your PATH
+and creates a Start Menu shortcut. Draftmux tells you when a new version is
+out; run the script again to update. Shortcuts use Ctrl where macOS uses Cmd.
+
+The Windows build isn't code signed, so SmartScreen may warn about a
+`draftmux.exe` unpacked from a downloaded zip; the script's install doesn't
+get that warning. Claude Code drafts need Claude Code's native installer:
+Draftmux doesn't run the `claude.cmd` that npm installs. Draftmux reads tool
+paths and API keys from the environment it starts in rather than from your
+PowerShell profile.
 
 ### Agents
 
@@ -143,8 +161,8 @@ such as `title` for PRs and issues or `subject`, `to` and `cc` for emails.
 ## Troubleshooting
 
 Errors and crash reports go to `draftmux.log` in
-`~/Library/Application Support/Draftmux` on macOS and `~/.local/share/Draftmux`
-on Linux. Once the log passes 1 MB, the app moves it to `draftmux.log.1` on its
+`~/Library/Application Support/Draftmux` on macOS, `~/.local/share/Draftmux`
+on Linux and `%APPDATA%\Draftmux` on Windows. Once the log passes 1 MB, the app moves it to `draftmux.log.1` on its
 next start.
 
 ## Development
