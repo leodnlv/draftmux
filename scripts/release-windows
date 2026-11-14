@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Builds a distributable Draftmux release on this x64 Windows machine, from
+# Git Bash, into target/windows-release/VERSION: an optimized build of the
+# app tree as Draftmux-VERSION-windows-x86_64.zip, plus its .sha256, which
+# install.ps1 installs for the current user. Publishes nothing. The build
+# needs the Windows SDK, whose fxc.exe compiles gpui's shaders.
+set -euo pipefail
+
+if [[ $# -ne 0 || $(uname -s) != MINGW* || $(uname -m) != x86_64 ]]; then
+  echo "usage (in Git Bash on x64 Windows): release-windows" >&2
+  exit 2
+fi
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/draftmux/Cargo.toml | head -n 1)"
+cargo build --locked --release -p draftmux --bin draftmux
+target="$(cygpath -u "${CARGO_TARGET_DIR:-$root/target}")"
+out="$target/windows-release/$version"
+rm -rf "$out"
+mkdir -p "$out"
+tree=$(mktemp -d)
+trap 'rm -rf "$tree"' EXIT
+app="$tree/draftmux-windows"
+mkdir -p "$app/bin" "$app/share/draftmux/pi-extension"
+cp "$target/release/draftmux.exe" "$app/bin/"
+cp pi-extension/draftmux.ts "$app/share/draftmux/pi-extension/"
+printf 'draftmux\n' >"$app/.draftmux-bundle"
+printf '%s\n' "$version" >"$app/.draftmux-release"
+printed=$("$app/bin/draftmux.exe" --version | tr -d '\r')
+if [[ $printed != "draftmux $version" ]]; then
+  echo "the built binary reports \"$printed\", not draftmux $version" >&2
+  exit 1
+fi
+name="Draftmux-$version-windows-x86_64"
+# PowerShell, not bash, expands the variables.
+# shellcheck disable=SC2016
+ZIP_SOURCE="$(cygpath -w "$app")" ZIP_OUTPUT="$(cygpath -w "$out/$name.zip")" \
+  pwsh -NoProfile -NonInteractive -Command \
+  'Compress-Archive -LiteralPath $env:ZIP_SOURCE -DestinationPath $env:ZIP_OUTPUT'
+(cd "$out" && sha256sum "$name.zip" >"$name.sha256")
+printf '%s\n' "$out/$name.zip"

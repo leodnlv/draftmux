@@ -1,8 +1,8 @@
 name: Release
 
-# A v* tag publishes a GitHub release of the signed, notarized macOS build
-# and of the x86_64 and arm64 Linux builds, which installed copies pick up
-# through the app's automatic updates. Running the workflow by hand builds,
+# A v* tag publishes a GitHub release of the signed, notarized macOS build,
+# of the x86_64 and arm64 Linux builds, which installed copies pick up
+# through the app's automatic updates, and of the x64 Windows build. Running the workflow by hand builds,
 # signs and notarizes the same files and keeps them as workflow artifacts
 # without publishing anything.
 on:
@@ -101,9 +101,67 @@ jobs:
             target/linux-release/${{ steps.version.outputs.version }}/*.sha256
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/draftmux/Cargo.toml | head -n 1)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      # Keeps earlier runs' release output out of the cache.
+      - run: rm -rf target/windows-release
+      - name: Build
+        run: scripts/release-windows
+      # install.ps1 from a local copy of the release's download URLs: a new
+      # install with PowerShell 7, then an update over it with the Windows
+      # PowerShell that `irm | iex` usually runs in.
+      - name: Install with install.ps1
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $site = Join-Path $env:RUNNER_TEMP releases
+          $download = New-Item -ItemType Directory -Force "$site\download\v$env:VERSION"
+          Copy-Item "target\windows-release\$env:VERSION\*" $download
+          $server = Start-Process python -PassThru -NoNewWindow `
+            -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $site
+          try {
+            Start-Sleep -Seconds 2
+            $env:DRAFTMUX_RELEASES_URL = 'http://127.0.0.1:8765'
+            $env:DRAFTMUX_VERSION = $env:VERSION
+            ./install.ps1
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+            if ($LASTEXITCODE -ne 0) { throw 'the update with Windows PowerShell failed' }
+            $exe = "$env:LOCALAPPDATA\Programs\Draftmux\bin\draftmux.exe"
+            $printed = & $exe --version
+            if ($printed -ne "draftmux $env:VERSION") { throw "the installed draftmux reports $printed" }
+            $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Draftmux.lnk'
+            if (-not (Test-Path $shortcut)) { throw 'no Start Menu shortcut' }
+          } finally {
+            Stop-Process -Id $server.Id
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: draftmux-${{ steps.version.outputs.version }}-windows
+          path: |
+            target/windows-release/${{ steps.version.outputs.version }}/*.zip
+            target/windows-release/${{ steps.version.outputs.version }}/*.sha256
+          if-no-files-found: error
+
   publish:
     if: github.event_name == 'push'
-    needs: [ci, macos, linux]
+    needs: [ci, macos, linux, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

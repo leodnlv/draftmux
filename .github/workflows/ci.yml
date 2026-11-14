@@ -6,6 +6,7 @@ on:
   pull_request:
   # The release workflow runs CI before publishing.
   workflow_call:
+  workflow_dispatch:
 
 # A called workflow sees its caller's name in github.workflow, which keeps a
 # release's CI from cancelling, or being cancelled by, CI for the same ref.
@@ -46,6 +47,19 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
             libvulkan-dev libzstd-dev zsh
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::all
+      - run: cargo test --locked --workspace
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      # Git for Windows checks out text files with CRLF line endings, which
+      # tests reading repository files don't expect.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::all

@@ -67,6 +67,10 @@ release-macos:
 release-linux:
     scripts/release-linux
 
+# Build an optimized Windows release zip (run in Git Bash on Windows)
+release-windows:
+    scripts/release-windows
+
 # Print the Homebrew cask for a release disk image
 homebrew-cask VERSION CHECKSUM_FILE URL HOMEPAGE:
     scripts/homebrew-cask "$@"

@@ -131,7 +131,10 @@ main() {
   case $(uname -s) in
     Darwin) install_macos ;;
     Linux) install_linux ;;
-    *) fail "Draftmux runs on macOS and Linux" ;;
+    MINGW* | MSYS* | CYGWIN*)
+      fail "on Windows, install from PowerShell: irm https://raw.githubusercontent.com/raine/draftmux/main/install.ps1 | iex"
+      ;;
+    *) fail "Draftmux runs on macOS, Linux and Windows" ;;
   esac
 }
 
