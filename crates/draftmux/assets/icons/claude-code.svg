@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Claude Code mark from lobehub/lobe-icons (MIT). -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 5 24 15">
-  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"/>
+<!-- Pixel-art Claude Code mascot on a 15×9 grid; the eyes are cut out. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 15 9">
+  <path fill="currentColor" fill-rule="evenodd" d="M2 0h11v3h2v2h-2v2h-1v2h-1V7h-1v2H9V7H6v2H5V7H4v2H3V7H2V5H0V3h2zM4 2v2h1V2zm6 0v2h1V2z"/>
 </svg>
