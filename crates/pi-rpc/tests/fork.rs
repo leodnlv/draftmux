@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use draftmux_pi_rpc::{ForkSpec, ModelOverride, ThinkingLevel, fork};
 
@@ -208,6 +208,7 @@ fn spawn_failure_is_reported() {
     assert!(err.starts_with("couldn't start pi"), "{err}");
 }
 
+#[cfg(unix)]
 #[test]
 fn timeout_names_a_startup_dialog_and_stops_pi() {
     let mut h = Harness::new();
@@ -216,7 +217,7 @@ fn timeout_names_a_startup_dialog_and_stops_pi() {
         r#"{"type":"extension_ui_request","id":"d1","method":"confirm","title":"Continue?"}"#,
         "\n### hang"
     );
-    let started = Instant::now();
+    let started = std::time::Instant::now();
     let err = h.fork(script).unwrap_err();
     assert!(err.contains("didn't answer within"), "{err}");
     assert!(err.contains("Continue?"), "{err}");

@@ -16,13 +16,13 @@ draftmux-claude-rpc = { path = "../claude-rpc" }
 draftmux-core = { path = "../core" }
 draftmux-pi-profiles = { path = "../pi-profiles" }
 draftmux-pi-rpc = { path = "../pi-rpc" }
+draftmux-process = { path = "../process" }
 draftmux-settings = { path = "../settings" }
 draftmux-storage = { path = "../storage" }
 editor = { path = "../editor" }
 futures = "0.3"
 gpui.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
-libc = "0.2"
 markup = { path = "../markup" }
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -44,6 +44,9 @@ comrak = { version = "0.59", default-features = false }
 [features]
 # `draftmux capture`: renders fixture drafts to PNGs.
 capture = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, features = ["font-kit"] }

@@ -1,6 +1,5 @@
 use std::fmt;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -79,8 +78,7 @@ fn list_models_within(
         .env("PI_CODING_AGENT_DIR", agent_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
     // The environment can carry values from a pi session the app was
     // launched from.
     for var in [
@@ -90,7 +88,7 @@ fn list_models_within(
     ] {
         command.env_remove(var);
     }
-    let mut child = command.spawn().context("starting pi")?;
+    let (mut child, group) = draftmux_process::spawn(&mut command).context("starting pi")?;
     let stdout = read_in_background(child.stdout.take().expect("stdout is piped"));
     let stderr = read_in_background(child.stderr.take().expect("stderr is piped"));
 
@@ -100,8 +98,7 @@ fn list_models_within(
             break status;
         }
         if Instant::now() >= deadline {
-            // SAFETY: the child leads its own process group.
-            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+            group.kill();
             let _ = child.wait();
             bail!(
                 "pi --list-models didn't finish within {} s",
@@ -207,6 +204,7 @@ openai-codex  gpt-5.5                                  400K     128K     yes    
     /// A shell script standing in for pi. Run through `sh -c` rather than
     /// as a new executable, which macOS may take seconds to vet on first
     /// launch.
+    #[cfg(unix)]
     fn fake_pi(body: &str) -> Command {
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg(body).arg("pi");
@@ -214,6 +212,7 @@ openai-codex  gpt-5.5                                  400K     128K     yes    
         command
     }
 
+    #[cfg(unix)]
     #[test]
     fn runs_pi_for_the_profile() {
         let dir = tempfile::tempdir().unwrap();
@@ -230,6 +229,7 @@ printf 'provider  model\n%s  m1\n' "$(basename "$PI_CODING_AGENT_DIR")""#,
         assert_eq!(models, [ModelRef::new("work", "m1")]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failure_reports_the_last_stderr_line() {
         let dir = tempfile::tempdir().unwrap();
@@ -238,6 +238,7 @@ printf 'provider  model\n%s  m1\n' "$(basename "$PI_CODING_AGENT_DIR")""#,
         assert!(err.to_string().ends_with("Error: bad models.json"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_kills_pi_and_its_children() {
         let dir = tempfile::tempdir().unwrap();

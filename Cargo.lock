@@ -1490,6 +1490,7 @@ dependencies = [
  "draftmux-core",
  "draftmux-pi-profiles",
  "draftmux-pi-rpc",
+ "draftmux-process",
  "draftmux-settings",
  "draftmux-storage",
  "editor",
@@ -1528,6 +1529,7 @@ dependencies = [
  "chrono",
  "draftmux-agent",
  "draftmux-core",
+ "draftmux-process",
  "draftmux-storage",
  "futures",
  "libc",
@@ -1554,6 +1556,7 @@ name = "draftmux-pi-profiles"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "draftmux-process",
  "draftmux-storage",
  "libc",
  "serde",
@@ -1566,11 +1569,20 @@ name = "draftmux-pi-rpc"
 version = "0.1.0"
 dependencies = [
  "draftmux-agent",
+ "draftmux-process",
  "futures",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "draftmux-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]

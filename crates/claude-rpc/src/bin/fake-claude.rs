@@ -28,9 +28,8 @@
 //! environment are written to `record-<n>` first.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::fd::FromRawFd;
+use std::fs::OpenOptions;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,7 +48,12 @@ fn main() {
     let script = std::fs::read_to_string(dir.join(format!("script-{n}"))).unwrap();
     // Unbuffered by std, so `no-input` can poll the descriptor.
     // SAFETY: fd 0 is open and only used through this reader.
-    let mut stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
+    #[cfg(unix)]
+    let mut stdin = std::io::BufReader::new(unsafe {
+        <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(0)
+    });
+    #[cfg(windows)]
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
     let mut ids = HashMap::<String, Value>::new();
 
@@ -92,9 +96,11 @@ fn main() {
                     std::thread::sleep(Duration::from_secs(60));
                 },
                 // SAFETY: plain syscalls on this process.
+                #[cfg(unix)]
                 "ignore-term" => unsafe {
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
                 },
+                #[cfg(unix)]
                 "close-stdin" => unsafe {
                     libc::close(0);
                 },
@@ -112,6 +118,7 @@ fn main() {
                     std::fs::write(dir.join(format!("child-{n}")), child.id().to_string()).unwrap();
                     std::mem::forget(child);
                 }
+                #[cfg(unix)]
                 "no-input" => {
                     let ms: i32 = arg.parse().unwrap();
                     if !stdin.buffer().is_empty() || readable(ms) {
@@ -202,6 +209,7 @@ fn claim(dir: &Path) -> usize {
 }
 
 /// Whether stdin becomes readable within `ms`.
+#[cfg(unix)]
 fn readable(ms: i32) -> bool {
     let mut fd = libc::pollfd {
         fd: 0,

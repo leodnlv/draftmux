@@ -2,7 +2,6 @@
 //! and returns its stdout or a one-line message for the user.
 
 use std::io::{Read, Write};
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -49,11 +48,9 @@ pub fn run_streaming(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Its own group, so a timeout kills its children too.
-        .process_group(0);
-    let mut child = command
-        .spawn()
+        .stderr(Stdio::piped());
+    // Its own group, so a timeout kills its children too.
+    let (mut child, group) = draftmux_process::spawn(&mut command)
         .map_err(|err| format!("Couldn't run {name}: {err}"))?;
 
     // Each pipe on its own thread, so a full pipe never blocks the others.
@@ -129,11 +126,7 @@ pub fn run_streaming(
         }
     };
     if status.is_none() {
-        // The child is unreaped, so its group id can't have been reused.
-        // SAFETY: a plain syscall on our own child's process group.
-        unsafe {
-            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-        }
+        group.kill();
         let _ = child.wait();
         if cancelled() {
             return Err(format!("{name} was cancelled"));

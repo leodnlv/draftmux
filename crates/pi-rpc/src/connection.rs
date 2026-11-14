@@ -3,7 +3,6 @@
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
@@ -12,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::protocol::{self, Incoming};
 
 /// How long pi gets to exit after stdin closes before SIGTERM, then before
-/// SIGKILL. pi treats stdin EOF as shutdown and disposes its runtime.
+/// the process group is killed. pi treats stdin EOF as shutdown and disposes its runtime.
 const EOF_GRACE: Duration = Duration::from_secs(3);
 const TERM_GRACE: Duration = Duration::from_secs(2);
 /// How long to wait for stdout and stderr to reach EOF after pi exits. A
@@ -37,7 +36,7 @@ pub(crate) struct Connection {
     /// Lines for the writer thread, which owns pi's stdin. Writing blocks
     /// while pi doesn't read, so callers only queue.
     stdin: mpsc::Sender<String>,
-    pid: libc::pid_t,
+    group: draftmux_process::Group,
     exit: Arc<ExitState>,
 }
 
@@ -62,13 +61,11 @@ impl Connection {
         mut command: Command,
         on_message: impl Fn(Message) + Send + Sync + 'static,
     ) -> io::Result<Self> {
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
-        let pid = child.id() as libc::pid_t;
+            .stderr(Stdio::piped());
+        let (mut child, group) = draftmux_process::spawn(&mut command)?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -131,7 +128,7 @@ impl Connection {
 
         Ok(Self {
             stdin: lines,
-            pid,
+            group,
             exit,
         })
     }
@@ -144,26 +141,20 @@ impl Connection {
     }
 
     /// Closes stdin after the queued lines so pi shuts down, then escalates
-    /// to SIGTERM and SIGKILL of the process group if it doesn't exit, which
+    /// to SIGTERM and killing the process group if it doesn't exit, which
     /// also ends a write pi isn't reading. Returns at once.
     pub(crate) fn stop(self) {
-        let Self { stdin, pid, exit } = self;
+        let Self { stdin, group, exit } = self;
         drop(stdin);
         let escalate = move || {
-            for (grace, signal) in [(EOF_GRACE, libc::SIGTERM), (TERM_GRACE, libc::SIGKILL)] {
-                if exit.wait_until(Instant::now() + grace, |inner| inner.exited) {
-                    return;
-                }
-                // SAFETY: plain syscalls. pid was running a moment ago; the
-                // window for its reaping and reuse in between is negligible.
-                unsafe {
-                    if signal == libc::SIGTERM {
-                        libc::kill(pid, signal);
-                    } else {
-                        libc::killpg(pid, signal);
-                    }
-                }
+            if exit.wait_until(Instant::now() + EOF_GRACE, |inner| inner.exited) {
+                return;
             }
+            group.terminate();
+            if exit.wait_until(Instant::now() + TERM_GRACE, |inner| inner.exited) {
+                return;
+            }
+            group.kill();
         };
         if let Err(err) = thread::Builder::new()
             .name("pi-stop".into())

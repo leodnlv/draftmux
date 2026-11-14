@@ -3,8 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
@@ -13,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// How long claude gets to exit after stdin closes before SIGTERM, then
-/// before SIGKILL. claude exits about half a second after stdin closes
+/// before the process group is killed. claude exits about half a second after stdin closes
 /// while idle; a run in progress is finished first.
 const EOF_GRACE: Duration = Duration::from_secs(3);
 const TERM_GRACE: Duration = Duration::from_secs(2);
@@ -88,7 +87,7 @@ pub(crate) struct Connection {
     /// Lines for the writer thread, which owns stdin. Writing blocks while
     /// claude doesn't read, so callers only queue. `None` once stopping.
     stdin: Option<mpsc::Sender<Outgoing>>,
-    pid: libc::pid_t,
+    group: draftmux_process::Group,
     exit: Arc<ExitState>,
 }
 
@@ -129,23 +128,24 @@ impl Connection {
         max_record: usize,
         on_message: impl Fn(Message) + Send + Sync + 'static,
     ) -> io::Result<Self> {
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
-        let pid = child.id() as libc::pid_t;
+            .stderr(Stdio::piped());
+        let (child, group) = draftmux_process::spawn(&mut command)?;
+        // Shared with the wait thread, so it can still be reaped here if
+        // that thread fails to start.
+        let child = Arc::new(Mutex::new(child));
         let exit = Arc::new(ExitState::default());
-        match start_threads(&mut child, max_record, Arc::new(on_message), &exit) {
+        match start_threads(&child, &group, max_record, Arc::new(on_message), &exit) {
             Ok(stdin) => Ok(Self {
                 stdin: Some(stdin),
-                pid,
+                group,
                 exit,
             }),
             Err(err) => {
-                kill_group(pid);
-                let _ = child.wait();
+                group.kill();
+                let _ = child.lock().unwrap().wait();
                 Err(err)
             }
         }
@@ -160,34 +160,32 @@ impl Connection {
     }
 
     /// Closes stdin after the queued lines so claude exits once any run
-    /// ends, then escalates to SIGTERM and SIGKILL of the process group if
-    /// it doesn't, which also ends a write claude isn't reading. Returns at
+    /// ends, then escalates to SIGTERM and killing the process group if it
+    /// doesn't, which also ends a write claude isn't reading. Returns at
     /// once. Calling it again does nothing.
     pub(crate) fn stop(&mut self) {
         if self.stdin.take().is_none() {
             return;
         }
-        let (pid, exit) = (self.pid, self.exit.clone());
+        let (group, exit) = (self.group.clone(), self.exit.clone());
         let escalate = move || {
-            for (grace, signal) in [(EOF_GRACE, libc::SIGTERM), (TERM_GRACE, libc::SIGKILL)] {
-                if exit.wait_until(Instant::now() + grace, |inner| inner.exited) {
-                    return;
-                }
-                if signal == libc::SIGTERM {
-                    // SAFETY: a plain syscall on the child, which can't be
-                    // reaped and reused before `exited` is set.
-                    unsafe { libc::kill(pid, signal) };
-                } else {
-                    kill_group(pid);
-                }
+            if exit.wait_until(Instant::now() + EOF_GRACE, |inner| inner.exited) {
+                return;
             }
+            // The child can't be reaped, and its pid reused, before
+            // `exited` is set.
+            group.terminate();
+            if exit.wait_until(Instant::now() + TERM_GRACE, |inner| inner.exited) {
+                return;
+            }
+            group.kill();
         };
         if let Err(err) = thread::Builder::new()
             .name("claude-stop".into())
             .spawn(escalate)
         {
             eprintln!("claude-rpc: couldn't start the stop thread: {err}");
-            kill_group(self.pid);
+            self.group.kill();
         }
     }
 
@@ -195,12 +193,12 @@ impl Connection {
         Exit(self.exit.clone())
     }
 
-    /// SIGKILLs the process group now, for a process that can't be trusted
+    /// Kills the process group now, for a process that can't be trusted
     /// to exit.
     pub(crate) fn kill(&mut self) {
         self.stdin = None;
         if !self.exit.inner.lock().unwrap().exited {
-            kill_group(self.pid);
+            self.group.kill();
         }
     }
 }
@@ -211,23 +209,21 @@ impl Drop for Connection {
     }
 }
 
-fn kill_group(pid: libc::pid_t) {
-    // SAFETY: a plain syscall. The group is named by the child's pid, which
-    // stays reserved while the group has members.
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
-}
-
 /// Starts the reader, writer and wait threads and returns the writer's
 /// queue.
 fn start_threads(
-    child: &mut Child,
+    child: &Arc<Mutex<Child>>,
+    group: &draftmux_process::Group,
     max_record: usize,
     on_message: OnMessage,
     exit: &Arc<ExitState>,
 ) -> io::Result<mpsc::Sender<Outgoing>> {
-    let stdin: ChildStdin = child.stdin.take().expect("stdin is piped");
-    let stdout: ChildStdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
+    let (stdin, stdout, stderr) = {
+        let mut child = child.lock().unwrap();
+        let stdin: ChildStdin = child.stdin.take().expect("stdin is piped");
+        let stdout: ChildStdout = child.stdout.take().expect("stdout is piped");
+        (stdin, stdout, child.stderr.take().expect("stderr is piped"))
+    };
     let tail = Arc::new(Mutex::new(VecDeque::new()));
 
     let (exit_out, on_line) = (exit.clone(), on_message.clone());
@@ -253,18 +249,18 @@ fn start_threads(
         .name("claude-stdin".into())
         .spawn(move || write_lines(stdin, queue, |err| on_write(Message::WriteFailed(err))))?;
 
-    // Waits by pid so the `Child` stays with the caller, which can still
-    // reap it if this thread fails to start.
-    let pid = child.id() as libc::pid_t;
-    let exit_wait = exit.clone();
+    let (child, group, exit_wait) = (child.clone(), group.clone(), exit.clone());
     thread::Builder::new()
         .name("claude-wait".into())
         .spawn(move || {
-            let status = wait(pid);
+            let status = match child.lock().unwrap().wait() {
+                Ok(status) => describe(status),
+                Err(err) => format!("wait failed: {err}"),
+            };
             exit_wait.update(|inner| inner.exited = true);
             // Whatever is left of the group, such as a tool's process,
             // goes with claude.
-            kill_group(pid);
+            group.kill();
             // Deliver everything claude wrote before reporting the exit.
             exit_wait.wait_until(Instant::now() + DRAIN_GRACE, |inner| {
                 inner.stdout_done && inner.stderr_done
@@ -277,26 +273,15 @@ fn start_threads(
     Ok(lines)
 }
 
-/// Waits for `pid` to exit and reaps it.
-fn wait(pid: libc::pid_t) -> String {
-    let mut status = 0;
-    loop {
-        // SAFETY: waits for our own child, which nothing else reaps.
-        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if r == pid {
-            break;
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != ErrorKind::Interrupted {
-            return format!("wait failed: {err}");
-        }
+/// `exit status: N`, or on Unix `signal: N` for a process a signal ended.
+fn describe(status: ExitStatus) -> String {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return format!("signal: {signal}");
     }
-    if libc::WIFEXITED(status) {
-        format!("exit status: {}", libc::WEXITSTATUS(status))
-    } else if libc::WIFSIGNALED(status) {
-        format!("signal: {}", libc::WTERMSIG(status))
-    } else {
-        format!("wait status: {status}")
+    match status.code() {
+        Some(code) => format!("exit status: {code}"),
+        None => status.to_string(),
     }
 }
 

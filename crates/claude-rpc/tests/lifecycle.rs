@@ -2,6 +2,10 @@
 //! Claude Code 2.1.293 recordings of the C0 probes, trimmed to the fields
 //! that matter.
 
+// The scripts start `sleep` children, and the checks probe processes with
+// signals.
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};

@@ -135,6 +135,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     struct Fixture {
@@ -160,6 +161,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write(path: &Path) -> Value {
         json!({"file_path": path.to_str().unwrap(), "content": "x"})
     }
@@ -181,6 +183,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn writes_reach_the_draft_by_any_alias() {
         let f = fixture();
@@ -240,6 +243,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_at_the_draft_path_is_not_the_draft() {
         let f = fixture();

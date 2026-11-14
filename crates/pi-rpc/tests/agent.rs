@@ -635,6 +635,7 @@ fn abort_without_a_process_does_nothing() {
 }
 
 /// pi that ignores stdin EOF is terminated.
+#[cfg(unix)]
 #[test]
 fn stop_escalates_to_sigterm() {
     let mut h = Harness::new(&[&script("### hang")]);
@@ -650,6 +651,7 @@ fn stop_escalates_to_sigterm() {
 }
 
 /// pi that doesn't read stdin: calls return at once and requests time out.
+#[cfg(unix)]
 #[test]
 fn writes_dont_wait_for_pi_to_read() {
     let request = Duration::from_millis(300);
@@ -680,6 +682,7 @@ fn stop_doesnt_wait_for_pi_to_read() {
 
 /// pi ignores an abort before the run starts, so an aborted prompt that
 /// pi doesn't answer in time stops pi.
+#[cfg(unix)]
 #[test]
 fn unanswered_aborted_prompt_stops_pi() {
     let request = Duration::from_millis(300);

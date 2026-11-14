@@ -193,6 +193,7 @@ mod tests {
         assert_eq!(profiles[0].dir, home.join(".pi/agent"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn added_folders_follow_and_duplicates_are_dropped() {
         let home = tempfile::tempdir().unwrap();
