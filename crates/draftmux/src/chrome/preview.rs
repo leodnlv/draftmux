@@ -24,6 +24,9 @@ pub(super) struct Preview {
     pub copied_task: gpui::Task<()>,
     pub target: Option<Target>,
     pub selection: Entity<TextSelection>,
+    /// The selection while a redline shows: its text isn't the draft's, so
+    /// selecting it leaves the editor alone.
+    pub redline_selection: Entity<TextSelection>,
     pub scroll: ScrollHandle,
     pub cache: BlockCache,
     pub appearance: Option<(Target, bool, f32, f32)>,
@@ -39,7 +42,7 @@ pub(super) struct Preview {
     /// Scrolls along with this one, to the same fraction of its height.
     pub partner: Option<WeakEntity<Preview>>,
     pub marks: MarkState,
-    pub _selection: gpui::Subscription,
+    pub _selections: [gpui::Subscription; 2],
 }
 
 /// A change under the pointer, and where the pointer is.
@@ -119,7 +122,7 @@ impl Render for Preview {
                 entity.update(cx, |this, cx| this.scrolled(bounds, cx));
                 entity.update(cx, |this, cx| {
                     let texts = this.cache.texts();
-                    this.selection
+                    this.active_selection()
                         .update(cx, |selection, _| selection.set_texts(texts));
                 });
                 body
@@ -151,6 +154,15 @@ impl Render for Preview {
 }
 
 impl Preview {
+    /// The selection of the text shown: the redline's while reviewing.
+    fn active_selection(&self) -> &Entity<TextSelection> {
+        if self.redline.is_some() {
+            &self.redline_selection
+        } else {
+            &self.selection
+        }
+    }
+
     /// After each layout: scrolls a change asked for into view, and the
     /// partner along with any other scrolling.
     fn scrolled(&mut self, viewport: Bounds<Pixels>, cx: &mut Context<Self>) {
@@ -482,10 +494,8 @@ impl Preview {
                 let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
                 style.redline = redline.clone();
                 let style = Rc::new(style);
-                // A redline's text isn't the draft's, so it isn't selected
-                // for the editor.
-                let select = self.redline.is_none().then(|| SelectBody {
-                    state: self.selection.clone(),
+                let select = Some(SelectBody {
+                    state: self.active_selection().clone(),
                     body: 0,
                     color: theme.palette.selection,
                     registry: None,
@@ -527,7 +537,7 @@ impl Preview {
             ),
         };
 
-        selectable::area(&self.selection, cx)
+        selectable::area(self.active_selection(), cx)
             .id("preview")
             .size_full()
             .when_some(background, |this, background| this.bg(background))

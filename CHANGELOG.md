@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Text in the review's before and now columns is selectable and copies
+  with ⌘C, like the preview's.
 - The GitHub preview highlights code blocks that name a language, in
   GitHub's own syntax colors for light and dark mode. Review marks keep the
   colors of the code they cover.

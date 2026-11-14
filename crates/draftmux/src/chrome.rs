@@ -1986,14 +1986,23 @@ fn new_preview(
     scroll: ScrollHandle,
     cx: &mut Context<Chrome>,
 ) -> Entity<Preview> {
+    let redline_selection = cx.new(|cx| {
+        let mut selection = TextSelection::new(cx);
+        selection.set_scroller(Some(Scroller::Handle(scroll.clone())));
+        selection
+    });
     cx.new(|cx| Preview {
         document: None,
         fields: Default::default(),
         copied_field: None,
         copied_task: Task::ready(()),
         target: None,
-        _selection: cx.observe(&selection, |_, _, cx| cx.notify()),
+        _selections: [
+            cx.observe(&selection, |_, _, cx| cx.notify()),
+            cx.observe(&redline_selection, |_, _, cx| cx.notify()),
+        ],
         selection,
+        redline_selection,
         scroll,
         cache: Default::default(),
         appearance: None,

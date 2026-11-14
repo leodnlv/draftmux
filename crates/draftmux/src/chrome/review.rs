@@ -239,6 +239,15 @@ impl Chrome {
                     preview.target = target;
                 }
                 if preview.redline.is_some() || redline.is_some() {
+                    // A selection only lasts as long as the text it's in.
+                    let document = |redline: Option<&PreviewRedline>| {
+                        redline.map(|redline| Rc::as_ptr(&redline.document))
+                    };
+                    if document(preview.redline.as_ref()) != document(redline.as_ref()) {
+                        preview
+                            .redline_selection
+                            .update(cx, |selection, cx| selection.reset(cx));
+                    }
                     preview.redline = redline;
                     cx.notify();
                 }
