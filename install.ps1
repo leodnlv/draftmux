@@ -75,8 +75,10 @@ function Install-Draftmux {
     New-Item -ItemType Directory -Path $work | Out-Null
     $parent = Split-Path -Parent $dir
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    # Staged next to the target so the swap is a rename.
+    # Beside the target, so every move out of it is a rename on one volume.
     $staging = Join-Path $parent ".draftmux-install-$([guid]::NewGuid())"
+    $previous = Join-Path $staging 'previous'
+    $installed = $false
     try {
         $name = "Draftmux-$version-windows-x86_64"
         $zip = Join-Path $work "$name.zip"
@@ -93,7 +95,7 @@ function Install-Draftmux {
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
         if (-not $expected -or $expected -ne $actual) { Fail "checksum mismatch for $name.zip" }
 
-        $extracted = Join-Path $work 'extracted'
+        $extracted = Join-Path $staging 'extracted'
         Expand-Archive -LiteralPath $zip -DestinationPath $extracted
         $app = Join-Path $extracted 'draftmux-windows'
         $entries = @(Get-ChildItem -LiteralPath $extracted -Force)
@@ -103,9 +105,6 @@ function Install-Draftmux {
             (Test-Path -LiteralPath (Join-Path $app 'share\draftmux\pi-extension\draftmux.ts') -PathType Leaf)
         if (-not $complete) { Fail "$name.zip doesn't hold a complete Draftmux" }
 
-        New-Item -ItemType Directory -Path $staging | Out-Null
-        Move-Item -LiteralPath $app -Destination (Join-Path $staging 'app')
-        $previous = Join-Path $staging 'previous'
         if (Test-Path -LiteralPath $dir) {
             try {
                 Move-Item -LiteralPath $dir -Destination $previous
@@ -114,14 +113,21 @@ function Install-Draftmux {
             }
         }
         try {
-            Move-Item -LiteralPath (Join-Path $staging 'app') -Destination $dir
+            Move-Item -LiteralPath $app -Destination $dir
+            $installed = $true
         } catch {
             if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $dir }
             Fail "couldn't move Draftmux into $dir"
         }
     } finally {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        # The previous install is kept if it couldn't be put back, such as
+        # after Ctrl-C between the two moves.
+        if ($installed -or -not (Test-Path -LiteralPath $previous)) {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Warning "The previous Draftmux is in $previous"
+        }
     }
 
     # Minimized, so the console window the app frees at startup doesn't

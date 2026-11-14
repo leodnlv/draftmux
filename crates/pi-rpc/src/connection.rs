@@ -107,11 +107,14 @@ impl Connection {
             })?;
 
         let exit_wait = exit.clone();
+        let wait_group = group.clone();
         thread::Builder::new()
             .name("pi-wait".into())
             .spawn(move || {
                 let status = child.wait();
                 exit_wait.update(|inner| inner.exited = true);
+                // Whatever pi started and left running goes with it.
+                wait_group.kill();
                 // Deliver everything pi wrote before reporting the exit.
                 exit_wait.wait_until(Instant::now() + DRAIN_GRACE, |inner| {
                     inner.stdout_done && inner.stderr_done

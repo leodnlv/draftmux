@@ -13,8 +13,9 @@ use crate::session::{DraftSession, Start};
 const ENV_ALLOWLIST: &[&str] = &[
     "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM",
 ];
-/// What Windows programs need on top: Node's runtime, the user's folders
-/// and the temporary directory. Names there are case-insensitive.
+/// What Windows programs need on top: Node's runtime, the user's folders,
+/// the temporary directory and the Git Bash that Claude Code runs commands
+/// in. Names there are case-insensitive.
 #[cfg(windows)]
 const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
     "SystemRoot",
@@ -38,6 +39,7 @@ const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
     "OS",
     "PROCESSOR_ARCHITECTURE",
     "NUMBER_OF_PROCESSORS",
+    "CLAUDE_CODE_GIT_BASH_PATH",
 ];
 
 /// The oldest Claude Code whose protocol this crate was checked against.
@@ -356,6 +358,26 @@ mod tests {
         );
         let err = check_version(program, "2.0.1 (Claude Code)").unwrap_err();
         assert!(err.contains("needs Claude Code 2.1.293 or later"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_variables_pass_in_any_case() {
+        let env = [
+            ("Path".into(), r"C:\Windows".into()),
+            (
+                "claude_code_git_bash_path".into(),
+                r"D:\Git\bin\bash.exe".into(),
+            ),
+            ("CLAUDECODE".into(), "1".into()),
+        ];
+        let command = version_command(Path::new(r"C:\claude.exe"), &env);
+        let mut vars: Vec<_> = command
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        vars.sort();
+        assert_eq!(vars, ["Path", "claude_code_git_bash_path"]);
     }
 
     #[test]

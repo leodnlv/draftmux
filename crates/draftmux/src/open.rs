@@ -85,7 +85,14 @@ fn target_parser() -> impl TypedValueParser<Value = Target> {
 pub fn main(args: Args) -> Result<u8> {
     // pi runs with the environment of the agent shell that called `open`,
     // which has the PATH and API keys the source session used.
-    let pi = || Command::new("pi");
+    #[cfg(unix)]
+    let program = PathBuf::from("pi");
+    // Windows doesn't search PATH for npm's `pi.cmd` by the bare name.
+    #[cfg(windows)]
+    let program = shell_env::ShellEnv::capture()
+        .pi()
+        .map_or_else(|_| PathBuf::from("pi"), Path::to_path_buf);
+    let pi = || Command::new(&program);
     let claude = claude_available;
     let settings = load_settings();
     let draft = create(&args, &Store::open_default()?, &pi, &claude, &settings)?;

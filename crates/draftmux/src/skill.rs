@@ -233,13 +233,12 @@ fn is_stub(text: &str) -> bool {
 fn link_dir(target: impl AsRef<Path>, path: impl AsRef<Path>) -> io::Result<()> {
     use std::os::windows::process::CommandExt;
     let (target, path) = (target.as_ref(), path.as_ref());
-    // Paths can't contain quotes, so quoting each is enough for cmd.
+    // Through variables, which cmd expands once, so a `%` or `!` in a path
+    // stays literal; paths can't contain quotes.
     let status = std::process::Command::new("cmd")
-        .raw_arg(format!(
-            "/d /c mklink /J \"{}\" \"{}\"",
-            path.display(),
-            target.display()
-        ))
+        .env("DRAFTMUX_LINK_PATH", path)
+        .env("DRAFTMUX_LINK_TARGET", target)
+        .raw_arg(r#"/d /v:off /c mklink /J "%DRAFTMUX_LINK_PATH%" "%DRAFTMUX_LINK_TARGET%""#)
         .stdout(std::process::Stdio::null())
         .status()?;
     if !status.success() {
