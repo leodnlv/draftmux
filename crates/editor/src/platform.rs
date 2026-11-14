@@ -11,23 +11,39 @@ macro_rules! secondary {
 }
 #[macro_export]
 macro_rules! by_platform {
-    ($macos:expr, $linux:expr) => {
+    ($macos:expr, $other:expr) => {
         if cfg!(target_os = "macos") {
             $macos
         } else {
-            $linux
+            $other
         }
     };
 }
-pub const MONO: &str = by_platform!("Menlo", "DejaVu Sans Mono");
-pub const RICH_SANS: &str = by_platform!("Helvetica", "Liberation Sans");
+pub const MONO: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(windows) {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
+pub const RICH_SANS: &str = if cfg!(target_os = "macos") {
+    "Helvetica"
+} else if cfg!(windows) {
+    "Arial"
+} else {
+    "Liberation Sans"
+};
 
 pub fn ui_font() -> gpui::SharedString {
     #[cfg(target_os = "macos")]
     {
         ".SystemUIFont".into()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        "Segoe UI".into()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         static FAMILY: std::sync::OnceLock<gpui::SharedString> = std::sync::OnceLock::new();
         FAMILY

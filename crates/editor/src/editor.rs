@@ -136,13 +136,14 @@ fn bindings() -> Vec<KeyBinding> {
     ]
 }
 
-#[cfg(target_os = "linux")]
+/// Linux and Windows share Ctrl-based bindings.
+#[cfg(not(target_os = "macos"))]
 fn bindings() -> Vec<KeyBinding> {
-    linux_bindings()
+    ctrl_bindings()
 }
 
-#[cfg(any(test, target_os = "linux"))]
-fn linux_bindings() -> Vec<KeyBinding> {
+#[cfg(any(test, not(target_os = "macos")))]
+fn ctrl_bindings() -> Vec<KeyBinding> {
     let ctx = Some(KEY_CONTEXT);
     vec![
         KeyBinding::new("backspace", Backspace, ctx),
@@ -1387,8 +1388,8 @@ mod keymap_tests {
     use super::*;
     use gpui::Action;
     #[test]
-    fn linux_keys_are_unique_and_do_not_use_super() {
-        let bindings = linux_bindings();
+    fn ctrl_keys_are_unique_and_do_not_use_super() {
+        let bindings = ctrl_bindings();
         let mut keys = std::collections::HashSet::new();
         for binding in &bindings {
             let key = format!("{:?}", binding.keystrokes());
