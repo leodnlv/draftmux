@@ -32,7 +32,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use draftmux_storage::{Backend, Draft, Store};
 use editor::{Editor, EditorEvent, EditorStyle};
@@ -146,6 +146,8 @@ pub struct SelectionPopover {
     panel: Option<Panel>,
     /// The popover content's size, measured by the panel after layout.
     content_size: Option<Size<Pixels>>,
+    /// The state that is fading in and when it started.
+    faded: Option<(&'static str, Instant)>,
     /// Options that arrived while the panel is open, shown once the panel
     /// has their size.
     staged: Option<Staged>,
@@ -246,6 +248,8 @@ struct Panel {
     pinned: Edge,
     /// The edge that faces the selection.
     side: Edge,
+    /// The window, where the platform resizes it in place of gpui.
+    native: Option<Rc<crate::platform::NativeWindow>>,
     /// Dismisses the popover when the panel, key after a click on it, loses
     /// focus to another app.
     _activation: Subscription,
@@ -329,6 +333,7 @@ impl SelectionPopover {
             panel: None,
             content_size: None,
             staged: None,
+            faded: None,
             pane: Rc::new(Cell::new(None)),
             preview,
             preview_pane: Rc::new(Cell::new(None)),
@@ -619,6 +624,10 @@ impl SelectionPopover {
     fn set_mode(&mut self, mode: Mode, highlighted: Option<usize>, cx: &mut Context<Self>) {
         self.comment_observer = None;
         if let Some(open) = &mut self.open {
+            let key = fade_key(&mode);
+            if key != fade_key(&open.mode) {
+                self.faded = key.map(|key| (key, Instant::now()));
+            }
             open.mode = mode;
             open.highlighted = highlighted;
             self.changed(cx);
@@ -956,10 +965,30 @@ impl SelectionPopover {
                 if panel.pinned.corner(panel.bounds) == panel.pinned.corner(bounds) =>
             {
                 panel.bounds = bounds;
-                panel
-                    .handle
-                    .update(cx, |_, window, _| window.resize(bounds.size))
-                    .ok();
+                if let Some(native) = panel.native.clone() {
+                    // Drawing the panel at its new size needs the app, so
+                    // the resize waits for this update to end.
+                    let keep_top = panel.pinned == Edge::Top;
+                    let handle = panel.handle;
+                    cx.spawn(async move |this, cx| {
+                        let current = this
+                            .read_with(cx, |this, _| {
+                                this.panel
+                                    .as_ref()
+                                    .is_some_and(|panel| panel.handle == handle)
+                            })
+                            .unwrap_or(false);
+                        if current {
+                            crate::platform::resize_popup(&native, bounds.size, keep_top);
+                        }
+                    })
+                    .detach();
+                } else {
+                    panel
+                        .handle
+                        .update(cx, |_, window, _| window.resize(bounds.size))
+                        .ok();
+                }
             }
             (_, target) => {
                 self.close_panel(cx);
@@ -1055,12 +1084,13 @@ impl SelectionPopover {
         // current update.
         cx.defer(move |cx| {
             let mut activation = None;
+            let mut native = None;
             let mut open = |kind, cx: &mut App| {
                 cx.open_window(options(kind), |window, cx| {
                     // The comment field makes the panel key.
                     crate::platform::keep_inactive_appearance(window);
                     // The panel grows away from the selection.
-                    crate::platform::pin_contents(window, side == Edge::Bottom);
+                    native = crate::platform::prepare_popup(window, side == Edge::Top);
                     activation = Some(popover.update(cx, |_, cx| {
                         cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
@@ -1074,9 +1104,13 @@ impl SelectionPopover {
                 })
             };
             let opened = match open(anchored, cx) {
-                // A `PopUp` resize keeps its bottom edge.
+                // gpui resizes a `PopUp` keeping its bottom edge; the
+                // platform's resize keeps either.
                 Err(err) if err.is::<PopupNotSupportedError>() => {
-                    open(WindowKind::PopUp, cx).map(|handle| (handle, Edge::Bottom))
+                    open(WindowKind::PopUp, cx).map(|handle| {
+                        let pinned = if native.is_some() { side } else { Edge::Bottom };
+                        (handle, pinned)
+                    })
                 }
                 opened => opened.map(|handle| (handle, side)),
             };
@@ -1089,6 +1123,7 @@ impl SelectionPopover {
                             bounds,
                             pinned,
                             side,
+                            native: native.map(Rc::new),
                             _activation: activation.expect("set when the window opens"),
                         });
                         // Dismissed while it opened.
@@ -1513,24 +1548,31 @@ impl SelectionPopover {
                 .child(message.clone())
                 .into_any_element(),
         };
-        // The actions show with the panel; later states replace them in place
-        // and fade in rather than snapping.
-        let key = match &open.mode {
-            Mode::Actions(_) | Mode::Several(_) => return content,
-            Mode::Comment(_) => "popover-comment",
-            // Previews and then the options replace the spinner in place,
-            // without fading in again.
-            Mode::Running { .. } | Mode::Results(_) => "popover-options",
-            Mode::Error(_) => "popover-error",
-        };
-        div()
-            .child(content)
-            .with_animation(
-                key,
-                Animation::new(MODE_FADE).with_easing(ease_out_quint()),
-                |content, delta| content.opacity(delta),
-            )
-            .into_any_element()
+        match self.fade_in() {
+            Some(opacity) => div().opacity(opacity).child(content).into_any_element(),
+            None => content,
+        }
+    }
+
+    /// How far the current state has faded in, while it is fading. The
+    /// time is kept here rather than in the panel's element state, so a
+    /// panel reopened elsewhere goes on from where the last one was.
+    fn fade_in(&self) -> Option<f32> {
+        let (_, since) = self.faded?;
+        let delta = since.elapsed().as_secs_f32() / MODE_FADE.as_secs_f32();
+        (delta < 1.).then(|| ease_out_quint()(delta))
+    }
+}
+
+/// The states that fade in when they replace another, by what they show:
+/// the actions show with the panel, and previews and then the options
+/// replace the spinner in place without fading in again.
+fn fade_key(mode: &Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Actions(_) | Mode::Several(_) => None,
+        Mode::Comment(_) => Some("comment"),
+        Mode::Running { .. } | Mode::Results(_) => Some("options"),
+        Mode::Error(_) => Some("error"),
     }
 }
 
@@ -1667,6 +1709,9 @@ impl Render for PopoverPanel {
         let size = window.viewport_size();
         popover.update(cx, |popover, cx| popover.panel_sized(size, cx));
         let content = popover.read(cx).content(&popover, cx);
+        if popover.read(cx).fade_in().is_some() {
+            window.request_animation_frame();
+        }
         let staged = popover.read(cx).staged_content(cx).map(|staged| {
             let mut copy = measured(staged, {
                 let popover = popover.clone();

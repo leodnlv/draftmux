@@ -113,7 +113,17 @@ pub fn popup_background() -> gpui::WindowBackgroundAppearance {
 /// The compositor draws pop-up shadows the same whatever has the keyboard.
 pub fn keep_inactive_appearance(_: &gpui::Window) {}
 
-pub fn pin_contents(_: &gpui::Window, _: bool) {}
+/// A pop-up resized natively; there is none on Linux, where gpui resizes
+/// them.
+pub enum NativeWindow {}
+
+pub fn prepare_popup(_: &gpui::Window, _: bool) -> Option<NativeWindow> {
+    None
+}
+
+pub fn resize_popup(window: &NativeWindow, _: gpui::Size<gpui::Pixels>, _: bool) {
+    match *window {}
+}
 #[path = "platform_linux/frame.rs"]
 mod frame;
 pub use frame::frame;

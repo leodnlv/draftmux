@@ -191,31 +191,69 @@ pub fn keep_inactive_appearance(window: &gpui::Window) {
     }
 }
 
-/// Keeps `window`'s last frame at its size while the window resizes, pinned
-/// to the bottom edge or else the top, until a frame at the new size is
-/// drawn. The layer would otherwise stretch it to the new size for a frame.
-pub fn pin_contents(window: &gpui::Window, bottom: bool) {
+/// A pop-up's AppKit window, kept to resize it with [`resize_popup`].
+pub struct NativeWindow(Retained<objc2::runtime::AnyObject>);
+
+/// Sets up `window` as a pop-up that resizes keeping its top edge in place,
+/// or else its bottom, and returns it for [`resize_popup`].
+///
+/// It opens and closes without AppKit's fade, and while it resizes its last
+/// frame stays pinned to that edge at its own size instead of stretching to
+/// the new one.
+pub fn prepare_popup(window: &gpui::Window, keep_top: bool) -> Option<NativeWindow> {
     use objc2::runtime::AnyObject;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
-    };
+    let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
+        return None;
     };
-    // The names of `kCAGravityBottomLeft` and `kCAGravityTopLeft`; the
+    // The names of `kCAGravityTopLeft` and `kCAGravityBottomLeft`; the
     // view's layer isn't flipped, so they name the edges as seen.
-    let gravity = NSString::from_str(if bottom { "bottomLeft" } else { "topLeft" });
+    let gravity = NSString::from_str(if keep_top { "topLeft" } else { "bottomLeft" });
     // SAFETY: gpui's AppKit handle points at the window's live content view,
     // whose backing layer is gpui's Metal layer, and this runs on the main
-    // thread that owns them.
+    // thread that owns them. Retaining the window keeps it valid to message
+    // after it closes.
     unsafe {
         let view = handle.ns_view.as_ptr().cast::<AnyObject>();
         let layer: *mut AnyObject = msg_send![view, layer];
         if !layer.is_null() {
             let _: () = msg_send![layer, setContentsGravity: &*gravity];
         }
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        let ns_window = Retained::retain(ns_window)?;
+        // NSWindowAnimationBehaviorNone.
+        let _: () = msg_send![&*ns_window, setAnimationBehavior: 2isize];
+        Some(NativeWindow(ns_window))
+    }
+}
+
+/// Resizes a pop-up to `size` at once, keeping its top edge in place or
+/// else its bottom, and draws it at the new size before the resize shows.
+///
+/// gpui resizes a window later and draws it at the new size after that, so
+/// for a frame it would show its old contents in the new size. Call this
+/// outside gpui's updates: drawing the window needs the app.
+pub fn resize_popup(window: &NativeWindow, size: gpui::Size<gpui::Pixels>, keep_top: bool) {
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let (width, height) = (
+        f64::from(size.width.as_f32()),
+        f64::from(size.height.as_f32()),
+    );
+    // SAFETY: the retained window is valid to message on the main thread.
+    unsafe {
+        let frame: NSRect = msg_send![&*window.0, frame];
+        // AppKit's y axis points up, so the top edge is at the frame's top.
+        let y = if keep_top {
+            frame.origin.y + frame.size.height - height
+        } else {
+            frame.origin.y
+        };
+        let frame = NSRect::new(NSPoint::new(frame.origin.x, y), NSSize::new(width, height));
+        let _: () = msg_send![&*window.0, setFrame: frame, display: Bool::YES];
     }
 }
 
