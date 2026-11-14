@@ -42,9 +42,16 @@ impl Render for Tooltip {
     }
 }
 
+/// Longer text wraps in a card [`WRAP_WIDTH`] wide: gpui lays a tooltip out
+/// at its narrowest, and moves one that would cross the window's right edge
+/// to end at the pointer, so a long single line lands far from it.
+const WRAP_CHARS: usize = 56;
+const WRAP_WIDTH: f32 = 360.;
+
 /// A tooltip's card showing `text`, for hover labels gpui doesn't place.
 pub fn card(text: SharedString, cx: &App) -> gpui::Div {
     let palette = theme::palette(cx);
+    let wrap = text.chars().count() > WRAP_CHARS;
     div()
         .px(px(7.))
         .py(px(3.))
@@ -53,7 +60,8 @@ pub fn card(text: SharedString, cx: &App) -> gpui::Div {
         .text_color(palette.text)
         .text_size(px(12.))
         .line_height(px(15.))
-        .whitespace_nowrap()
+        .when(wrap, |card| card.w(px(WRAP_WIDTH)))
+        .when(!wrap, |card| card.whitespace_nowrap())
         .shadow(vec![
             shadow(hex(0x00000033), 0., 0., 0.5),
             shadow(hex(0x00000026), 2., 8., 0.),
