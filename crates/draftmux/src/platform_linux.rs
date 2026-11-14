@@ -112,6 +112,8 @@ pub fn popup_background() -> gpui::WindowBackgroundAppearance {
 
 /// The compositor draws pop-up shadows the same whatever has the keyboard.
 pub fn keep_inactive_appearance(_: &gpui::Window) {}
+
+pub fn pin_contents(_: &gpui::Window, _: bool) {}
 #[path = "platform_linux/frame.rs"]
 mod frame;
 pub use frame::frame;

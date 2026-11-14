@@ -191,6 +191,34 @@ pub fn keep_inactive_appearance(window: &gpui::Window) {
     }
 }
 
+/// Keeps `window`'s last frame at its size while the window resizes, pinned
+/// to the bottom edge or else the top, until a frame at the new size is
+/// drawn. The layer would otherwise stretch it to the new size for a frame.
+pub fn pin_contents(window: &gpui::Window, bottom: bool) {
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // The names of `kCAGravityBottomLeft` and `kCAGravityTopLeft`; the
+    // view's layer isn't flipped, so they name the edges as seen.
+    let gravity = NSString::from_str(if bottom { "bottomLeft" } else { "topLeft" });
+    // SAFETY: gpui's AppKit handle points at the window's live content view,
+    // whose backing layer is gpui's Metal layer, and this runs on the main
+    // thread that owns them.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setContentsGravity: &*gravity];
+        }
+    }
+}
+
 pub fn frame(
     content: gpui::AnyElement,
     _: &mut gpui::Window,

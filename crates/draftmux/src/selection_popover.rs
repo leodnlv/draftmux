@@ -1058,6 +1058,8 @@ impl SelectionPopover {
                 cx.open_window(options(kind), |window, cx| {
                     // The comment field makes the panel key.
                     crate::platform::keep_inactive_appearance(window);
+                    // The panel grows away from the selection.
+                    crate::platform::pin_contents(window, side == Edge::Bottom);
                     activation = Some(popover.update(cx, |_, cx| {
                         cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
