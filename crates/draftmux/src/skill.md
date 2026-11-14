@@ -47,22 +47,14 @@ set -- "$f"
 draftmux open "$@" --target github --note 'PR description for the retry change'
 ```
 
-- `--pi-agent-dir`: passed only when `PI_CODING_AGENT_DIR` is set, as above.
-  Otherwise Draftmux picks the profile from the session file's location or its
-  own settings.
 - `--target`: `github` for GitHub markdown, `slack` for Slack messages,
   `rich` for emails and documents with formatting such as bold and lists,
   `plain` for plain text. Leave it out when the user hasn't said where the
   message goes; Draftmux then uses its default for the directory.
 - `--backend`: leave it out unless the user names the agent the draft should
-  run on; Draftmux then uses its backend setting for the directory. Pass
-  `--backend claude` when the user asks for Claude Code: the draft continues
-  this conversation as its own Claude Code session. It works only from a
-  Claude Code session and doesn't take `--pi-agent-dir`, so run
-  `draftmux open "$f" --backend claude` with the other flags, without the
-  `set --` lines. Pass `--backend pi` when the user asks for pi, or when
-  `open` reports that Claude Code can't be used and the user wants the draft
-  anyway.
+  run on, then pass `--backend claude` or `--backend pi`. Also pass
+  `--backend pi` when `open` reports that Claude Code can't be used and the
+  user still wants the draft.
 - `--note`: one line saying what message to write, such as who it's for and
   what it should cover. Draftmux's agent writes the first draft from this
   conversation and the note, so include anything the conversation leaves
@@ -85,24 +77,10 @@ If `open` exits 1 without an ID, nothing was created; report the error.
 
 ## Draft fields
 
-Write a `title:` field for PRs and issues, or `subject:`, `to:` and `cc:`
-for emails, in YAML frontmatter at the top of the draft file. Only include
-known recipients; do not invent addresses. When handing off, include these
-requirements in the note for Draftmux's drafting agent.
-
-```markdown
----
-title: Add Aven to the app showcase
----
-
-Adds [Aven](https://github.com/raine/aven) to the app showcase.
-```
-
-Any key is allowed. Fields keep their file order. Use string values (quote
-values containing YAML punctuation); use comma-separated strings for recipients
-or labels, not YAML lists or nested objects. Empty values are allowed.
-The preview shows fields separately, and Copy in every format copies only the
-body. The editor keeps the raw frontmatter.
+In a file for `--draft-file`, put a `title:` field for PRs and issues, or
+`subject:`, `to:` and `cc:` for emails, in YAML frontmatter at the top. Only
+include known recipients. Use string values, quoting YAML punctuation, and
+comma-separated strings rather than lists.
 
 ## Read it back
 
@@ -127,17 +105,12 @@ Markdown; for one that takes Slack mrkdwn, change only `**bold**` to
 `*bold*`, `*italic*` to `_italic_`, `~~strike~~` to `~strike~` and
 `[text](url)` to `<url|text>`. Do not send or post until the user asks.
 
-A GitHub draft keeps each paragraph on one line, since a GitHub comment shows
-every line break. When it goes into a Markdown file in a repository instead,
-wrap its paragraphs to the line length the repository uses for Markdown, if
-it has one; a rendered file reads the same either way. Change only line
-breaks inside paragraphs and list items, never code blocks, tables or the
-words.
+A GitHub draft keeps each paragraph on one line. When it goes into a Markdown
+file in a repository instead, wrap paragraphs and list items to the
+repository's Markdown line length, if it has one; change nothing else.
 
-Plain `draftmux show` returns the complete file, including frontmatter.
-`--path` returns the raw file's path: use it for editing, not as a
-`--body-file` when fields are present. Malformed frontmatter is kept as body,
-with an empty fields map, so no text is lost.
+`draftmux show --path` returns the raw file's path, frontmatter included: use
+it for editing, not as a `--body-file`.
 
 If several drafts came from this session, `show` uses the most recently active
 one and lists the others on stderr; mention them to the user. If it finds no
@@ -150,11 +123,7 @@ this directory, newest first:
 draftmux list --cwd "$PWD"
 ```
 
-Each line is the ID, last edit time, target, directory and the title the
-sidebar shows. Show the user the drafts that could be this one and ask which
-to use, then read it with `draftmux show <id>`. Never run `open` to recover a draft.
-
-`show` reads archived drafts too. `list --all` includes them, marked
-`(archived)`. If the user wants an archived draft back in Draftmux, run
-`draftmux restore <id>`; `draftmux focus <id>` shows a draft that isn't
-archived.
+Show the user the drafts that could be this one and ask which to use, then
+read it with `draftmux show <id>`. Never run `open` to recover a draft.
+`list --all` includes archived drafts, which `show` also reads;
+`draftmux restore <id>` brings one back to the app.

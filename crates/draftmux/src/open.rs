@@ -46,7 +46,8 @@ pub struct Args {
     backend: Option<BackendArg>,
     /// pi profile to pin the draft to (`PI_CODING_AGENT_DIR`). Defaults to the
     /// profile the session file is stored in, else the profile Draftmux's
-    /// settings give the session's directory, else ~/.pi/agent.
+    /// settings give the session's directory, else ~/.pi/agent. Ignored for
+    /// a draft on Claude Code.
     #[arg(long, value_name = "DIR")]
     pi_agent_dir: Option<PathBuf>,
     /// Platform the message is for. Defaults to the one Draftmux's settings
@@ -149,18 +150,6 @@ fn create(
              leave out --backend claude to continue it on pi",
             path.display()
         );
-    }
-    if on_claude && args.pi_agent_dir.is_some() {
-        match args.backend {
-            Some(_) => {
-                bail!("--pi-agent-dir is for drafts on pi; leave it out with --backend claude")
-            }
-            None => bail!(
-                "--pi-agent-dir is for drafts on pi, and Draftmux's backend setting continues \
-                 Claude Code sessions on Claude Code in {}; add --backend pi to use it",
-                info.cwd.display()
-            ),
-        }
     }
     // Read before the draft exists, so a missing file creates nothing.
     let text = match &args.draft_file {
@@ -851,7 +840,7 @@ cat > /dev/null
     }
 
     #[test]
-    fn claude_backend_refuses_a_pi_source_and_a_pi_profile() {
+    fn claude_backend_refuses_a_pi_source_and_ignores_a_pi_profile() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("repo");
         fs::create_dir_all(&cwd).unwrap();
@@ -872,16 +861,10 @@ cat > /dev/null
             "--pi-agent-dir",
             profile,
         ]);
-        let err = create(&args, &store, &no_pi, &no_claude, &Settings::default()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("--pi-agent-dir is for drafts on pi"),
-            "{err}"
-        );
-        assert_eq!(
-            fs::read_dir(tmp.path().join("drafts")).map_or(0, |d| d.count()),
-            0
-        );
+        let draft = create(&args, &store, &no_pi, &claude_ok, &Settings::default()).unwrap();
+        let meta = store.load(&draft.id).unwrap().meta;
+        assert!(meta.pi().is_none());
+        assert!(matches!(meta.backend, Backend::Claude(_)));
 
         // Choosing pi explicitly keeps the profile override.
         let args = parse(&[
@@ -982,22 +965,6 @@ cat > /dev/null
             assert!(err.contains("wasn't found"), "{err}");
             assert!(err.contains("--backend pi"), "{err}");
         }
-
-        // A pi profile can't go with the setting's Claude Code either.
-        let args = parse(&[
-            transcript.to_str().unwrap(),
-            "--pi-agent-dir",
-            tmp.path().to_str().unwrap(),
-        ]);
-        let err = create(
-            &args,
-            &store,
-            &no_pi,
-            &no_claude,
-            &claude_rule_on(tmp.path()),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("add --backend pi"), "{err}");
         assert_eq!(
             fs::read_dir(tmp.path().join("drafts")).map_or(0, |d| d.count()),
             0
