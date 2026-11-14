@@ -149,6 +149,7 @@ mod tests {
         assert_eq!(s.matching_rules(Path::new("~/code/app"), &home), [0]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolves_symlinks_on_both_sides() {
         let (_t, root) = tmp();
