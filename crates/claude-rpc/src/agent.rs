@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,9 +12,12 @@ use std::time::{Duration, Instant};
 use futures::channel::{mpsc, oneshot};
 use serde_json::{Value, json};
 
-use crate::connection::{Closed, Connection, Message, Ticket};
-use crate::launch::LaunchSpec;
+use draftmux_agent::History;
+
+use crate::connection::{Closed, Connection, EXIT_BOUND, Exit, Message, Ticket};
+use crate::launch::{LaunchSpec, Session};
 use crate::protocol::{self, Init};
+use crate::session::{self, DraftSession, Missing, Start};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -61,6 +65,12 @@ pub enum AgentEvent {
         error: String,
         failed_prompt: Option<String>,
     },
+    /// A [`Session::Draft`]'s transcript is now at this path: in Claude's
+    /// storage after the session's first run, then in the draft once
+    /// adopted. Record it as the draft's
+    /// [`DraftSession::transcript`], so a later start reports a lost
+    /// transcript instead of starting over.
+    Transcript(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +91,8 @@ pub enum Error {
     /// claude didn't answer within the request timeout. It may still act on
     /// the request.
     Timeout(Duration),
+    /// The draft's session can't continue without this file.
+    Missing(Missing),
 }
 
 impl fmt::Display for Error {
@@ -95,6 +107,7 @@ impl fmt::Display for Error {
             Error::Timeout(timeout) => {
                 write!(f, "claude didn't answer within {} s", timeout.as_secs())
             }
+            Error::Missing(missing) => write!(f, "{missing}"),
         }
     }
 }
@@ -107,7 +120,9 @@ type Reply = Result<(), Error>;
 ///
 /// No call blocks on claude: lines are queued to a writer thread, and a
 /// timer thread per process fails control requests claude doesn't answer
-/// in time and stops it once idle. Contract for the app:
+/// in time and stops it once idle. The one wait is for a stopped process
+/// to exit before another starts on the same session, usually half a
+/// second and at most the stop escalation. Contract for the app:
 ///
 /// - Call [`Agent::focus`] when the draft is selected and [`Agent::blur`]
 ///   when switching away. Requests start claude when it isn't running.
@@ -121,6 +136,10 @@ pub struct Agent {
 struct Shared {
     spec: LaunchSpec,
     config: Config,
+    /// Where Claude keeps a [`Session::Draft`]'s transcript until adopted.
+    storage: Option<PathBuf>,
+    /// The draft session's recorded transcript, as last reported.
+    recorded: Mutex<Option<PathBuf>>,
     events: mpsc::UnboundedSender<AgentEvent>,
     inner: Mutex<Inner>,
     /// Wakes the timer thread after `inner` changed.
@@ -134,6 +153,9 @@ struct Inner {
     /// The model the next process starts with.
     model: Option<String>,
     live: Option<Live>,
+    /// The exit of the last process stopped. The next one waits for it, so
+    /// two processes never write one session.
+    previous: Option<Exit>,
 }
 
 struct Live {
@@ -153,6 +175,9 @@ struct Live {
     /// Permission and hook requests claude is waiting on, by request id.
     callbacks: HashMap<String, Callback>,
     stop_when_quiescent: bool,
+    /// The process created the draft session's transcript in Claude's
+    /// storage, which isn't recorded until a run of it settles.
+    unrecorded: bool,
     last_activity: Instant,
     /// When a run whose `result` arrived is taken as settled without
     /// `idle`.
@@ -272,14 +297,30 @@ impl Agent {
     pub fn new(spec: LaunchSpec, config: Config) -> (Self, mpsc::UnboundedReceiver<AgentEvent>) {
         let (events, rx) = mpsc::unbounded();
         let model = spec.model.clone();
+        let (storage, recorded) = match &spec.session {
+            Some(Session::Draft(draft)) => {
+                // The `HOME` claude gets.
+                let home = (spec.extra_env.iter().rev())
+                    .chain(&spec.env)
+                    .find(|(key, _)| key == "HOME")
+                    .map(|(_, home)| PathBuf::from(home))
+                    .or_else(std::env::home_dir)
+                    .unwrap_or_default();
+                (Some(draft.storage(&home)), draft.transcript.clone())
+            }
+            _ => (None, None),
+        };
         let shared = Arc::new(Shared {
             spec,
             config,
+            storage,
+            recorded: Mutex::new(recorded),
             events,
             inner: Mutex::new(Inner {
                 generation: 0,
                 model,
                 live: None,
+                previous: None,
             }),
             changed: Condvar::new(),
         });
@@ -374,6 +415,19 @@ impl Agent {
         }
     }
 
+    /// The conversation of a [`Session::Draft`] so far, read from its
+    /// transcript; empty for other sessions. Reads files, but doesn't wait
+    /// for claude.
+    pub fn history(&self) -> Result<History, String> {
+        match self.shared.draft() {
+            Some((draft, storage)) => draft.history(&storage),
+            None => Ok(History {
+                earlier: 0,
+                messages: Vec::new(),
+            }),
+        }
+    }
+
     /// Switches the session's model from the next turn, by a value from
     /// [`Init::models`]. Once accepted, later processes start with it too.
     pub fn set_model(
@@ -419,8 +473,64 @@ impl Shared {
         let _ = self.events.unbounded_send(event);
     }
 
+    /// The draft session with its latest recorded transcript, and where
+    /// Claude keeps it.
+    fn draft(&self) -> Option<(DraftSession, PathBuf)> {
+        let Some(Session::Draft(draft)) = &self.spec.session else {
+            return None;
+        };
+        let mut draft = draft.clone();
+        draft.transcript = self.recorded.lock().unwrap().clone();
+        Some((draft, self.storage.clone()?))
+    }
+
+    fn adopt_on_exit(&self) {
+        if let Err(err) = self.adopt() {
+            eprintln!("claude-rpc: {err}");
+        }
+    }
+
+    fn record(&self, path: PathBuf) {
+        *self.recorded.lock().unwrap() = Some(path.clone());
+        self.emit(AgentEvent::Transcript(path));
+    }
+
+    /// Moves the draft session's transcript into the draft. Only while no
+    /// process has the session.
+    fn adopt(&self) -> Result<(), Error> {
+        let Some((draft, storage)) = self.draft() else {
+            return Ok(());
+        };
+        let adopted = draft.adopt(&storage).map_err(|err| {
+            Error::Spawn(format!(
+                "couldn't move the transcript into {}: {err}",
+                draft.dir.display()
+            ))
+        })?;
+        if let Some(path) = adopted {
+            self.record(path);
+        }
+        Ok(())
+    }
+
+    /// How the next process continues the session, once nothing else has
+    /// it.
+    fn start(&self) -> Result<Option<Start>, Error> {
+        Ok(match &self.spec.session {
+            None => None,
+            Some(Session::New(id)) => Some(Start::New(id.clone())),
+            Some(Session::Resume(target)) => Some(Start::Resume(target.clone())),
+            Some(Session::Draft(_)) => {
+                self.adopt()?;
+                let (draft, _) = self.draft().expect("a draft session");
+                Some(draft.start().map_err(Error::Missing)?)
+            }
+        })
+    }
+
     fn stop(&self, inner: &mut Inner) {
         if let Some(mut live) = inner.live.take() {
+            inner.previous = Some(live.conn.exit());
             if live.failed.is_none()
                 && live.run.is_some()
                 && let Err(err) = live.interrupt(Waiter::Ignore, self.config.request_timeout)
@@ -449,10 +559,19 @@ impl Shared {
 
     fn ensure_live<'a>(self: &Arc<Self>, inner: &'a mut Inner) -> Result<&'a mut Live, Error> {
         if inner.live.is_none() {
+            if let Some(previous) = &inner.previous {
+                if !previous.wait(Instant::now() + EXIT_BOUND) {
+                    return Err(Error::Spawn(
+                        "the previous claude process of this session hasn't exited".into(),
+                    ));
+                }
+                inner.previous = None;
+            }
+            let start = self.start()?;
             inner.generation += 1;
             let generation = inner.generation;
             let weak = Arc::downgrade(self);
-            let command = self.spec.command(inner.model.as_deref());
+            let command = self.spec.command(inner.model.as_deref(), start.as_ref());
             let conn = Connection::spawn(command, self.config.max_record, move |message| {
                 on_message(&weak, generation, message)
             })
@@ -469,6 +588,13 @@ impl Shared {
                 reports_state: false,
                 callbacks: HashMap::new(),
                 stop_when_quiescent: false,
+                unrecorded: matches!(
+                    (&self.spec.session, &start),
+                    (
+                        Some(Session::Draft(_)),
+                        Some(Start::New(_) | Start::Fork { .. })
+                    )
+                ),
                 last_activity: Instant::now(),
                 settle_due: None,
             };
@@ -511,6 +637,18 @@ impl Shared {
             error: None,
         });
         self.emit(AgentEvent::RunSettled { aborted, error });
+        if live.unrecorded
+            && let Some((draft, storage)) = self.draft()
+        {
+            match session::native(&storage, &draft.id) {
+                Ok(Some(path)) => {
+                    live.unrecorded = false;
+                    self.record(path);
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("claude-rpc: couldn't look for the transcript: {err}"),
+            }
+        }
     }
 
     /// Expires requests, settles a run whose `idle` is overdue and stops
@@ -579,6 +717,11 @@ fn on_message(shared: &Weak<Shared>, generation: u64, message: Message) {
     if inner.generation != generation {
         return;
     }
+    if matches!(message, Message::Exited { .. }) && inner.live.is_none() {
+        // The last process stopped is gone, so nothing has the session.
+        shared.adopt_on_exit();
+        return;
+    }
     let Inner { model, live, .. } = &mut *inner;
     let Some(live) = live else {
         return;
@@ -620,6 +763,7 @@ fn on_message(shared: &Weak<Shared>, generation: u64, message: Message) {
                 error,
                 failed_prompt: live.turn.map(|turn| turn.text),
             });
+            shared.adopt_on_exit();
             shared.changed.notify_all();
             return;
         }

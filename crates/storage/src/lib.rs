@@ -20,7 +20,7 @@ pub use autosave::{Autosave, Conflict};
 pub use config::{CONFIG_DIR_VAR, CONFIG_FILES, config_dir, prepare_config_dir};
 pub use history::{Edit, History};
 pub use meta::{
-    Backend, ClaudeSession, DraftSettings, Meta, ModelChoice, PiSession, Source, SourceKind,
-    Status, Syntax, Target,
+    Backend, ClaudeFork, ClaudeSession, DraftSettings, Meta, ModelChoice, PiSession, Source,
+    SourceKind, Status, Syntax, Target,
 };
 pub use store::{DATA_DIR_VAR, Draft, NewDraft, Scan, Store, by_activity, data_dir};

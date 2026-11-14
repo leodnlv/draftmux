@@ -77,6 +77,13 @@ impl Meta {
                 dir.display()
             ));
         }
+        if claude
+            .fork
+            .as_ref()
+            .is_some_and(|fork| fork.source_session_id == claude.session_id)
+        {
+            return Err("a Claude draft's session is its fork source".into());
+        }
         if let Some(transcript) = &claude.transcript {
             if !transcript.is_absolute() {
                 return Err(format!(
@@ -136,12 +143,30 @@ pub struct ClaudeSession {
     /// The native session ID (`--session-id`), known before the session
     /// has a transcript.
     pub session_id: Uuid,
-    /// The session's transcript, `<session_id>.jsonl`, once it exists.
+    /// Where the session's transcript, `<session_id>.jsonl`, was last
+    /// recorded: in Claude Code's storage after the first run, then in the
+    /// draft's `session/` once moved there. None until it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<PathBuf>,
     /// `CLAUDE_CONFIG_DIR` for the session; none leaves it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<PathBuf>,
+    /// The Claude Code session the draft's session forks, from a snapshot
+    /// in the draft's `session/`; none for a session of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ClaudeFork>,
+}
+
+/// Where a draft's Claude Code session forked its source (see
+/// [`ClaudeSession::fork`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeFork {
+    /// The source's native session ID.
+    pub source_session_id: Uuid,
+    /// The uuid of the source's newest message when the draft was created.
+    /// The conversation up to it is the source's, after it the draft's.
+    pub boundary: Uuid,
 }
 
 /// The `backend` value of `meta.json`. Pi has no variant: a draft without
@@ -516,7 +541,11 @@ mod tests {
     "kind": "claude",
     "session_id": "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60",
     "transcript": "/Users/me/.claude/projects/-Users-me-code-app/0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60.jsonl",
-    "config_dir": "/Users/me/.claude-work"
+    "config_dir": "/Users/me/.claude-work",
+    "fork": {
+      "source_session_id": "6c1d1b9e-2f4a-4b8e-9d3c-7a5e1f0b2c4d",
+      "boundary": "0cf5a4d1-79c4-4901-a3ef-8d3611211105"
+    }
   },
   "first_draft_pending": true,
   "settings": {
@@ -552,11 +581,13 @@ mod tests {
         let backend = value["backend"].as_object_mut().unwrap();
         backend.remove("transcript");
         backend.remove("config_dir");
+        backend.remove("fork");
         let meta = parse(value.clone()).unwrap();
         let Backend::Claude(claude) = &meta.backend else {
             panic!("not Claude");
         };
         assert_eq!((&claude.transcript, &claude.config_dir), (&None, &None));
+        assert_eq!(claude.fork, None);
         assert_eq!(serde_json::to_value(&meta).unwrap(), value);
     }
 
@@ -603,6 +634,21 @@ mod tests {
             }),
             ("transcript named for another session", |v| {
                 v["backend"]["transcript"] = "/tmp/copy.jsonl".into();
+            }),
+            ("fork of itself", |v| {
+                v["backend"]["fork"]["source_session_id"] = v["backend"]["session_id"].clone()
+            }),
+            ("fork without boundary", |v| {
+                v["backend"]["fork"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("boundary");
+            }),
+            ("bad fork boundary", |v| {
+                v["backend"]["fork"]["boundary"] = "leaf".into()
+            }),
+            ("unknown fork field", |v| {
+                v["backend"]["fork"]["snapshot"] = "/tmp/source.jsonl".into()
             }),
             ("relative config dir", |v| {
                 v["backend"]["config_dir"] = ".claude".into()

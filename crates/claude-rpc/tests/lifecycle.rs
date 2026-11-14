@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
+use draftmux_agent::Message;
 use draftmux_claude_rpc::{
-    Agent, AgentEvent, Config, Error, LaunchSpec, PreToolUseHook, Session, Tool,
+    Agent, AgentEvent, Config, DraftSession, Error, LaunchSpec, Missing, PreToolUseHook, Session,
+    Tool,
 };
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
@@ -210,6 +212,7 @@ fn summary(event: &AgentEvent) -> String {
             error,
             failed_prompt,
         } => format!("Crashed({error}; prompt={failed_prompt:?})"),
+        AgentEvent::Transcript(path) => format!("Transcript({})", path.display()),
     }
 }
 
@@ -918,4 +921,209 @@ fn stop_escalates_when_claude_ignores_eof_and_sigterm() {
     h.agent().stop();
     assert_gone(h.pid(0));
     assert_gone(child);
+}
+
+const DRAFT_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// A draft session in `root/draft`, with `root/home` as the `HOME` claude
+/// gets and a `CLAUDE_CONFIG_DIR` the session overrides.
+fn draft_harness(
+    scripts: &[&str],
+    root: &std::path::Path,
+    edit: impl FnOnce(&mut DraftSession),
+) -> Harness {
+    let dir = root.join("draft");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut draft = DraftSession {
+        id: DRAFT_ID.into(),
+        dir,
+        config_dir: None,
+        fork_boundary: None,
+        transcript: None,
+    };
+    edit(&mut draft);
+    let home = root.join("home");
+    Harness::with(scripts, config(), |spec| {
+        spec.env.push(("HOME".into(), "/nonexistent".into()));
+        spec.extra_env.push(("HOME".into(), home.into()));
+        spec.extra_env
+            .push(("CLAUDE_CONFIG_DIR".into(), "/nonexistent".into()));
+        spec.session = Some(Session::Draft(draft));
+    })
+}
+
+fn args(record: &Value) -> Vec<String> {
+    record["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn has_args(record: &Value, expected: &[&str]) -> bool {
+    args(record).windows(expected.len()).any(|w| w == expected)
+}
+
+/// A turn in which claude writes `line` to the transcript at `path`.
+fn writing_turn(text: &str, path: &std::path::Path, line: &str) -> String {
+    format!(
+        "{}{}\n### append {} {line}\n{}\n{}",
+        prompt_in(text),
+        state("running"),
+        path.display(),
+        result("completed", false),
+        state("idle"),
+    )
+}
+
+#[test]
+fn a_new_draft_session_is_recorded_adopted_and_resumed_from_the_draft() {
+    let root = tempfile::tempdir().unwrap();
+    let native = root
+        .path()
+        .join(format!("home/.claude/projects/-tmp-x/{DRAFT_ID}.jsonl"));
+    let owned = root.path().join(format!("draft/{DRAFT_ID}.jsonl"));
+    let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"one"}}"#;
+    let first = format!("{INIT}\n{}\n### eof", writing_turn("one", &native, line));
+    let second = format!("{INIT}\n### eof");
+    let mut h = draft_harness(&[&first, &second], root.path(), |_| {});
+    resolve(h.agent().prompt("one".into())).unwrap();
+    let events = h.until("Transcript");
+    assert_eq!(
+        events[events.len() - 2..],
+        [
+            "Settled(aborted=false, error=None)".to_string(),
+            format!("Transcript({})", native.display()),
+        ]
+    );
+    let record = h.record(0);
+    assert!(has_args(&record, &["--session-id", DRAFT_ID]), "{record}");
+    assert!(record["env"].get("CLAUDE_CONFIG_DIR").is_none());
+
+    h.agent().stop();
+    h.assert_finished(0);
+    assert_eq!(h.take(1), [format!("Transcript({})", owned.display())]);
+    assert!(!native.exists() && owned.is_file(), "moved into the draft");
+    let history = h.agent().history().unwrap();
+    assert_eq!(history.earlier, 0);
+    assert_eq!(history.messages, [Message::User("one".into())]);
+
+    h.agent().focus().unwrap();
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    let record = h.record(1);
+    assert!(
+        has_args(&record, &["--resume", owned.to_str().unwrap()]),
+        "{record}"
+    );
+    assert!(!args(&record).contains(&"--session-id".to_string()));
+    h.agent().stop();
+    h.assert_finished(1);
+}
+
+#[test]
+fn a_fork_starts_from_its_snapshot_with_the_draft_config_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let snapshot = root.path().join("draft/source.jsonl");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot, "").unwrap();
+    let script = format!("{INIT}\n### eof");
+    let mut h = draft_harness(&[&script], root.path(), |draft| {
+        draft.fork_boundary = Some("b".into());
+        draft.config_dir = Some(config_dir.clone());
+    });
+    h.agent().focus().unwrap();
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    let record = h.record(0);
+    assert!(
+        has_args(
+            &record,
+            &[
+                "--resume",
+                snapshot.to_str().unwrap(),
+                "--fork-session",
+                "--session-id",
+                DRAFT_ID,
+            ]
+        ),
+        "{record}"
+    );
+    assert_eq!(
+        record["env"]["CLAUDE_CONFIG_DIR"],
+        config_dir.to_str().unwrap()
+    );
+    h.agent().stop();
+    h.assert_finished(0);
+}
+
+#[test]
+fn a_lost_transcript_or_snapshot_is_reported_without_starting_claude() {
+    let root = tempfile::tempdir().unwrap();
+    let recorded = root.path().join("gone.jsonl");
+    let h = draft_harness(&[], root.path(), |draft| {
+        draft.fork_boundary = Some("b".into());
+        draft.transcript = Some(recorded.clone());
+    });
+    assert_eq!(
+        h.agent().focus(),
+        Err(Error::Missing(Missing::Transcript(recorded.clone())))
+    );
+    let message = h.agent().history().unwrap_err();
+    assert!(message.contains("draft's text is unaffected"), "{message}");
+
+    let h = draft_harness(&[], root.path(), |draft| {
+        draft.fork_boundary = Some("b".into());
+    });
+    assert_eq!(
+        h.agent().focus(),
+        Err(Error::Missing(Missing::Snapshot(
+            root.path().join("draft/source.jsonl")
+        )))
+    );
+    assert!(!h.dir.path().join("record-0").exists(), "nothing started");
+}
+
+#[test]
+fn a_draft_transcript_is_never_replaced_by_one_in_claude_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let native = root
+        .path()
+        .join(format!("home/.claude/projects/-tmp-x/{DRAFT_ID}.jsonl"));
+    let owned = root.path().join(format!("draft/{DRAFT_ID}.jsonl"));
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
+    std::fs::write(&native, "stray\n").unwrap();
+    std::fs::write(&owned, "draft\n").unwrap();
+    let script = format!("{INIT}\n### eof");
+    let mut h = draft_harness(&[&script], root.path(), |_| {});
+    h.agent().focus().unwrap();
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    assert!(has_args(
+        &h.record(0),
+        &["--resume", owned.to_str().unwrap()]
+    ));
+    h.agent().stop();
+    h.assert_finished(0);
+    h.quiet(Duration::from_millis(100));
+    assert_eq!(std::fs::read_to_string(&owned).unwrap(), "draft\n");
+    assert_eq!(std::fs::read_to_string(&native).unwrap(), "stray\n");
+}
+
+#[test]
+fn a_restart_waits_for_the_previous_process_to_exit() {
+    let first = format!("{INIT}\n### sleep 1000\n### exit 0");
+    let second = format!("{INIT}\n### eof");
+    let mut h = Harness::new(&[&first, &second]);
+    h.agent().focus().unwrap();
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    let pid = h.pid(0);
+    h.agent().stop();
+    h.agent().focus().unwrap();
+    // SAFETY: probes a pid without signalling it.
+    let gone = unsafe { libc::kill(pid, 0) } == -1;
+    assert!(gone, "the first process exited before the second started");
+    assert_eq!(h.take(1), ["Ready(1)"]);
+    h.agent().stop();
+    h.assert_finished(1);
 }

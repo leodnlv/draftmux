@@ -9,7 +9,6 @@
 //! continue on, so pi uses that model instead.
 
 mod notes;
-mod select;
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -19,7 +18,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};
 
-use select::Line;
+use draftmux_claude_rpc::transcript::{self, Line};
 
 pub use draftmux_pi_profiles::ModelRef as Model;
 
@@ -74,11 +73,11 @@ impl Session {
     }
 }
 
-/// Converts the transcript read from `transcript`. `cwd` becomes the pi
+/// Converts the transcript read from `reader`. `cwd` becomes the pi
 /// session's working directory and shortens paths in tool notes.
-pub fn convert(transcript: impl BufRead, cwd: &Path, model: &ModelSelection) -> Result<Session> {
-    let lines = select::parse(transcript)?;
-    let conversation = select::conversation(&lines)?;
+pub fn convert(reader: impl BufRead, cwd: &Path, model: &ModelSelection) -> Result<Session> {
+    let lines = transcript::parse(reader).context("reading the transcript")?;
+    let conversation = transcript::conversation(&lines).map_err(anyhow::Error::msg)?;
     let messages = messages(&conversation, cwd);
     Ok(emit(&messages, cwd, model))
 }
@@ -133,7 +132,7 @@ fn messages<'a>(conversation: &[&'a Line], cwd: &Path) -> Vec<Turn<'a>> {
                 unreachable!("message IDs index assistant turns");
             };
             for block in line.blocks() {
-                if select::is_tool_use(block) {
+                if transcript::is_tool_use(block) {
                     if let Some(id) = block["id"].as_str() {
                         tool_slots.insert(id, (index, parts.len()));
                     }

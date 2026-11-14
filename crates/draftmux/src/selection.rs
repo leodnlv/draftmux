@@ -356,6 +356,7 @@ mod tests {
             session_id: "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60".parse().unwrap(),
             transcript: None,
             config_dir: None,
+            fork: None,
         });
         assert!(new(&meta).is_none());
     }

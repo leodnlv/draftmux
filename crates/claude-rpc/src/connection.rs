@@ -21,6 +21,11 @@ const TERM_GRACE: Duration = Duration::from_secs(2);
 /// A process claude started can keep the pipes open.
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
 const STDERR_TAIL: usize = 16 * 1024;
+/// How long a stopped claude can take to exit: the stop escalation, with a
+/// second to spare.
+pub(crate) const EXIT_BOUND: Duration = EOF_GRACE
+    .saturating_add(TERM_GRACE)
+    .saturating_add(Duration::from_secs(1));
 
 pub(crate) enum Message {
     Line(Value),
@@ -85,6 +90,18 @@ pub(crate) struct Connection {
     stdin: Option<mpsc::Sender<Outgoing>>,
     pid: libc::pid_t,
     exit: Arc<ExitState>,
+}
+
+/// Tells when a process has exited, after its connection is gone.
+#[derive(Clone)]
+pub(crate) struct Exit(Arc<ExitState>);
+
+impl Exit {
+    /// Waits until the process has exited, at most until `deadline`.
+    /// Returns whether it has.
+    pub(crate) fn wait(&self, deadline: Instant) -> bool {
+        self.0.wait_until(deadline, |inner| inner.exited)
+    }
 }
 
 #[derive(Default)]
@@ -172,6 +189,10 @@ impl Connection {
             eprintln!("claude-rpc: couldn't start the stop thread: {err}");
             kill_group(self.pid);
         }
+    }
+
+    pub(crate) fn exit(&self) -> Exit {
+        Exit(self.exit.clone())
     }
 
     /// SIGKILLs the process group now, for a process that can't be trusted

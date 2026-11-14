@@ -553,6 +553,7 @@ mod tests {
             session_id,
             transcript: None,
             config_dir: None,
+            fork: None,
         })
     }
 
@@ -601,6 +602,7 @@ mod tests {
                     session_id,
                     transcript: Some("/tmp/renamed copy.jsonl".into()),
                     config_dir: None,
+                    fork: None,
                 }))
             })
             .unwrap_err();

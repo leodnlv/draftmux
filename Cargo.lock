@@ -980,8 +980,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "draftmux-claude-rpc",
  "draftmux-pi-profiles",
- "serde",
  "serde_json",
  "tempfile",
  "uuid",
@@ -1499,8 +1499,10 @@ dependencies = [
 name = "draftmux-claude-rpc"
 version = "0.1.0"
 dependencies = [
+ "draftmux-agent",
  "futures",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",

@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::session::{DraftSession, Start};
+
 /// Variables passed through from [`LaunchSpec::env`]. Everything else is
 /// dropped: an app started from a Claude Code session inherits variables
 /// such as `CLAUDECODE` and `CLAUDE_CODE_SESSION_ID` that change how the CLI
@@ -21,7 +23,8 @@ pub struct LaunchSpec {
     /// The environment to take allowlisted variables from, such as the
     /// login-shell environment. `LANG` and `LC_*` are kept with the basics.
     pub env: Vec<(OsString, OsString)>,
-    /// Variables set as given, such as `CLAUDE_CONFIG_DIR`.
+    /// Variables set as given. A [`Session::Draft`] sets or unsets
+    /// `CLAUDE_CONFIG_DIR` from its own `config_dir`.
     pub extra_env: Vec<(OsString, OsString)>,
     /// The model of the first process. A successful [`Agent::set_model`]
     /// replaces it for later processes, since an explicit `--model`
@@ -93,6 +96,9 @@ pub enum Session {
     /// Continue a session by id or transcript path (`--resume`). A missing
     /// session makes the process exit with "No conversation found".
     Resume(OsString),
+    /// A draft's session, which each process starts, forks or resumes
+    /// depending on what exists then.
+    Draft(DraftSession),
 }
 
 /// A `PreToolUse` hook for the tools `matcher` matches, such as
@@ -106,8 +112,9 @@ pub struct PreToolUseHook {
 }
 
 impl LaunchSpec {
-    /// `claude` in stream-json mode with an allowlisted environment.
-    pub(crate) fn command(&self, model: Option<&str>) -> Command {
+    /// `claude` in stream-json mode with an allowlisted environment,
+    /// continuing the session as `start` says.
+    pub(crate) fn command(&self, model: Option<&str>, start: Option<&Start>) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args([
@@ -129,11 +136,18 @@ impl LaunchSpec {
         if let Some(model) = model {
             command.arg("--model").arg(model);
         }
-        match &self.session {
-            Some(Session::New(id)) => {
+        match start {
+            Some(Start::New(id)) => {
                 command.arg("--session-id").arg(id);
             }
-            Some(Session::Resume(target)) => {
+            Some(Start::Fork { snapshot, id }) => {
+                command
+                    .arg("--resume")
+                    .arg(snapshot)
+                    .args(["--fork-session", "--session-id"])
+                    .arg(id);
+            }
+            Some(Start::Resume(target)) => {
                 command.arg("--resume").arg(target);
             }
             None => {}
@@ -145,8 +159,15 @@ impl LaunchSpec {
                 command.env(key, value);
             }
         }
+        command.envs(self.extra_env.iter().map(|(k, v)| (k, v)));
+        // Claude must write where the agent looks for the transcript.
+        if let Some(Session::Draft(draft)) = &self.session {
+            match &draft.config_dir {
+                Some(dir) => command.env("CLAUDE_CONFIG_DIR", dir),
+                None => command.env_remove("CLAUDE_CONFIG_DIR"),
+            };
+        }
         command
-            .envs(self.extra_env.iter().map(|(k, v)| (k, v)))
             // Reports `session_state_changed`, which tells when a run is
             // over.
             .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1");
@@ -190,7 +211,7 @@ mod tests {
     #[test]
     fn command_line_and_environment() {
         let spec = spec();
-        let command = spec.command(Some("sonnet"));
+        let command = spec.command(Some("sonnet"), Some(&Start::New("0b5c".into())));
         assert_eq!(command.get_program(), "/opt/claude/bin/claude");
         assert_eq!(command.get_current_dir().unwrap(), spec.cwd);
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -238,9 +259,8 @@ mod tests {
         let mut spec = spec();
         spec.tools.clear();
         spec.setting_sources = vec![SettingSource::Project, SettingSource::Local];
-        spec.session = Some(Session::Resume("/drafts/one/s.jsonl".into()));
         spec.permission_prompt = false;
-        let command = spec.command(None);
+        let command = spec.command(None, Some(&Start::Resume("/drafts/one/s.jsonl".into())));
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             &args[7..],

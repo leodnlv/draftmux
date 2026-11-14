@@ -8,13 +8,17 @@
 //! ```
 //!
 //! The transcripts the CLI writes under `~/.claude/projects/` for the
-//! temporary directory are removed afterwards.
+//! temporary directory are removed afterwards; a draft's are in another
+//! temporary directory.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use draftmux_claude_rpc::{Agent, AgentEvent, Config, Error, LaunchSpec, Session};
+use draftmux_agent::Message;
+use draftmux_claude_rpc::{
+    Agent, AgentEvent, Config, DraftSession, Error, LaunchSpec, Session, Snapshot, transcript,
+};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
 use serde_json::Value;
@@ -262,4 +266,125 @@ fn live_missing_session() {
     }
     assert!(early_result);
     assert!(!running(&id));
+}
+
+fn wait_gone(id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while running(id) {
+        assert!(Instant::now() < deadline, "claude still running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn transcript_event(events: &mut UnboundedReceiver<AgentEvent>) -> PathBuf {
+    loop {
+        match next(events) {
+            AgentEvent::Transcript(path) => return path,
+            AgentEvent::Crashed { error, .. } => panic!("crashed: {error}"),
+            _ => {}
+        }
+    }
+}
+
+fn reply(events: &mut UnboundedReceiver<AgentEvent>) -> String {
+    let (frames, aborted, error) = run(events);
+    assert_eq!((aborted, error), (false, None));
+    text(&frames).1
+}
+
+#[test]
+#[ignore = "runs the real claude"]
+fn live_draft_fork_is_adopted_resumed_and_read_back() {
+    let scratch = Scratch::new();
+    let source_id = scratch.session.clone();
+    let (agent, mut events) = Agent::new(
+        spec(&scratch.cwd, Session::New(source_id.clone())),
+        config(),
+    );
+    block_on(
+        agent.prompt("Remember the code word PELICAN-42. Reply with exactly the word OK.".into()),
+    )
+    .unwrap();
+    reply(&mut events);
+    drop(agent);
+    wait_gone(&source_id);
+    let source = scratch.projects().join(format!("{source_id}.jsonl"));
+    let source_bytes = std::fs::read(&source).unwrap();
+
+    let draft_dir = tempfile::tempdir().unwrap();
+    let snapshot = Snapshot::take(&source, draft_dir.path()).unwrap();
+    assert_eq!(snapshot.session_id, source_id);
+    assert_eq!(snapshot.cwd, scratch.cwd);
+    let draft = DraftSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        dir: draft_dir.path().to_path_buf(),
+        config_dir: None,
+        fork_boundary: Some(snapshot.boundary.clone()),
+        transcript: None,
+    };
+    let native = scratch.projects().join(format!("{}.jsonl", draft.id));
+    let (agent, mut events) =
+        Agent::new(spec(&scratch.cwd, Session::Draft(draft.clone())), config());
+    let before = agent.history().unwrap();
+    assert!(
+        before.earlier >= 2 && before.messages.is_empty(),
+        "{before:?}"
+    );
+
+    let recall = "What was the code word? Reply with only the code word.";
+    block_on(agent.prompt(recall.into())).unwrap();
+    let first = reply(&mut events);
+    assert!(
+        first.contains("PELICAN-42"),
+        "the fork has the source context: {first}"
+    );
+    assert_eq!(transcript_event(&mut events), native);
+    agent.stop();
+    assert_eq!(transcript_event(&mut events), draft.owned());
+    assert!(!native.exists() && draft.owned().is_file(), "adopted");
+
+    let again = "Reply with exactly the word DONE.";
+    block_on(agent.prompt(again.into())).unwrap();
+    let second = reply(&mut events);
+    drop(agent);
+    wait_gone(&draft.id);
+    assert!(
+        !native.exists(),
+        "resumed in the draft, not in Claude's storage"
+    );
+
+    // As the app restarts, with the recorded transcript.
+    let restarted = DraftSession {
+        transcript: Some(draft.owned()),
+        ..draft
+    };
+    let (agent, _events) = Agent::new(spec(&scratch.cwd, Session::Draft(restarted)), config());
+    let history = agent.history().unwrap();
+    assert_eq!(history.earlier, before.earlier);
+    let assistant = |text: &str| Message::Assistant {
+        text: text.trim().into(),
+        tool_calls: vec![],
+        stop: draftmux_agent::Stop::Completed,
+    };
+    assert_eq!(
+        history.messages,
+        [
+            Message::User(recall.into()),
+            assistant(&first),
+            Message::User(again.into()),
+            assistant(&second),
+        ]
+    );
+    let source_lines = transcript::parse(&source_bytes[..]).unwrap();
+    assert_eq!(
+        draftmux_claude_rpc::history(&source_lines, None)
+            .messages
+            .len(),
+        before.earlier
+    );
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        source_bytes,
+        "the source is unchanged"
+    );
 }

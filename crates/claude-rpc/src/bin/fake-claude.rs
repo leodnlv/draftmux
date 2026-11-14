@@ -18,6 +18,8 @@
 //! - `### spawn-child`: start a `sleep` in the process group and write its
 //!   pid to `child-<n>`.
 //! - `### no-input <ms>`: require that no line arrives for that long.
+//! - `### append <path> <line>`: append a line to a file, creating it and
+//!   its directory, as claude writes its transcript.
 //!
 //! A mismatch prints to stderr and exits 99. The pid, arguments, cwd and
 //! environment are written to `record-<n>` first.
@@ -112,6 +114,17 @@ fn main() {
                             fail(&format!("expected no input, received {line}"));
                         }
                     }
+                }
+                "append" => {
+                    let (path, line) = arg.split_once(' ').unwrap();
+                    let path = Path::new(path);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .unwrap();
+                    writeln!(file, "{line}").unwrap();
                 }
                 other => fail(&format!("unknown directive {other}")),
             }
