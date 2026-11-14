@@ -254,3 +254,33 @@ fn a_load_for_an_earlier_selection_is_ignored() {
     s.type_text("B\n");
     assert_eq!(s.session.drafts().deadline(), None);
 }
+
+#[test]
+fn saving_to_the_linked_file_saves_the_pending_edit_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("README.md");
+    std::fs::write(&path, "One\n").unwrap();
+    let mut s = Script::new();
+    let id = s.draft("One\n");
+    s.store
+        .update_meta(&id, |meta| {
+            meta.file = Some(draftmux_storage::LinkedFile::new(&path, b"One\n"));
+        })
+        .unwrap();
+    s.session.drafts_mut().refresh();
+    s.select(&id);
+    s.type_text("One two\n");
+
+    let saved = s
+        .session
+        .drafts_mut()
+        .save_to_file("One two\n", false)
+        .unwrap();
+    assert!(matches!(saved, Some(draftmux_storage::FileSave::Saved(_))));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "One two\n");
+    assert_eq!(s.text(&id), "One two\n");
+    assert_eq!(s.session.drafts().deadline(), None);
+    let current = s.session.drafts().current().unwrap();
+    let state = current.meta.file.as_ref().unwrap().state("One two\n");
+    assert!(state.unwrap().saved);
+}

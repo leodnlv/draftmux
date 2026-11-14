@@ -36,6 +36,9 @@ pub struct Meta {
     /// Settings resolved for the draft's directory when it was created.
     /// Later settings changes leave them alone.
     pub settings: DraftSettings,
+    /// The file the draft was opened from (`draftmux open --draft-file`),
+    /// which saving writes the draft back to.
+    pub file: Option<LinkedFile>,
     pub created_at: DateTime<Utc>,
     /// Last activity; the drafts list is sorted by this, newest first.
     pub updated_at: DateTime<Utc>,
@@ -224,6 +227,8 @@ struct MetaFile {
     first_draft_pending: bool,
     #[serde(default)]
     settings: DraftSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<LinkedFile>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -263,6 +268,7 @@ impl TryFrom<MetaFile> for Meta {
             note: file.note,
             first_draft_pending: file.first_draft_pending,
             settings: file.settings,
+            file: file.file,
             created_at: file.created_at,
             updated_at: file.updated_at,
         };
@@ -290,6 +296,7 @@ impl From<Meta> for MetaFile {
             note: meta.note,
             first_draft_pending: meta.first_draft_pending,
             settings: meta.settings,
+            file: meta.file,
             created_at: meta.created_at,
             updated_at: meta.updated_at,
         }
@@ -413,6 +420,17 @@ pub enum Status {
     Archived,
 }
 
+/// A file a draft was opened from (see [`Meta::file`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedFile {
+    /// Absolute path to the file.
+    pub path: PathBuf,
+    /// SHA-256, in hex, of the file's contents when the draft last read or
+    /// wrote it. A file that hashes otherwise was changed outside the
+    /// draft.
+    pub sha256: String,
+}
+
 /// The session the draft was handed off from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
@@ -505,6 +523,23 @@ mod tests {
         assert!(json.get("source").is_none());
         let back: Meta = serde_json::from_value(json).unwrap();
         assert!(back.is_sample());
+    }
+
+    #[test]
+    fn linked_file_is_stored_only_when_known() {
+        let mut meta: Meta = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(meta.file, None);
+        assert!(serde_json::to_value(&meta).unwrap().get("file").is_none());
+        meta.file = Some(LinkedFile {
+            path: "/Users/me/code/app/README.md".into(),
+            sha256: "ab12".into(),
+        });
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            json["file"],
+            serde_json::json!({"path": "/Users/me/code/app/README.md", "sha256": "ab12"})
+        );
+        assert_eq!(serde_json::from_value::<Meta>(json).unwrap(), meta);
     }
 
     #[test]

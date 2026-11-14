@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::ArgGroup;
-use draftmux_storage::{Draft, Status, Store, Target};
+use draftmux_storage::{Draft, FileState, Status, Store, Target};
 use serde::Serialize;
 
 /// Print a draft's text as the app last saved it.
@@ -27,7 +27,8 @@ pub struct Args {
     /// Print the absolute path of the live draft.md instead of its text.
     #[arg(long, conflicts_with = "json")]
     path: bool,
-    /// Print the ID, title, target, status, path and text as JSON.
+    /// Print the ID, title, target, status, path, linked file and text as
+    /// JSON.
     #[arg(long)]
     json: bool,
 }
@@ -39,8 +40,18 @@ struct JsonOutput<'a> {
     target: Target,
     status: Status,
     path: &'a Path,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<FileJson<'a>>,
     body: &'a str,
     fields: &'a markup::frontmatter::Fields,
+}
+
+/// The file the draft was opened from, and whether it holds the draft.
+#[derive(Serialize)]
+struct FileJson<'a> {
+    path: &'a Path,
+    #[serde(flatten)]
+    state: FileState,
 }
 
 /// Runs the command against the default drafts directory.
@@ -50,7 +61,7 @@ pub fn main(args: Args) -> Result<()> {
 }
 
 fn run(args: &Args, store: &Store, out: &mut impl Write, err: &mut impl Write) -> Result<()> {
-    let mut draft = resolve(args, store, err)?;
+    let mut draft = resolve(args.id.as_deref(), args.source.as_deref(), store, err)?;
     let path = draft.draft_path();
     let output = if args.path {
         crate::drafts::convert_mrkdwn(store, &mut draft)?;
@@ -62,12 +73,20 @@ fn run(args: &Args, store: &Store, out: &mut impl Write, err: &mut impl Write) -
         }
         if args.json {
             let parsed = markup::frontmatter::parse(&body);
+            let file = match &draft.meta.file {
+                Some(file) => Some(FileJson {
+                    path: &file.path,
+                    state: file.state(&body)?,
+                }),
+                None => None,
+            };
             let json = JsonOutput {
                 id: &draft.id,
                 title: &draft.meta.title,
                 target: draft.meta.target,
                 status: draft.meta.status,
                 path: &path,
+                file,
                 body: parsed.body,
                 fields: &parsed.fields,
             };
@@ -81,9 +100,16 @@ fn run(args: &Args, store: &Store, out: &mut impl Write, err: &mut impl Write) -
     crate::write_output(out, output.as_bytes())
 }
 
-fn resolve(args: &Args, store: &Store, err: &mut impl Write) -> Result<Draft> {
-    let Some(source) = &args.source else {
-        let id = args.id.as_deref().expect("clap requires an id or --source");
+/// The draft with `id`, else the most recently active draft from the session
+/// file `source`, reporting the others on `err`.
+pub(crate) fn resolve(
+    id: Option<&str>,
+    source: Option<&Path>,
+    store: &Store,
+    err: &mut impl Write,
+) -> Result<Draft> {
+    let Some(source) = source else {
+        let id = id.expect("clap requires an id or --source");
         return match crate::drafts::load(store, id)? {
             draft if draft.meta.is_sample() => Err(anyhow!("no draft with id {id}")),
             draft => Ok(draft),
@@ -103,7 +129,7 @@ fn resolve(args: &Args, store: &Store, err: &mut impl Write) -> Result<Draft> {
             .meta
             .source
             .as_ref()
-            .is_some_and(|s| &s.path == source)
+            .is_some_and(|s| s.path == *source)
     });
     let draft = matches
         .next()
@@ -180,6 +206,7 @@ mod tests {
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
+                file: None,
             })
             .unwrap();
         store.save_text(&draft.id, text).unwrap();
@@ -330,6 +357,37 @@ mod tests {
                 "body": BODY,
                 "fields": {},
             })
+        );
+    }
+
+    #[test]
+    fn json_includes_the_linked_file_and_whether_it_holds_the_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let path = root.path().join("README.md");
+        std::fs::write(&path, BODY).unwrap();
+        let draft = create(&store, "", "/s/a.jsonl", BODY, 0);
+        store
+            .update_meta(&draft.id, |meta| {
+                meta.file = Some(draftmux_storage::LinkedFile::new(&path, BODY.as_bytes()));
+            })
+            .unwrap();
+        let file = |store: &Store| {
+            let output = show(store, &[&draft.id, "--json"]);
+            output.result.unwrap();
+            let json: serde_json::Value = serde_json::from_str(&output.out).unwrap();
+            json["file"].clone()
+        };
+
+        assert_eq!(
+            file(&store),
+            serde_json::json!({"path": path, "saved": true, "changed_on_disk": false})
+        );
+        store.save_text(&draft.id, "edited").unwrap();
+        std::fs::write(&path, "theirs").unwrap();
+        assert_eq!(
+            file(&store),
+            serde_json::json!({"path": path, "saved": false, "changed_on_disk": true})
         );
     }
 

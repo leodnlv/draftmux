@@ -58,6 +58,7 @@ mod tests {
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
+                file: None,
             })
             .unwrap();
         store.save_text(&draft.id, text).unwrap();

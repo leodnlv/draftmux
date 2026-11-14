@@ -94,6 +94,7 @@ impl App {
             note: None,
             settings: DraftSettings::default(),
             text: text.into(),
+            file: None,
         };
         let draft = self.store.create(new).unwrap();
         let Backend::Claude(claude) = &draft.meta.backend else {

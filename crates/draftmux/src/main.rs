@@ -31,6 +31,7 @@ mod profiles;
 mod resources;
 mod restore;
 mod sample;
+mod save;
 mod scrollbar;
 mod selectable;
 mod selection;
@@ -70,6 +71,7 @@ struct Cli {
 enum Command {
     Open(open::Args),
     Show(show::Args),
+    Save(save::Args),
     List(list::Args),
     Focus(focus::Args),
     Restore(restore::Args),
@@ -86,6 +88,7 @@ fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Some(Command::Open(args)) => open::main(args),
         Some(Command::Show(args)) => show::main(args).map(|()| 0),
+        Some(Command::Save(args)) => save::main(args).map(|()| 0),
         Some(Command::List(args)) => list::main(args).map(|()| 0),
         Some(Command::Focus(args)) => focus::main(args).map(|()| 0),
         Some(Command::Restore(args)) => restore::main(args),

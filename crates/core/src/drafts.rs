@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Datelike, Local, Utc};
 use draftmux_storage::{
-    Autosave, Backend, Draft, Meta, Status, Store, Syntax, Target, by_activity,
+    Autosave, Backend, Draft, FileSave, Meta, Status, Store, Syntax, Target, by_activity,
 };
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(600);
@@ -269,6 +269,23 @@ impl Drafts {
         self.update_row(&id, meta, title)
     }
 
+    /// Saves the selected draft's pending edit, then writes `text`, the
+    /// editor's text, to the file the draft was opened from; see
+    /// [`Store::save_to_file`]. `None` with no draft selected.
+    pub fn save_to_file(&mut self, text: &str, overwrite: bool) -> Result<Option<FileSave>> {
+        self.flush()?;
+        let Some(current) = &self.current else {
+            return Ok(None);
+        };
+        let id = current.draft.id.clone();
+        let saved = self.store.save_to_file(&id, text, overwrite)?;
+        if let FileSave::Saved(meta) = &saved {
+            let title = display_title(&meta.title, || text.to_owned());
+            self.update_row(&id, meta.clone(), title)?;
+        }
+        Ok(Some(saved))
+    }
+
     /// Changes the selected draft's target. The text is left as it is, since
     /// every target other than plain text reads Markdown. Not counted as
     /// activity.
@@ -476,6 +493,7 @@ mod tests {
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
+                file: None,
             })
             .unwrap();
         store.save_text(&draft.id, text).unwrap();

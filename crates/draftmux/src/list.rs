@@ -176,6 +176,7 @@ mod tests {
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
+                file: None,
             })
             .unwrap();
         let at = chrono::DateTime::UNIX_EPOCH + chrono::Duration::minutes(minutes);

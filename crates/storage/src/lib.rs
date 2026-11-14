@@ -12,6 +12,7 @@ mod atomic;
 mod autosave;
 mod config;
 mod history;
+mod linked;
 mod meta;
 mod store;
 
@@ -19,8 +20,9 @@ pub use atomic::write as write_atomic;
 pub use autosave::{Autosave, Conflict};
 pub use config::{CONFIG_DIR_VAR, CONFIG_FILES, config_dir, prepare_config_dir};
 pub use history::{Edit, History};
+pub use linked::{FileSave, FileState, sha256};
 pub use meta::{
-    Backend, ClaudeFork, ClaudeSession, DraftSettings, Meta, ModelChoice, PiSession, Source,
-    SourceKind, Status, Syntax, Target,
+    Backend, ClaudeFork, ClaudeSession, DraftSettings, LinkedFile, Meta, ModelChoice, PiSession,
+    Source, SourceKind, Status, Syntax, Target,
 };
 pub use store::{DATA_DIR_VAR, Draft, NewDraft, Scan, Store, by_activity, data_dir};

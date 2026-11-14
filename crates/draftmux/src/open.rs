@@ -23,8 +23,8 @@ use draftmux_claude_rpc::Snapshot;
 use draftmux_pi_rpc::{ForkSpec, ModelOverride};
 use draftmux_settings::{DraftBackend, Settings};
 use draftmux_storage::{
-    Backend, ClaudeFork, ClaudeSession, Draft, NewDraft, PiSession, Source, SourceKind, Store,
-    Target,
+    Backend, ClaudeFork, ClaudeSession, Draft, LinkedFile, NewDraft, PiSession, Source, SourceKind,
+    Store, Target,
 };
 
 use crate::{ipc, resources, source};
@@ -58,7 +58,8 @@ pub struct Args {
     #[arg(long, conflicts_with = "draft_file")]
     note: Option<String>,
     /// Markdown file whose text the draft starts with, unchanged, instead of
-    /// a first draft written by Draftmux's agent.
+    /// a first draft written by Draftmux's agent. Saving the draft writes it
+    /// back to the file.
     #[arg(long, value_name = "PATH")]
     draft_file: Option<PathBuf>,
 }
@@ -182,11 +183,16 @@ fn create(
         );
     }
     // Read before the draft exists, so a missing file creates nothing.
-    let text = match &args.draft_file {
+    let (text, file) = match &args.draft_file {
         Some(file) => {
-            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?
+            let text = std::fs::read_to_string(file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let path = std::path::absolute(file)
+                .with_context(|| format!("resolving {}", file.display()))?;
+            let linked = LinkedFile::new(path, text.as_bytes());
+            (text, Some(linked))
         }
-        None => String::new(),
+        None => (String::new(), None),
     };
     let target = match (args.target, &args.draft_file) {
         (Some(target), _) => target,
@@ -231,6 +237,7 @@ fn create(
             note: args.note.clone(),
             settings,
             text,
+            file,
         };
         return create_claude(store, new, session, &path, claude);
     }
@@ -255,6 +262,7 @@ fn create(
         note: args.note.clone(),
         settings: resolved.draft_settings(),
         text: text.clone(),
+        file: file.clone(),
     };
     match info.kind {
         SourceKind::Pi => {
@@ -764,6 +772,9 @@ cat > /dev/null
         assert!(!meta.first_draft_pending);
         assert!(meta.source.is_some());
         assert!(meta.pi().unwrap().session_file.is_some());
+        let linked = meta.file.unwrap();
+        assert_eq!(linked.path, file);
+        assert!(linked.state(text).unwrap().saved);
     }
 
     #[test]

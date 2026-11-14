@@ -59,6 +59,7 @@ pub fn create(store: &Store, settings: &Settings, home: &Path) -> Result<Draft> 
         note: None,
         settings: resolved.draft_settings(),
         text: TEXT.to_owned(),
+        file: None,
     };
     let draft = store.create_with_session(new, |draft| {
         let file = claude_convert::empty(home, &model).write_into(&draft.session_dir())?;

@@ -25,7 +25,7 @@ use chrono::Utc;
 use draftmux_core::history::Recorded;
 use draftmux_core::outside::{Choice, Question};
 use draftmux_core::session::{Effect, Outcome, Session};
-use draftmux_storage::{Store, Target};
+use draftmux_storage::{FileSave, Store, Target};
 use editor::{Editor, EditorEvent, Redo, Undo};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, BoxShadow, Context, CursorStyle,
@@ -60,7 +60,8 @@ actions!(
         ToggleSidebar,
         ZoomIn,
         ZoomOut,
-        ResetZoom
+        ResetZoom,
+        SaveToFile
     ]
 );
 
@@ -96,6 +97,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(editor::secondary!("+"), ZoomIn, None),
         KeyBinding::new(editor::secondary!("-"), ZoomOut, None),
         KeyBinding::new(editor::secondary!("0"), ResetZoom, None),
+        KeyBinding::new(editor::secondary!("s"), SaveToFile, None),
     ]);
 }
 
@@ -322,6 +324,11 @@ impl Render for Chrome {
                 }
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+            .on_action(
+                cx.listener(|this, _: &SaveToFile, window, cx| {
+                    this.save_to_file(false, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &review::ToggleReview, window, cx| {
                 this.toggle_review(window, cx)
             }))
@@ -1131,6 +1138,12 @@ impl Chrome {
         if self.mirrored_flash == Some(started) {
             return;
         }
+        eprintln!(
+            "DBG mirror: text==src {} paras {} ranges {:?}",
+            editor.text() == self.preview_source,
+            self.preview_selection.read(cx).paragraphs().count(),
+            ranges
+        );
         // The preview catches up with the text, and publishes its
         // paragraphs as it paints, a frame or more later.
         if editor.text() != self.preview_source
@@ -1147,6 +1160,7 @@ impl Chrome {
         let ranges = ranges.to_vec();
         self.mirrored_flash = Some(started);
         let marks = self.preview_marks(ranges, cx);
+        eprintln!("DBG marks {:?}", marks);
         let color = theme::palette(cx).change_flash;
         self.preview_selection.update(cx, |selection, cx| {
             selection.set_flash(marks, started, color, cx)
@@ -1333,6 +1347,57 @@ impl Chrome {
         cx.notify();
     }
 
+    /// Writes the editor's text to the file the selected draft was opened
+    /// from. Unless `overwrite`, a file changed or removed outside the draft
+    /// is left alone until the user confirms replacing it.
+    fn save_to_file(&mut self, overwrite: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(file) = self
+            .session
+            .drafts()
+            .current()
+            .and_then(|draft| draft.meta.file.clone())
+        else {
+            return;
+        };
+        let name = file_name(&file.path);
+        let text = self.editor.read(cx).text().to_owned();
+        let detail = match self.session.drafts_mut().save_to_file(&text, overwrite) {
+            Ok(Some(FileSave::Saved(_))) => {
+                self.show_toast(format!("Saved {name}"), cx);
+                cx.notify();
+                return;
+            }
+            Ok(None) => return,
+            Ok(Some(FileSave::Changed)) => {
+                "It was changed outside this draft since the draft \
+                 last read or saved it. Saving replaces those changes."
+            }
+            Ok(Some(FileSave::Missing)) => {
+                "It was removed since the draft last read or saved \
+                 it. Saving creates it again."
+            }
+            Err(err) => {
+                self.show_error(format!("Couldn't save {name}: {err:#}"), cx);
+                cx.notify();
+                return;
+            }
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Save {name} anyway?"),
+            Some(detail),
+            &["Cancel", "Save Anyway"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(1) {
+                this.update_in(cx, |this, window, cx| this.save_to_file(true, window, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *theme::palette(cx);
         let current = self.session.drafts().current();
@@ -1350,10 +1415,24 @@ impl Chrome {
             (Some(error), _) => Some((SharedString::from(error.to_owned()), palette.danger)),
             // The sample's directory is just where it was created.
             (None, Some(draft)) if draft.meta.is_sample() => None,
-            (None, Some(draft)) => Some((
-                tilde(&draft.meta.cwd, std::env::home_dir().as_deref()).into(),
-                palette.faint,
-            )),
+            // A draft opened from a file shows the file, and whether it
+            // holds the editor's text.
+            (None, Some(draft)) => {
+                let home = std::env::home_dir();
+                let text = match &draft.meta.file {
+                    Some(file) => {
+                        let path = tilde(&file.path, home.as_deref());
+                        let text = self.editor.read(cx).text().as_bytes();
+                        if draftmux_storage::sha256(text) == file.sha256 {
+                            path
+                        } else {
+                            format!("{path} · Edited")
+                        }
+                    }
+                    None => tilde(&draft.meta.cwd, home.as_deref()),
+                };
+                Some((text.into(), palette.faint))
+            }
             (None, None) => None,
         };
 
@@ -1469,6 +1548,11 @@ impl Chrome {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let has_file = self
+            .session
+            .drafts()
+            .current()
+            .is_some_and(|draft| draft.meta.file.is_some());
         div()
             .flex_none()
             .flex()
@@ -1536,6 +1620,7 @@ impl Chrome {
                     ),
             )
             .child(target_switch(target, self.github_menu, palette, cx))
+            .children(has_file.then(|| save_button(palette, cx)))
             .child(copy::button(
                 palette,
                 self.copied.as_ref().map(|(serial, _)| *serial),
@@ -1547,6 +1632,41 @@ impl Chrome {
                 },
             ))
     }
+}
+
+/// The toolbar button that writes the draft back to the file it was opened
+/// from.
+fn save_button(palette: &Palette, cx: &mut Context<Chrome>) -> impl IntoElement {
+    div()
+        .id("save-to-file")
+        .flex_none()
+        .h(px(24.))
+        .px(px(9.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .rounded(px(6.))
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .hover(|style| style.bg(palette.hover))
+        .active(|style| style.opacity(0.8))
+        .on_click(cx.listener(|this, _, window, cx| this.save_to_file(false, window, cx)))
+        .child("Save")
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(palette.faint)
+                .child(editor::by_platform!("⌘S", "Ctrl+S")),
+        )
+}
+
+/// The last component of `path`, else the whole path.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The segmented control with every target. Both GitHub targets share one

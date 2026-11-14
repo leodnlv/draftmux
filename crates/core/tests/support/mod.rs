@@ -223,6 +223,7 @@ impl Script {
                 note: None,
                 settings: Default::default(),
                 text: text.to_owned(),
+                file: None,
             })
             .unwrap()
             .id;

@@ -7,7 +7,8 @@ use chrono::Utc;
 
 use crate::atomic;
 use crate::history::History;
-use crate::meta::{Backend, DraftSettings, Meta, Source, Status, Syntax, Target};
+use crate::linked::{FileSave, OnDisk, sha256};
+use crate::meta::{Backend, DraftSettings, LinkedFile, Meta, Source, Status, Syntax, Target};
 
 const DRAFT_FILE: &str = "draft.md";
 const META_FILE: &str = "meta.json";
@@ -47,6 +48,9 @@ pub struct NewDraft {
     /// The draft's text to start with. A handed-off draft that starts empty
     /// waits for its agent to write the first draft.
     pub text: String,
+    /// The file `text` was read from, which saving writes the draft back
+    /// to.
+    pub file: Option<LinkedFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +147,7 @@ impl Store {
                 note: new.note,
                 first_draft_pending,
                 settings: new.settings,
+                file: new.file,
                 created_at: now,
                 updated_at: now,
             },
@@ -245,7 +250,48 @@ impl Store {
         self.update_meta(id, |meta| meta.status = Status::Active)
     }
 
+    /// Writes `text` to the draft's linked file and records it as saved.
+    /// Unless `overwrite`, a file changed or removed since the draft last
+    /// read or wrote it is left alone, and the result says which. Writes the
+    /// file in place, so its permissions, and the file behind a symlink, are
+    /// kept.
+    pub fn save_to_file(&self, id: &str, text: &str, overwrite: bool) -> Result<FileSave> {
+        let (meta, refused) = self.try_update_meta(id, |meta| {
+            let file = meta
+                .file
+                .as_mut()
+                .context("the draft wasn't opened from a file")?;
+            if !overwrite {
+                match file.on_disk()? {
+                    OnDisk::Same => {}
+                    OnDisk::Changed => return Ok(Some(FileSave::Changed)),
+                    OnDisk::Missing => return Ok(Some(FileSave::Missing)),
+                }
+            }
+            std::fs::write(&file.path, text)
+                .with_context(|| format!("writing {}", file.path.display()))?;
+            file.sha256 = sha256(text.as_bytes());
+            meta.updated_at = Utc::now();
+            Ok(None)
+        })?;
+        Ok(refused.unwrap_or(FileSave::Saved(meta)))
+    }
+
     pub fn update_meta(&self, id: &str, update: impl FnOnce(&mut Meta)) -> Result<Meta> {
+        self.try_update_meta(id, |meta| {
+            update(meta);
+            Ok(())
+        })
+        .map(|(meta, ())| meta)
+    }
+
+    /// Like [`Store::update_meta`], but `update` can fail, leaving
+    /// `meta.json` as it was.
+    fn try_update_meta<T>(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut Meta) -> Result<T>,
+    ) -> Result<(Meta, T)> {
         let dir = self.draft_dir(id)?;
         let lock_path = dir.join(META_LOCK_FILE);
         let lock = std::fs::File::options()
@@ -258,9 +304,9 @@ impl Store {
         lock.lock()
             .with_context(|| format!("locking {}", lock_path.display()))?;
         let mut meta = read_meta(&dir)?;
-        update(&mut meta);
+        let value = update(&mut meta)?;
         write_meta(&dir, &meta)?;
-        Ok(meta)
+        Ok((meta, value))
     }
 
     /// Reads every draft directory. A missing root is an empty store;
@@ -456,6 +502,7 @@ mod tests {
             note: None,
             settings: Default::default(),
             text: String::new(),
+            file: None,
         }
     }
 
@@ -754,6 +801,115 @@ mod tests {
             store.load(&draft.id).unwrap().meta.syntax,
             Some(Syntax::Markdown)
         );
+    }
+
+    /// A draft linked to `README.md` in `dir`, which holds `contents`.
+    fn linked_draft(store: &Store, dir: &Path, contents: &str) -> (Draft, PathBuf) {
+        let path = dir.join("README.md");
+        std::fs::write(&path, contents).unwrap();
+        let draft = store
+            .create(NewDraft {
+                text: contents.to_owned(),
+                file: Some(LinkedFile::new(&path, contents.as_bytes())),
+                ..new_draft("a")
+            })
+            .unwrap();
+        (draft, path)
+    }
+
+    #[test]
+    fn save_to_file_writes_the_file_and_records_it_as_saved() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let (draft, path) = linked_draft(&store, root.path(), "old\n");
+        let file = draft.meta.file.as_ref().unwrap();
+        assert!(file.state("old\n").unwrap().saved);
+        assert!(!file.state("new\n").unwrap().saved);
+
+        let FileSave::Saved(meta) = store.save_to_file(&draft.id, "new\n", false).unwrap() else {
+            panic!("refused to save an unchanged file");
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(store.load(&draft.id).unwrap().meta, meta);
+        let state = meta.file.unwrap().state("new\n").unwrap();
+        assert!(state.saved && !state.changed_on_disk);
+        // Saving again checks against what was just written.
+        assert!(matches!(
+            store.save_to_file(&draft.id, "newer\n", false).unwrap(),
+            FileSave::Saved(_)
+        ));
+    }
+
+    #[test]
+    fn save_to_file_leaves_a_file_changed_outside_the_draft_unless_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let (draft, path) = linked_draft(&store, root.path(), "old\n");
+        std::fs::write(&path, "theirs\n").unwrap();
+        let file = draft.meta.file.as_ref().unwrap();
+        assert!(file.state("old\n").unwrap().changed_on_disk);
+
+        let before = store.load(&draft.id).unwrap().meta;
+        assert!(matches!(
+            store.save_to_file(&draft.id, "mine\n", false).unwrap(),
+            FileSave::Changed
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert_eq!(store.load(&draft.id).unwrap().meta, before);
+
+        store.save_to_file(&draft.id, "mine\n", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn save_to_file_recreates_a_removed_file_only_when_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let (draft, path) = linked_draft(&store, root.path(), "old\n");
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(
+            store.save_to_file(&draft.id, "new\n", false).unwrap(),
+            FileSave::Missing
+        ));
+        assert!(!path.exists());
+        store.save_to_file(&draft.id, "new\n", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_file_keeps_permissions_and_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let target = root.path().join("real.md");
+        std::fs::write(&target, "old\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = root.path().join("README.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let draft = store
+            .create(NewDraft {
+                file: Some(LinkedFile::new(&link, b"old\n")),
+                ..new_draft("a")
+            })
+            .unwrap();
+
+        store.save_to_file(&draft.id, "new\n", false).unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+        let mode = target.metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn save_to_file_needs_a_linked_file() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let draft = store.create(new_draft("a")).unwrap();
+        let err = store.save_to_file(&draft.id, "x", true).unwrap_err();
+        assert_eq!(err.to_string(), "the draft wasn't opened from a file");
     }
 
     #[test]

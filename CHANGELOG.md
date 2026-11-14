@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Save a draft opened from a file back to that file. A draft from
+  `draftmux open --draft-file` remembers the file and shows it in the
+  toolbar, marked Edited while it differs from the draft. Save (⌘S) writes
+  the draft in place, keeping the file's permissions and symlinks, and asks
+  before replacing a file that changed or was removed outside the draft.
+  `draftmux save` does the same from the command line, with `--overwrite`
+  to replace a changed file, and `draftmux show --json` reports the file
+  and whether it holds the draft.
 - Preview a draft as a GitHub repository file, such as README.md, where a
   single newline inside a paragraph shows as a space, as GitHub renders
   files, rather than as a line break, as it renders comments. Pick

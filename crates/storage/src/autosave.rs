@@ -183,6 +183,7 @@ mod tests {
                 note: None,
                 settings: Default::default(),
                 text: String::new(),
+                file: None,
             })
             .unwrap();
         let autosave = Autosave::new(store.clone(), draft.id, String::new(), DELAY);

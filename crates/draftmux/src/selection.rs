@@ -426,6 +426,7 @@ mod tests {
             note: None,
             first_draft_pending: false,
             settings: DraftSettings::default(),
+            file: None,
             created_at: Default::default(),
             updated_at: Default::default(),
         }
