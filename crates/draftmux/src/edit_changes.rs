@@ -4,6 +4,8 @@
 
 use std::ops::Range;
 
+use draftmux_core::diff::Hunk;
+
 /// How many words of unchanged text a change shows on either side.
 const CONTEXT_WORDS: usize = 4;
 
@@ -74,12 +76,11 @@ fn push_line(text: &mut String, line: &str) {
 }
 
 fn changes(old: &str, new: &str) -> Vec<EditChange> {
-    draftmux_core::diff::compare(old, new)
-        .hunks
+    merge_replacements(old, new, draftmux_core::diff::compare(old, new).hunks)
         .into_iter()
         .filter_map(|hunk| {
-            let removed = hunk.removed.trim();
-            let added = hunk.added.trim();
+            let removed = drop_blank_lines(hunk.removed.trim());
+            let added = drop_blank_lines(hunk.added.trim());
             if removed.is_empty() && added.is_empty() {
                 return None;
             }
@@ -113,12 +114,12 @@ fn changes(old: &str, new: &str) -> Vec<EditChange> {
             let target = if start < end {
                 start..end
             } else {
-                last_word(new, start)
+                word_beside(new, start)
             };
             Some(EditChange {
                 before,
-                removed: removed.to_owned(),
-                added: added.to_owned(),
+                removed,
+                added,
                 after,
                 target,
             })
@@ -168,11 +169,49 @@ fn trailing_context(text: &str) -> String {
     format!("{space}{kept}{cut}")
 }
 
-/// The word that ends at or before `at`, or `at..at` when there is none.
-fn last_word(text: &str, at: usize) -> Range<usize> {
+/// A removal followed by an insertion with only whitespace between them,
+/// as one replacement: a rewritten paragraph is one change.
+fn merge_replacements(old: &str, new: &str, hunks: Vec<Hunk>) -> Vec<Hunk> {
+    let mut merged: Vec<Hunk> = Vec::with_capacity(hunks.len());
+    for hunk in hunks {
+        if let Some(last) = merged.last_mut() {
+            let old_gap = &old[last.old.end..hunk.old.start];
+            let new_gap = &new[last.new.end..hunk.new.start];
+            if old_gap.trim().is_empty() && new_gap.trim().is_empty() {
+                last.removed = format!("{}{old_gap}{}", last.removed, hunk.removed);
+                last.added = format!("{}{new_gap}{}", last.added, hunk.added);
+                last.old.end = hunk.old.end;
+                last.new.end = hunk.new.end;
+                continue;
+            }
+        }
+        merged.push(hunk);
+    }
+    merged
+}
+
+/// `text` without its empty lines, which take room without saying anything
+/// about the change.
+fn drop_blank_lines(text: &str) -> String {
+    text.split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The word that ends at or before `at`, or else the one that starts after
+/// it, for pointing at where text was removed.
+fn word_beside(text: &str, at: usize) -> Range<usize> {
     let head = text[..at].trim_end();
-    let start = head.rfind(char::is_whitespace).map_or(0, |space| space + 1);
-    start..head.len()
+    if !head.is_empty() {
+        let start = head.rfind(char::is_whitespace).map_or(0, |space| space + 1);
+        return start..head.len();
+    }
+    let start = at + (text[at..].len() - text[at..].trim_start().len());
+    let end = text[start..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |space| start + space);
+    start..end
 }
 
 /// `text` with the line breaks inside paragraphs turned into spaces, at the
@@ -211,7 +250,13 @@ fn is_fence(line: &str) -> bool {
 /// Lines that are a block of their own.
 fn ends_block(line: &str) -> bool {
     let line = line.trim_start();
-    line.starts_with('#') || line.starts_with('|') || is_fence(line)
+    line.starts_with('#') || line.starts_with('|') || is_fence(line) || is_rule(line)
+}
+
+/// A thematic break, setext underline or frontmatter delimiter.
+fn is_rule(line: &str) -> bool {
+    let line = line.trim();
+    line.len() >= 3 && line.chars().all(|c| c == '-' || c == '=' || c == '*')
 }
 
 /// Lines that start a block rather than continue a paragraph.
@@ -224,10 +269,6 @@ fn starts_block(line: &str) -> bool {
         .iter()
         .any(|marker| line.starts_with(marker))
     {
-        return true;
-    }
-    // A thematic break or setext underline.
-    if line.len() >= 3 && line.chars().all(|c| c == '-' || c == '=' || c == '*') {
         return true;
     }
     let digits = line.chars().take_while(char::is_ascii_digit).count();
@@ -311,6 +352,40 @@ mod tests {
         assert_eq!(join_wrapped("# Title\nbody"), "# Title\nbody");
         assert_eq!(join_wrapped("```\na\nb\n```\nc"), "```\na\nb\n```\nc");
         assert_eq!(join_wrapped("1. first\n2. second"), "1. first\n2. second");
+    }
+
+    #[test]
+    fn rewritten_paragraph_is_one_replacement() {
+        let hunks = edit_hunks(&patch(
+            "Intro.\n\nCopy the message out.\n\nOutro.",
+            "Intro.\n\nSend it on its way.\n\nOutro.",
+        ));
+        let changes: Vec<String> = hunks[0].changes.iter().map(shown).collect();
+        assert_eq!(changes, ["[Copy the message out.] → {Send it on its way.}"]);
+    }
+
+    #[test]
+    fn removal_at_the_start_points_at_the_next_word() {
+        let hunks = edit_hunks(&patch("Hi team,\n\nExisting text.", "Existing text."));
+        let change = &hunks[0].changes[0];
+        assert_eq!(&hunks[0].text[change.target.clone()], "Existing");
+    }
+
+    #[test]
+    fn rules_stay_on_their_own_lines() {
+        assert_eq!(
+            join_wrapped("---\ntitle: Old\n---\nBody"),
+            "---\ntitle: Old\n---\nBody"
+        );
+    }
+
+    #[test]
+    fn blank_lines_are_left_out_of_a_change() {
+        let hunks = edit_hunks(&patch(
+            "Run the tests.",
+            "Run the tests:\n\n```sh\ncargo test\n```",
+        ));
+        assert_eq!(hunks[0].changes[0].added, "tests:\n```sh\ncargo test\n```");
     }
 
     #[test]

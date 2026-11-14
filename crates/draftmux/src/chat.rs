@@ -1286,7 +1286,7 @@ impl Chat {
                     .when_some(change_count, |meta, count| {
                         meta.child(div().text_size(px(11.)).text_color(palette.faint).child(
                             match count {
-                                0 => "rewrapped".to_owned(),
+                                0 => "whitespace".to_owned(),
                                 1 => "1 change".to_owned(),
                                 n => format!("{n} changes"),
                             },
@@ -2274,7 +2274,7 @@ fn changes_body(
                 .px(px(10.))
                 .py(px(6.))
                 .text_color(palette.faint)
-                .child("Only line breaks changed")
+                .child("Only whitespace changed")
                 .into_any_element(),
         );
     }
