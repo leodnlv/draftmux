@@ -99,7 +99,7 @@ impl Chrome {
                         focus.focus(window, cx);
                         this.update_card = Some(UpdateCard {
                             version: release.version.clone(),
-                            notes: release.notes.as_deref().map(markup::github::parse),
+                            notes: release.notes.as_deref().map(markup::github::parse_file),
                             scroll: ScrollHandle::new(),
                             focus,
                             previous,
