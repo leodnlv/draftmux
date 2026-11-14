@@ -273,7 +273,7 @@ mod tests {
 
         let code = f.home.join("code");
         let trust = |json: String| fs::write(f.profile.join("trust.json"), json).unwrap();
-        trust(format!(r#"{{"{}": true}}"#, code.display()));
+        trust(serde_json::json!({ code.display().to_string(): true }).to_string());
         assert_eq!(
             reads(&f).trust,
             Trust::Trusted {
@@ -282,22 +282,26 @@ mod tests {
         );
 
         // A nearer decision wins; null entries are skipped.
-        trust(format!(
-            r#"{{"{}": true, "{}": false}}"#,
-            code.display(),
-            f.project.display()
-        ));
+        trust(
+            serde_json::json!({
+                code.display().to_string(): true,
+                f.project.display().to_string(): false,
+            })
+            .to_string(),
+        );
         assert_eq!(
             reads(&f).trust,
             Trust::Untrusted {
                 saved_for: f.project.clone()
             }
         );
-        trust(format!(
-            r#"{{"{}": true, "{}": null}}"#,
-            code.display(),
-            f.project.display()
-        ));
+        trust(
+            serde_json::json!({
+                code.display().to_string(): true,
+                f.project.display().to_string(): null,
+            })
+            .to_string(),
+        );
         assert!(reads(&f).trust.loads_project());
 
         trust("[]".into());

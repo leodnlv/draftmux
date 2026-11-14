@@ -123,7 +123,12 @@ impl Connection {
                     .trim()
                     .to_string();
                 let status = match status {
-                    Ok(status) => status.to_string(),
+                    // Windows says "exit code"; the report reads the same
+                    // on every platform.
+                    Ok(status) => match status.code() {
+                        Some(code) => format!("exit status: {code}"),
+                        None => status.to_string(),
+                    },
                     Err(err) => format!("wait failed: {err}"),
                 };
                 on_message(Message::Exited { status, stderr });

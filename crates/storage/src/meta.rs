@@ -625,6 +625,8 @@ mod tests {
         serde_json::from_value(value).map_err(|err| err.to_string())
     }
 
+    // Its fixture holds Unix absolute paths.
+    #[cfg(unix)]
     #[test]
     fn claude_session_round_trips_without_pi_keys() {
         let meta: Meta = serde_json::from_str(CLAUDE_FIXTURE).unwrap();

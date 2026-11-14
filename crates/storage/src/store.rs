@@ -517,10 +517,8 @@ mod tests {
 
     #[test]
     fn data_dir_override_must_be_absolute() {
-        assert_eq!(
-            data_dir_from(Some("/tmp/dmx/data".into())).unwrap(),
-            Path::new("/tmp/dmx/data")
-        );
+        let dir = std::path::absolute("/tmp/dmx/data").unwrap();
+        assert_eq!(data_dir_from(Some(dir.clone().into())).unwrap(), dir);
         assert!(data_dir_from(Some("data".into())).is_err());
         let default = data_dir_from(None).unwrap();
         assert_eq!(default, dirs::data_dir().unwrap().join("Draftmux"));
@@ -690,7 +688,7 @@ mod tests {
             .create_with_session(new_draft("a"), |_| {
                 Ok(Backend::Claude(ClaudeSession {
                     session_id,
-                    transcript: Some("/tmp/renamed copy.jsonl".into()),
+                    transcript: Some(std::path::absolute("/tmp/renamed copy.jsonl").unwrap()),
                     config_dir: None,
                     fork: None,
                     model: None,

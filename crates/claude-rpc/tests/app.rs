@@ -197,6 +197,7 @@ impl App {
         }
     }
 
+    #[cfg(unix)]
     fn type_text(&mut self, text: &str) {
         let outcome = self.session.edited(text.into(), Instant::now());
         self.apply(outcome);
@@ -270,6 +271,7 @@ impl App {
         }
     }
 
+    #[cfg(unix)]
     fn meta_path(&self, id: &str) -> PathBuf {
         self.store.load(id).unwrap().dir.join("meta.json")
     }
@@ -311,6 +313,9 @@ fn editing_run(path: &Path, before: &str, after: &str, message: &str) -> Vec<Str
     ]
 }
 
+// fake-claude's `no-input` directive polls stdin, which it can do only on
+// Unix.
+#[cfg(unix)]
 #[test]
 fn a_draft_that_cant_be_saved_sends_nothing() {
     let mut app = App::new();

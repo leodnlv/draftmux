@@ -97,6 +97,7 @@ fn adopt(data: &Path, config: &Path) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn resolve(config: Option<&str>, data: Option<&str>, xdg: Option<&str>) -> Result<PathBuf> {
         config_dir_from(
             config.map(Into::into),
@@ -106,6 +107,8 @@ mod tests {
         )
     }
 
+    // Its fixtures are Unix absolute paths.
+    #[cfg(unix)]
     #[test]
     fn config_dir_resolution() {
         let path = |p: &str| Some(PathBuf::from(p));

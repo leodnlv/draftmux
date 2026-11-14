@@ -482,6 +482,8 @@ fn idle_stop() {
         Duration::from_millis(50),
         REQUEST,
     );
+    // pi's answer, and so its last activity, comes 200 ms after this.
+    let started = Instant::now();
     h.agent.focus().unwrap();
     // Busy until the startup get_state is answered, which is reported.
     let ready = h.until(|event| matches!(event, AgentEvent::Ready(_)));
@@ -490,9 +492,8 @@ fn idle_stop() {
     };
     assert_eq!(state.thinking_level, ThinkingLevel::Medium);
     assert!(!h.saw_eof(0));
-    let ready = Instant::now();
     wait_for(|| h.saw_eof(0));
-    assert!(ready.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() >= Duration::from_millis(250));
     h.no_more_events();
 
     h.agent.focus().unwrap();
