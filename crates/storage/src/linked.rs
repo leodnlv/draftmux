@@ -28,7 +28,7 @@ pub struct FileState {
 /// The result of [`crate::Store::save_to_file`].
 #[derive(Debug)]
 pub enum FileSave {
-    Saved(Meta),
+    Saved(Box<Meta>),
     /// The file was changed outside the draft, and was left alone.
     Changed,
     /// The file was removed outside the draft, and wasn't recreated.

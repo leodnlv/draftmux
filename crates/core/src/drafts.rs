@@ -281,7 +281,7 @@ impl Drafts {
         let saved = self.store.save_to_file(&id, text, overwrite)?;
         if let FileSave::Saved(meta) = &saved {
             let title = display_title(&meta.title, || text.to_owned());
-            self.update_row(&id, meta.clone(), title)?;
+            self.update_row(&id, meta.as_ref().clone(), title)?;
         }
         Ok(Some(saved))
     }

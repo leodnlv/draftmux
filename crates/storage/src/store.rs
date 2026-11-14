@@ -274,7 +274,7 @@ impl Store {
             meta.updated_at = Utc::now();
             Ok(None)
         })?;
-        Ok(refused.unwrap_or(FileSave::Saved(meta)))
+        Ok(refused.unwrap_or_else(|| FileSave::Saved(Box::new(meta))))
     }
 
     pub fn update_meta(&self, id: &str, update: impl FnOnce(&mut Meta)) -> Result<Meta> {
@@ -830,7 +830,7 @@ mod tests {
             panic!("refused to save an unchanged file");
         };
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
-        assert_eq!(store.load(&draft.id).unwrap().meta, meta);
+        assert_eq!(store.load(&draft.id).unwrap().meta, *meta);
         let state = meta.file.unwrap().state("new\n").unwrap();
         assert!(state.saved && !state.changed_on_disk);
         // Saving again checks against what was just written.
