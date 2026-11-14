@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Pixel-art Claude Code mascot on a 9×6 grid; the eyes are cut out. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 6">
-  <path fill="currentColor" fill-rule="evenodd" d="M1 0h7v2h1v1H8v3H7V4H6v2H5V4H4v2H3V4H2v2H1V3H0V2h1zM2 1v2h1V1zm4 0v2h1V1z"/>
+<!-- The Claude Code mascot from its welcome banner, on a 16×5 grid of cells
+     twice as tall as wide; the eyes are cut out. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 10">
+  <path fill="currentColor" fill-rule="evenodd" d="M2 0h12v4h2v2h-2v2h-1v2h-1V8h-1v2h-1V8H6v2H5V8H4v2H3V8H2V6H0V4h2zM4 2v2h1V2zm7 0v2h1V2z"/>
 </svg>
