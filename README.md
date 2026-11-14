@@ -25,19 +25,15 @@ Status: early release; expect rough edges.
 - **Chat with the draft's agent.** Ask for changes in plain words. On pi it runs
   with your profile, so your skills are available.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
-  text or plain text. `⌘+` and `⌘−` change the text size, and `⌘0` resets it.
-- **Selection actions.** Select text for alternatives, Shorten or Tighten, or
+  text or plain text.
+- **Selection actions.** Select text to get alternatives, Shorten or Tighten, or
   your own actions. With text selected, a chat message changes only that part.
   Hold `⌘` while dragging to select more passages; a chat message then edits
   each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
-- **Edit files.** `draftmux README.md` opens a file as a draft, with an agent
-  session of its own in the file's directory: Claude Code if it's installed,
-  else pi, or pi when Settings set Backend to pi. The agent name above the
-  chat switches it to the other agent. A draft opened from a file, this way or
-  with `draftmux open --draft-file`, saves back to it with `⌘S`, and asks
-  first if the file changed elsewhere.
+- **Edit files.** `draftmux README.md` opens a file as a draft, with its own
+  agent session in the file's directory. `⌘S` saves it back to the file.
 
 ## Install
 
@@ -46,8 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/raine/draftmux/main/install.sh | sh
 ```
 
 This installs the latest release and links the `draftmux` command in
-`~/.local/bin`; make sure that directory is on your PATH. Run it again to
-update.
+`~/.local/bin`; make sure that directory is on your PATH. On Linux, run it
+again to update.
 
 ### macOS
 
@@ -69,11 +65,7 @@ Shortcuts use Ctrl where macOS uses Cmd.
 ### Agents
 
 Drafts are written by [pi](https://github.com/earendil-works/pi) or Claude Code
-2.1.293 or later. Install whichever you use; for pi:
-
-```sh
-npm install -g @earendil-works/pi-coding-agent
-```
+2.1.293 or later.
 
 Editing, previews, copying and Markdown formatting of GitHub and rich-text
 drafts work without either.
