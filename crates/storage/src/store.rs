@@ -12,6 +12,10 @@ use crate::meta::{Backend, DraftSettings, Meta, Source, Status, Syntax, Target};
 const DRAFT_FILE: &str = "draft.md";
 const META_FILE: &str = "meta.json";
 const HISTORY_FILE: &str = "history.json";
+/// Locked while `meta.json` is read, changed and written back, so the app
+/// and a `draftmux` command changing the same draft don't lose each
+/// other's change. A file of its own, since writing `meta.json` replaces it.
+const META_LOCK_FILE: &str = "meta.lock";
 const SESSION_DIR: &str = "session";
 /// Records that the sample draft was created. A dot name and a file, so
 /// [`Store::scan`] never takes it for a draft.
@@ -243,6 +247,16 @@ impl Store {
 
     pub fn update_meta(&self, id: &str, update: impl FnOnce(&mut Meta)) -> Result<Meta> {
         let dir = self.draft_dir(id)?;
+        let lock_path = dir.join(META_LOCK_FILE);
+        let lock = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening {}", lock_path.display()))?;
+        // Released when `lock` is closed.
+        lock.lock()
+            .with_context(|| format!("locking {}", lock_path.display()))?;
         let mut meta = read_meta(&dir)?;
         update(&mut meta);
         write_meta(&dir, &meta)?;
@@ -480,6 +494,33 @@ mod tests {
         let loaded = store.load(&draft.id).unwrap();
         assert_eq!(loaded.meta, draft.meta);
         assert_eq!(loaded.dir, draft.dir);
+    }
+
+    #[test]
+    fn overlapping_meta_updates_keep_both_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("drafts"));
+        let id = store.create(new_draft("PR body")).unwrap().id;
+        let read = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                store
+                    .update_meta(&id, |meta| {
+                        read.wait();
+                        // The other update is waiting for the lock meanwhile.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        meta.title = "Renamed".into();
+                    })
+                    .unwrap();
+            });
+            read.wait();
+            store.archive(&id).unwrap();
+        });
+        let meta = store.load(&id).unwrap().meta;
+        assert_eq!(
+            (meta.title.as_str(), meta.status),
+            ("Renamed", Status::Archived)
+        );
     }
 
     #[test]

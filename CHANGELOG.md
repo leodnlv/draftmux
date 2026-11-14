@@ -10,6 +10,8 @@
   draft's model, and the choice is kept for later sessions. Selection actions
   aren't available for these drafts yet. Needs Claude Code 2.1.293 or later.
   Drafts are still created with pi unless you ask for Claude Code.
+- Changes to a draft's details from the app and from `draftmux restore` at
+  the same moment no longer undo one another.
 - A handed-off draft whose first draft was never started, because Draftmux
   quit or pi failed before taking the request, asks pi for it again the next
   time it opens, instead of staying empty. Once pi has taken the request it is
