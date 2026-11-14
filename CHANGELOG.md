@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `draftmux <FILE>` opens a file for editing without an agent session to
+  hand off from. The draft is named after the file, saves back to it, and
+  gets an agent session of its own in the file's directory: on Claude Code
+  when the app can run it, else on pi, or on pi when Settings set Backend to
+  pi. Running it again for a file with an active draft focuses that draft.
 - Save a draft opened from a file back to that file. A draft from
   `draftmux open --draft-file` remembers the file and shows it in the
   toolbar, marked Edited while it differs from the draft. Save (⌘S) writes

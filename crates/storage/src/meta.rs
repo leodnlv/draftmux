@@ -18,7 +18,8 @@ pub struct Meta {
     pub syntax: Option<Syntax>,
     pub status: Status,
     pub title: String,
-    /// The session the draft was handed off from; none for the sample draft.
+    /// The session the draft was handed off from; none for the sample draft
+    /// and a file opened with `draftmux <FILE>`.
     /// Independent of [`Meta::backend`]: a Claude Code transcript converted
     /// into a pi session is a Claude source on the Pi backend.
     pub source: Option<Source>,
@@ -45,9 +46,10 @@ pub struct Meta {
 }
 
 impl Meta {
-    /// The sample draft is the only draft without a source session.
+    /// The sample draft is the only draft with neither a source session nor
+    /// a linked file.
     pub fn is_sample(&self) -> bool {
-        self.source.is_none()
+        self.source.is_none() && self.file.is_none()
     }
 
     /// Whether the text is in Slack's mrkdwn rather than Markdown.

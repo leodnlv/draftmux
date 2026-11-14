@@ -1138,12 +1138,6 @@ impl Chrome {
         if self.mirrored_flash == Some(started) {
             return;
         }
-        eprintln!(
-            "DBG mirror: text==src {} paras {} ranges {:?}",
-            editor.text() == self.preview_source,
-            self.preview_selection.read(cx).paragraphs().count(),
-            ranges
-        );
         // The preview catches up with the text, and publishes its
         // paragraphs as it paints, a frame or more later.
         if editor.text() != self.preview_source
@@ -1160,10 +1154,14 @@ impl Chrome {
         let ranges = ranges.to_vec();
         self.mirrored_flash = Some(started);
         let marks = self.preview_marks(ranges, cx);
-        eprintln!("DBG marks {:?}", marks);
         let color = theme::palette(cx).change_flash;
-        self.preview_selection.update(cx, |selection, cx| {
-            selection.set_flash(marks, started, color, cx)
+        // A notification while drawing doesn't redraw the cached preview,
+        // so the tint is handed over before the next frame.
+        let selection = self.preview_selection.clone();
+        window.on_next_frame(move |_, cx| {
+            selection.update(cx, |selection, cx| {
+                selection.set_flash(marks, started, color, cx)
+            });
         });
     }
 

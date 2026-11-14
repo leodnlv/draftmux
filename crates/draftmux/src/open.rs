@@ -86,20 +86,8 @@ pub fn main(args: Args) -> Result<u8> {
     // pi runs with the environment of the agent shell that called `open`,
     // which has the PATH and API keys the source session used.
     let pi = || Command::new("pi");
-    // The app runs Claude Code with the login shell's environment, so it is
-    // checked with that.
-    let claude = || {
-        let env = shell_env::ShellEnv::capture();
-        let program = env.claude().map_err(|err| err.to_string())?;
-        crate::chat::claude_version(program, env.vars()).map(drop)
-    };
-    // A settings problem never blocks a handoff.
-    let settings = draftmux_storage::prepare_config_dir()
-        .and_then(|dir| Settings::load(&dir))
-        .unwrap_or_else(|err| {
-            eprintln!("draftmux: ignoring Draftmux's settings: {err:#}");
-            Settings::default()
-        });
+    let claude = claude_available;
+    let settings = load_settings();
     let draft = create(&args, &Store::open_default()?, &pi, &claude, &settings)?;
     // Printed before focusing: the draft exists and `show` can read it even
     // if the app can't be reached.
@@ -121,9 +109,29 @@ pub fn main(args: Args) -> Result<u8> {
     }
 }
 
+/// Fails, with a message for the user, unless the app can run Claude Code.
+/// The app runs it with the login shell's environment, so it is checked
+/// with that.
+pub(crate) fn claude_available() -> Result<(), String> {
+    let env = shell_env::ShellEnv::capture();
+    let program = env.claude().map_err(|err| err.to_string())?;
+    crate::chat::claude_version(program, env.vars()).map(drop)
+}
+
+/// Draftmux's settings, or the defaults with a warning when they can't be
+/// read: a settings problem never blocks creating a draft.
+pub(crate) fn load_settings() -> Settings {
+    draftmux_storage::prepare_config_dir()
+        .and_then(|dir| Settings::load(&dir))
+        .unwrap_or_else(|err| {
+            eprintln!("draftmux: ignoring Draftmux's settings: {err:#}");
+            Settings::default()
+        })
+}
+
 /// Whether `file` is Markdown that its git repository doesn't ignore, such
 /// as README.md, rather than a scratch file holding a message.
-fn is_repository_markdown(file: &Path) -> bool {
+pub(crate) fn is_repository_markdown(file: &Path) -> bool {
     let markdown = file
         .extension()
         .and_then(|ext| ext.to_str())

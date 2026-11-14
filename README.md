@@ -32,6 +32,11 @@ Status: early release; expect rough edges.
   each of them.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
+- **Edit files.** `draftmux README.md` opens a file as a draft, with an agent
+  session of its own in the file's directory: Claude Code if it's installed,
+  else pi, or pi when Settings set Backend to pi. A draft opened from a file,
+  this way or with `draftmux open --draft-file`, saves back to it with `⌘S`,
+  and asks first if the file changed elsewhere.
 
 ## Install
 

@@ -11,6 +11,7 @@ mod chrome;
 mod copy;
 mod diagnostics;
 mod drafts;
+mod edit;
 mod file_watch;
 mod focus;
 mod fold;
@@ -46,6 +47,7 @@ mod tooltip;
 mod update;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result};
@@ -61,10 +63,12 @@ actions!(draftmux, [Quit]);
 
 /// Draftmux: polish messages handed off from coding agents.
 #[derive(Parser)]
-#[command(name = "draftmux", version)]
+#[command(name = "draftmux", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// File to open for editing; saving the draft writes it back.
+    file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -85,7 +89,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        // Clap allows a file only without a subcommand.
+        None if let Some(file) = &cli.file => edit::main(file),
         Some(Command::Open(args)) => open::main(args),
         Some(Command::Show(args)) => show::main(args).map(|()| 0),
         Some(Command::Save(args)) => save::main(args).map(|()| 0),
