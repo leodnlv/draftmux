@@ -2768,10 +2768,10 @@ mod tests {
             }
             for (ix, (_, value)) in mapped.fields.iter().enumerate() {
                 for segment in super::field_segments(value, ix, style.redline.as_ref().unwrap()) {
-                    if !segment.text.is_empty() {
-                        if let Some(mark) = segment.mark {
-                            shown[mark.hunk] = true;
-                        }
+                    if !segment.text.is_empty()
+                        && let Some(mark) = segment.mark
+                    {
+                        shown[mark.hunk] = true;
                     }
                 }
             }
