@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use draftmux_agent::{Agent as _, Event, Stop};
-use draftmux_claude_rpc::{ClaudeAgent, Config, DraftContext, LaunchSpec, Record, Session};
+use draftmux_claude_rpc::{
+    ClaudeAgent, Config, DraftContext, LaunchSpec, Record, Session, instructions_block,
+};
 use futures::StreamExt;
 use futures::executor::block_on;
 use serde_json::{Value, json};
@@ -215,28 +217,24 @@ fn allowed_writes_are_reported_and_writes_elsewhere_refused() {
     h.agent().blur();
     h.finished(0);
     // The editing launch: explicit tools, permission prompts through the
-    // agent, the system prompt, and no settings.
+    // agent, and no settings. The instructions go with the first prompt,
+    // since a resumed session ignores a system prompt.
     let args: Vec<String> = serde_json::from_value(h.record(0)["args"].clone()).unwrap();
     let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w == pair);
     assert!(has(&["--tools", "Read,Glob,Grep,Edit,Write"]));
     assert!(has(&["--permission-prompt-tool", "stdio"]));
     assert!(has(&["--setting-sources", ""]));
-    let system = &args[args
-        .iter()
-        .position(|a| a == "--append-system-prompt")
-        .unwrap()
-        + 1];
-    assert!(system.contains(&h.draft.display().to_string()), "{system}");
-    assert!(system.ends_with("Drafting instructions from the user:\nBe brief."));
+    assert!(!args.iter().any(|a| a == "--append-system-prompt"));
 }
 
 #[test]
 fn context_is_sent_when_it_changed_and_after_compaction_or_a_restart() {
-    let h = Harness::new("One\n", |_, _| {
+    let h = Harness::new("One\n", |draft, _| {
+        let rules = || instructions_block(draft, "Be brief.");
         let run = || [state("running"), settle("completed")].join("\n");
         let first = [
             INIT.into(),
-            prompt_in(&[target_block(SLACK), draft_block("One\n")], "a"),
+            prompt_in(&[rules(), target_block(SLACK), draft_block("One\n")], "a"),
             run(),
             prompt_in(&[], "b"),
             run(),
@@ -248,13 +246,19 @@ fn context_is_sent_when_it_changed_and_after_compaction_or_a_restart() {
             state("running"),
             line(json!({"type": "system", "subtype": "compact_boundary"})),
             settle("completed"),
-            prompt_in(&[target_block("plain text"), draft_block("Two")], "d"),
+            prompt_in(
+                &[rules(), target_block("plain text"), draft_block("Two")],
+                "d",
+            ),
             run(),
             "### eof".into(),
         ];
         let second = [
             INIT.into(),
-            prompt_in(&[target_block("plain text"), draft_block("Two")], "e"),
+            prompt_in(
+                &[rules(), target_block("plain text"), draft_block("Two")],
+                "e",
+            ),
             run(),
             "### eof".into(),
         ];

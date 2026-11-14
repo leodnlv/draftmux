@@ -6,7 +6,8 @@
 //!
 //! - `>>> {json}`: read one stdin line and require it to equal `json`,
 //!   ignoring a control request's `request_id`. The script's id is mapped to
-//!   the received one.
+//!   the received one. A user message's `<draftmux-instructions>` block is
+//!   ignored too, unless `json` has one.
 //! - `{json}`: print it; a control response's `request_id` is rewritten
 //!   through that map.
 //! - `### sleep <ms>`, `### stderr <text>`, `### exit <code>`.
@@ -66,6 +67,9 @@ fn main() {
                 if let (Some(Value::String(from)), Some(to)) = (from, to) {
                     ids.insert(from, to);
                 }
+            }
+            if !has_instructions(&expected) {
+                drop_instructions(&mut received);
             }
             if received != expected {
                 fail(&format!("expected {expected}, received {received}"));
@@ -150,6 +154,36 @@ fn main() {
 }
 
 /// The lowest process number not yet taken in `dir`.
+fn is_instructions(block: &Value) -> bool {
+    block["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with("<draftmux-instructions>"))
+}
+
+fn has_instructions(message: &Value) -> bool {
+    message["message"]["content"]
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(is_instructions))
+}
+
+/// Removes a user message's instructions block; a lone text block left
+/// becomes plain text, as a prompt without blocks is written.
+fn drop_instructions(message: &mut Value) {
+    let Some(content) = message.pointer_mut("/message/content") else {
+        return;
+    };
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    if !blocks.iter().any(is_instructions) {
+        return;
+    }
+    blocks.retain(|block| !is_instructions(block));
+    if let [only] = blocks.as_slice() {
+        *content = only["text"].clone();
+    }
+}
+
 fn claim(dir: &Path) -> usize {
     (0..)
         .find(|n| {

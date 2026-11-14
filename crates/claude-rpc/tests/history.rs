@@ -173,6 +173,7 @@ fn a_cut_off_last_line_is_left_out() {
 fn the_context_ahead_of_a_prompt_is_left_out() {
     let user = serde_json::json!({"parentUuid": null, "isSidechain": false, "type": "user",
         "uuid": "u1", "sessionId": "s", "message": {"role": "user", "content": [
+            {"type": "text", "text": "<draftmux-instructions>\nDraft file: /d/draft.md\n</draftmux-instructions>"},
             {"type": "text", "text": "<draftmux-context>\nTarget platform: Slack\n</draftmux-context>"},
             {"type": "text", "text": "<draftmux-draft>\nHello\n</draftmux-draft>"},
             {"type": "text", "text": "Shorten it"}]}});

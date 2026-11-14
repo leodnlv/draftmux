@@ -36,7 +36,7 @@ mod session;
 pub mod transcript;
 
 pub use agent::{Agent, AgentEvent, Config, Error, HookRequest, PermissionRequest};
-pub use contract::{ClaudeAgent, DraftContext, Record};
+pub use contract::{ClaudeAgent, DraftContext, Record, instructions_block};
 pub use history::history;
 pub use launch::{
     LaunchSpec, PreToolUseHook, Session, SettingSource, Tool, check_version, version_command,

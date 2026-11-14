@@ -106,7 +106,8 @@ pub struct LaunchSpec {
     /// (`--permission-prompt-tool stdio`).
     pub permission_prompt: bool,
     /// Text added to Claude Code's system prompt
-    /// (`--append-system-prompt`).
+    /// (`--append-system-prompt`). Claude Code 2.1.293 ignores it when it
+    /// resumes or forks a session.
     pub system_prompt: Option<String>,
 }
 

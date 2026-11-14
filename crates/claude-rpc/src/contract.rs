@@ -3,12 +3,16 @@
 //! Draftmux's context, keeps its writes to the draft, and reports which of
 //! its tool calls changed the draft.
 //!
-//! - **Context.** The drafting rules, draft path and the user's
-//!   instructions go into the system prompt. Ahead of a prompt, a
-//!   `<draftmux-context>` block carries the target platform's syntax when
-//!   it changed, and a `<draftmux-draft>` block the saved draft when it
-//!   differs from what the model last saw. Both are sent again to a new
-//!   process and after compaction, and history leaves them out.
+//! - **Context.** Ahead of a process's first prompt, a
+//!   `<draftmux-instructions>` block carries the drafting rules, the draft
+//!   path and the user's instructions. They can't go into the system
+//!   prompt: Claude Code ignores `--append-system-prompt` and
+//!   `--system-prompt` when it resumes a session, and a draft's session is
+//!   always resumed or forked. A `<draftmux-context>` block carries the
+//!   target platform's syntax when it changed, and a `<draftmux-draft>`
+//!   block the saved draft when it differs from what the model last saw.
+//!   All three are sent again to a new process and after compaction, and
+//!   history leaves them out.
 //! - **Policy.** A `PreToolUse` hook for every tool decides each call with
 //!   [`DraftPolicy`]; unlike permission prompts, it also runs for tools
 //!   that settings allow. claude must confirm it registered the hook, or
@@ -37,7 +41,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
@@ -63,12 +67,15 @@ const HOOK_TIMEOUT: u32 = 30;
 /// Drafts larger than this are left for the model to read.
 const MAX_SENT_DRAFT_BYTES: usize = 50 * 1024;
 
+const INSTRUCTIONS_TAG: &str = "<draftmux-instructions>";
 const CONTEXT_TAG: &str = "<draftmux-context>";
 const DRAFT_TAG: &str = "<draftmux-draft>";
 
 /// Whether a user message's text block is context Draftmux added.
 pub(crate) fn is_context_block(text: &str) -> bool {
-    text.starts_with(CONTEXT_TAG) || text.starts_with(DRAFT_TAG)
+    text.starts_with(INSTRUCTIONS_TAG)
+        || text.starts_with(CONTEXT_TAG)
+        || text.starts_with(DRAFT_TAG)
 }
 
 /// What the model is told about the draft.
@@ -110,6 +117,9 @@ pub struct ClaudeAgent {
 /// changed.
 #[derive(Default)]
 struct Ledger {
+    /// The instructions were sent to this process since it started or
+    /// last compacted.
+    instructed: bool,
     /// The target syntax last sent.
     target: Option<String>,
     /// The draft text the model last saw in full: through a draft block,
@@ -119,7 +129,7 @@ struct Ledger {
 
 impl ClaudeAgent {
     /// Like [`Agent::new`], for a draft the agent may edit: the spec's
-    /// tools, hooks, permission prompts and system prompt are set here.
+    /// tools, hooks and permission prompts are set here.
     /// Returns the agent, its events and its [`Record`]s. Fails when the
     /// spec loads settings, which can add hooks and allow tools, or when
     /// the draft's directory can't be resolved.
@@ -143,7 +153,6 @@ impl ClaudeAgent {
             timeout: Some(HOOK_TIMEOUT),
         }];
         spec.permission_prompt = true;
-        spec.system_prompt = Some(system_prompt(&context));
         let (agent, mut raw) = Agent::new(spec, config);
         let agent = Arc::new(agent);
         let ledger = Arc::new(Mutex::new(Ledger::default()));
@@ -313,25 +322,29 @@ fn model(id: &str) -> contract::Model {
     }
 }
 
-fn system_prompt(context: &DraftContext) -> String {
-    let draft = context.draft_path.display();
+/// The block of drafting rules for the draft at `draft_path`, ending with
+/// the user's `instructions` when there are any.
+pub fn instructions_block(draft_path: &Path, instructions: &str) -> String {
+    let draft = draft_path.display();
     let mut prompt = format!(
-        "[Draftmux] You are helping the user polish a message in Draftmux.
+        "{INSTRUCTIONS_TAG}
+You are helping the user polish a message in Draftmux. These instructions come from Draftmux, not the user, and are sent again when Draftmux restarts you.
 
 Draft file: {draft}
 
 - Make every change to the draft by editing that file with the Edit or Write tool; the user sees it in the Draftmux editor. Don't paste drafts or rewritten versions in chat; use chat for discussion.
 - Edit and Write only work on the draft file; give its absolute path. Read, Glob and Grep work as usual for checking facts.
 - Draftmux puts a {DRAFT_TAG} block holding the draft file's exact text before the user's message when it differs from what you last read, edited or wrote, for example after the user edits it, and a {CONTEXT_TAG} block with the target platform when it changes. The user doesn't see these blocks.
-- Edit and Write need the file to have been read in this session; when they report that, Read the draft and try again.
+- Read the draft once before your first Edit or Write after these instructions: the tools refuse a file you haven't read since they were sent, even when a {DRAFT_TAG} block shows its text.
 - Put fields in YAML frontmatter at the very top of the draft, between --- lines: title: for PRs and issues; subject:, to: and cc: for emails (only known recipients). Any other key is allowed. Use string values, quoting YAML punctuation as needed; use comma-separated strings rather than lists. Keep these fields separate from the message body. Draftmux displays them separately and copies only the body.
 - Change only what the user asks for; keep the rest of the draft, including its formatting, as it is."
     );
-    let instructions = context.instructions.trim();
+    let instructions = instructions.trim();
     if !instructions.is_empty() {
         prompt.push_str("\n\nDrafting instructions from the user:\n");
         prompt.push_str(instructions);
     }
+    prompt.push_str("\n</draftmux-instructions>");
     prompt
 }
 
@@ -342,6 +355,13 @@ fn blocks(context: &DraftContext, ledger: &mut Ledger, first: bool) -> Vec<Strin
         *ledger = Ledger::default();
     }
     let mut blocks = Vec::new();
+    if !ledger.instructed {
+        blocks.push(instructions_block(
+            &context.draft_path,
+            &context.instructions,
+        ));
+        ledger.instructed = true;
+    }
     if let Some(target) = (context.target)()
         && ledger.target.as_ref() != Some(&target)
     {
