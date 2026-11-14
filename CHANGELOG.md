@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-11-14)
 
 A big update, with new features and lots of polish throughout the app.
 
