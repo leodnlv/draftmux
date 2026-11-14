@@ -1371,13 +1371,6 @@ impl Chat {
                             .px(px(4.))
                             .h(px(22.))
                             .rounded(px(5.))
-                            .child(
-                                svg()
-                                    .path(CHEVRON_ICON)
-                                    .size(px(8.))
-                                    .text_color(palette.faint)
-                                    .with_transformation(Transformation::rotate(percentage(0.25))),
-                            )
                             .tooltip(crate::tooltip::text(if busy {
                                 "Can't switch agents while the agent is working"
                             } else if claude {
