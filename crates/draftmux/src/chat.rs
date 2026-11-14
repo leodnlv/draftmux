@@ -1094,14 +1094,28 @@ impl Chat {
             window.request_animation_frame();
         }
         let meta = &session.draft.meta;
-        let target = match tool.target() {
-            Target::Path(path) => display_path(
-                path,
-                &meta.cwd,
-                &session.draft.draft_path(),
-                std::env::home_dir().as_deref(),
+        let home = std::env::home_dir();
+        // The row shows a short form; hovering it shows the whole target.
+        let (target, full) = match tool.target() {
+            Target::Path(path) => (
+                display_path(
+                    path,
+                    &meta.cwd,
+                    &session.draft.draft_path(),
+                    home.as_deref(),
+                ),
+                crate::drafts::tilde(
+                    &absolute_path(path, &meta.cwd, home.as_deref()),
+                    home.as_deref(),
+                ),
             ),
-            Target::Text(text) => text.to_owned(),
+            Target::Text(text) => (
+                text.to_owned(),
+                match &tool.kind {
+                    ToolKind::Bash { command } => command.clone(),
+                    _ => text.to_owned(),
+                },
+            ),
         };
         let running = tool.running();
         let icon = if running {
@@ -1160,11 +1174,13 @@ impl Chat {
                     )
                     .child(
                         div()
+                            .id(("tool-target", index))
                             .min_w_0()
                             .truncate()
                             .font_family(MONO)
                             .text_size(px(12.))
                             .text_color(palette.text)
+                            .tooltip(crate::tooltip::text(full))
                             .child(target),
                     ),
             )
@@ -1858,16 +1874,32 @@ fn tool_icon(kind: &ToolKind) -> &'static str {
 /// `path` as the model wrote it, shown relative to `cwd`; the draft itself
 /// is `draft.md`.
 fn display_path(path: &str, cwd: &Path, draft_path: &Path, home: Option<&Path>) -> String {
-    let absolute = match (path.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ => cwd.join(path),
-    };
-    if absolute == draft_path {
+    let absolute = absolute_path(path, cwd, home);
+    if same_path(&absolute, draft_path) {
         return "draft.md".into();
     }
     match absolute.strip_prefix(cwd) {
         Ok(rest) if !rest.as_os_str().is_empty() => rest.display().to_string(),
         _ => crate::drafts::tilde(&absolute, home),
+    }
+}
+
+/// `path` as the model wrote it, made absolute against `cwd` or `~`.
+fn absolute_path(path: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => cwd.join(path),
+    }
+}
+
+/// Whether `a` and `b` name the same file. macOS volumes ignore case by
+/// default, so an agent can reach the draft as `…/draftmux/…` as well as
+/// `…/Draftmux/…`.
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
     }
 }
 
@@ -2328,6 +2360,21 @@ mod tests {
         );
         assert_eq!(display_path("~/notes.md", cwd, draft, home), "~/notes.md");
         assert_eq!(display_path("/etc/hosts", cwd, draft, home), "/etc/hosts");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_draft_is_recognized_in_any_case_on_macos() {
+        let draft = Path::new("/Users/me/Library/Application Support/Draftmux/drafts/d1/draft.md");
+        assert_eq!(
+            display_path(
+                "/Users/me/Library/Application Support/draftmux/drafts/d1/draft.md",
+                Path::new("/repo"),
+                draft,
+                Some(Path::new("/Users/me")),
+            ),
+            "draft.md"
+        );
     }
 
     #[test]
