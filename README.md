@@ -77,14 +77,15 @@ out; run the script again to update. Shortcuts use Ctrl where macOS uses Cmd.
 The Windows build isn't code signed, so SmartScreen may warn about a
 `draftmux.exe` unpacked from a downloaded zip; the script's install doesn't
 get that warning. Claude Code drafts need Claude Code's native installer:
-Draftmux doesn't run the `claude.cmd` that npm installs. Draftmux reads tool
-paths and API keys from the environment it starts in rather than from your
-PowerShell profile.
+Draftmux doesn't run the `claude.cmd` that npm installs. Draftmux reads API
+keys from the environment it starts in rather than from your PowerShell
+profile, and finds tools on your saved PATH.
 
 Run the script in your own PowerShell window rather than in an agent's shell.
 Agents in packaged apps such as Claude's desktop app run in shells whose
 writes under `AppData` Windows keeps private to that app, so an install from
-there isn't visible outside it.
+there isn't visible outside it. Restart apps you run agents in, such as
+Claude's desktop app or your terminal, so their shells find `draftmux`.
 
 ### Agents
 

@@ -6,11 +6,14 @@
 //! resolves `pi` and `claude` against it. Commands are spawned through
 //! [`ShellEnv::command`] so they see that environment.
 //!
-//! Windows apps already inherit the user's environment from Explorer, so
-//! there the app's own environment is the snapshot.
+//! Windows apps inherit the user's environment from the process that starts
+//! them, so there the app's own environment is the snapshot, with `PATH`
+//! completed from the registry.
 
 #[cfg(unix)]
 mod capture;
+#[cfg(windows)]
+mod windows;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -104,7 +107,7 @@ impl ShellEnv {
         #[cfg(unix)]
         return Self::capture_with(&CaptureOptions::from_process());
         #[cfg(windows)]
-        return Self::new(std::env::vars_os().collect(), None);
+        return Self::new(windows::env(), None);
     }
 
     #[cfg(unix)]

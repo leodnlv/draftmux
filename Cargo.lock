@@ -5326,6 +5326,7 @@ dependencies = [
  "gpui",
  "libc",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
