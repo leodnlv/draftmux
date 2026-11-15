@@ -36,7 +36,10 @@ uuid = { version = "1.29.1", features = ["v4"] }
 
 # The performance test includes the editor highlighter by path.
 [package.metadata.cargo-machete]
-ignored = ["comrak"]
+ignored = ["comrak", "embed-resource"]
+
+[build-dependencies]
+embed-resource = "3.0.12"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
