@@ -69,7 +69,13 @@ hdiutil attach -nobrowse -noautoopen -mountpoint "$work_dir/mount" "$work_dir/la
 attached=1
 xattr -wx com.apple.FinderInfo 0000000000000000040000000000000000000000000000000000000000000000 "$work_dir/mount"
 rm -rf "$work_dir/mount/.fseventsd" "$work_dir/mount/.Trashes"
-hdiutil detach "$work_dir/mount" >&2
+# The new volume stays busy for a moment while the system indexes it. Its
+# writes must land in the image, so detach isn't forced.
+for attempt in 1 2 3 4 5; do
+  hdiutil detach "$work_dir/mount" >&2 && break
+  [[ $attempt == 5 ]] && exit 1
+  sleep $((attempt * 2))
+done
 attached=0
 hdiutil convert "$work_dir/layout.dmg" -format UDZO -o "$dmg" >&2
 echo "$dmg"

@@ -39,7 +39,7 @@ identifier=$(/usr/bin/plutil -extract CFBundleIdentifier raw "$script_dir/../mac
 [[ $(/usr/bin/xattr -px com.apple.FinderInfo "$tmp/mount" | tr -d ' \n') == 00000000000000000400* ]] ||
   fail "volume icon flag is not set"
 [[ $(/usr/bin/xattr "$tmp/mount/Draftmux.app") != *com.apple.FinderInfo* ]] || fail "Draftmux.app carries Finder metadata"
-/usr/bin/hdiutil detach -quiet "$tmp/mount"
+/usr/bin/hdiutil detach -quiet "$tmp/mount" || /usr/bin/hdiutil detach -quiet -force "$tmp/mount"
 
 reject "$create" "$app" "$tmp/Draftmux.dmg"
 reject "$create" "$app" "$tmp/Draftmux.img"
