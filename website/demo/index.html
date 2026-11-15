@@ -14,6 +14,9 @@
 <link rel="stylesheet" href="chat.css" />
 <link rel="stylesheet" href="review.css" />
 <link rel="stylesheet" href="scene.css" />
+<!-- The camera moves a composited layer, so a camera move doesn't repaint the
+     scene; the browser re-rasters it as the zoom grows, so text stays sharp. -->
+<style>#world { will-change: transform; }</style>
 </head>
 <body>
 <!-- The website cut, played by the landing page; the scene is scene.js and scene.css. -->

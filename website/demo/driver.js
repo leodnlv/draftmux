@@ -10,7 +10,15 @@
   const chapters = (window.SEGMENTS || []).map(({ label, start, end }) => ({ label, start, end }));
   const send = () => parent.postMessage({ demo: 'state', t, playing, start: START, duration: END, ready, chapters }, '*');
   const clamp = (x) => Math.min(END, Math.max(START, x));
+  // The scene is authored at 60 fps. A faster display skips the frames that
+  // come sooner than that, rather than drawing the scene twice as often.
+  // Each frame is due a 60th of a second after the last one; display frames
+  // that land a little early still count, so a 60 Hz display draws them all.
+  const FRAME = 1000 / 60, SLACK = 2.5;
+  let due = 0;
   function frame(now) {
+    if (now < due - SLACK) { raf = requestAnimationFrame(frame); return; }
+    due = Math.max(due + FRAME, now + FRAME - SLACK);
     // A hidden tab stops frames; don't jump ahead when it comes back.
     t = clamp(t + Math.min(now - last, 100) / 1000);
     last = now;

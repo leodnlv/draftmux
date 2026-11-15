@@ -123,10 +123,11 @@ try {
 .demo[data-state="ended"] .round { top: calc(var(--mid) + var(--stage-w) * 9 / 16 * 0.36); }
 .demo-spinner {
   position: absolute; left: 50%; top: var(--mid); width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%;
-  border: 2.5px solid rgba(255, 255, 255, 0.25); border-top-color: #fff; opacity: 0; transition: opacity 200ms ease-out 300ms;
-  animation: spin 800ms linear infinite; z-index: 52; pointer-events: none;
+  border: 2.5px solid rgba(255, 255, 255, 0.25); border-top-color: #fff; opacity: 0; transition: opacity 150ms ease-out;
+  z-index: 52; pointer-events: none;
 }
-.demo[data-state="loading"] .demo-spinner { opacity: 1; }
+/* It spins only while it shows: a running animation redraws the page on every display frame. */
+.demo.open[data-state="loading"] .demo-spinner { opacity: 1; transition-delay: 300ms; animation: spin 800ms linear infinite; }
 @keyframes spin { to { transform: rotate(1turn); } }
 .demo-close {
   position: absolute; top: 16px; right: 16px; width: 38px; height: 38px; display: grid; place-items: center; padding: 0;
@@ -312,22 +313,29 @@ const demo = (() => {
   }
   addEventListener('resize', fit);
 
+  // The scene reports every frame; only what changed is written, so the page
+  // around the demo isn't restyled at the scene's frame rate.
+  const shown = new Map();
+  const put = (key, value, write) => { if (shown.get(key) !== value) { shown.set(key, value); write(value); } };
   function render() {
     const { t, start, duration, ready, playing } = scene;
     const state = !ready ? 'loading' : playing ? 'playing' : t >= duration ? 'ended' : 'paused';
-    root.dataset.state = state;
-    toggle.setAttribute('aria-label', state === 'ended' ? 'Replay' : 'Play');
+    put('state', state, (v) => {
+      root.dataset.state = v;
+      toggle.setAttribute('aria-label', v === 'ended' ? 'Replay' : 'Play');
+    });
     segs.forEach((el, i) => {
       const c = chapters[i];
-      el.firstChild.style.setProperty('--f', String(Math.min(1, Math.max(0, (t - c.start) / (c.end - c.start)))));
+      put(i, String(Math.min(1, Math.max(0, (t - c.start) / (c.end - c.start)))), (v) => el.firstChild.style.setProperty('--f', v));
     });
+    const label = chapters.length ? chapterAt(t).label : '', now = clock(t - start);
     if (chapters.length) {
-      $('demo-now').innerHTML = `<b>${chapterAt(t).label}</b> · <span>${clock(t - start)}</span>`;
-      $('demo-dur').textContent = clock(duration - start);
+      put('now', label + now, () => { $('demo-now').innerHTML = `<b>${label}</b> · <span>${now}</span>`; });
+      put('dur', clock(duration - start), (v) => { $('demo-dur').textContent = v; });
     }
-    track.setAttribute('aria-valuetext', chapters.length ? `${chapterAt(t).label}, ${clock(t - start)}` : '');
-    track.setAttribute('aria-valuemax', String(Math.round(duration - start)));
-    track.setAttribute('aria-valuenow', String(Math.round(t - start)));
+    put('text', label ? `${label}, ${now}` : '', (v) => track.setAttribute('aria-valuetext', v));
+    put('max', String(Math.round(duration - start)), (v) => track.setAttribute('aria-valuemax', v));
+    put('val', String(Math.round(t - start)), (v) => track.setAttribute('aria-valuenow', v));
     if (state !== 'playing') root.classList.remove('idle');
   }
   addEventListener('message', (e) => {
