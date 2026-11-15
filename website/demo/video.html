@@ -1,0 +1,1259 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Draftmux demo video</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="chrome.css" />
+<link rel="stylesheet" href="chat.css" />
+<link rel="stylesheet" href="review.css" />
+<style>
+  @font-face { font-family: 'Iosevka Term'; src: url(fonts/IosevkaTerm-Regular.woff2); font-weight: 400; }
+  @font-face { font-family: 'Iosevka Term'; src: url(fonts/IosevkaTerm-Bold.woff2); font-weight: 700; }
+  /* Every moving part is driven from seek(t). */
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: #0c0d11; }
+  #stage { position: relative; width: 1920px; height: 1080px; overflow: hidden;
+    background: radial-gradient(1500px 1000px at 72% 18%, #2a3140 0%, #161a22 55%, #0c0d11 100%); }
+  #world { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }
+  /* In the live player, the camera moves a composited layer instead of
+     repainting it. Renders skip this: a layer can keep a stale raster scale. */
+  html[data-scenecast=preview] #world { will-change: transform; }
+
+  /* ---------- Terminal (Claude Code) ---------- */
+  :is(#term, #termghost) { position: absolute; left: 70px; top: 360px; width: 1000px; height: 660px; border-radius: 14px; overflow: hidden;
+    background: #16171c; box-shadow: 0 0 0 1px #ffffff1f, 0 0 0 1.5px #000000b3, 0 30px 80px #000000a0, 0 8px 22px #00000066;
+    font: 400 15.5px/24px 'Iosevka Term', Menlo, monospace; color: #d4d4d8; }
+  :is(#term, #termghost) .bar { height: 38px; display: flex; align-items: center; justify-content: center; position: relative;
+    background: #212228; border-bottom: 1px solid #00000080; font: 600 13px var(--ui); color: #9a9aa3; }
+  :is(#term, #termghost) .bar .traffic { left: 16px; top: 12px; gap: 8px; }
+  :is(#term, #termghost) .bar .traffic i { width: 13px; height: 13px; }
+  :is(#term, #termghost) .tbody { position: absolute; left: 0; right: 0; top: 38px; bottom: 0; padding: 0 26px 18px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+  :is(#term, #termghost) .dim { position: absolute; inset: 0; background: #000; pointer-events: none; }
+  /* Rows keep their height when the transcript overflows the terminal; the
+     oldest scroll off the top. */
+  .tl, .tinput { flex: none; }
+  .tl { white-space: pre-wrap; min-height: 24px; }
+  .tl.gap { margin-top: 14px; }
+  .tl .b { display: inline-block; width: 2ch; }
+  .tl .ok { color: #4eba65; }
+  .tl .fg { color: #f2f2f4; }
+  .tl .tool { font-weight: 700; color: #f2f2f4; }
+  .tl .mut { color: #8a8a94; }
+  .tl .out { color: #a6a6ae; }
+  .tl.user { color: #a6a6ae; background: #ffffff0d; margin: 0 -10px; padding: 2px 10px; border-radius: 4px; }
+  .tl.user.gap { margin-top: 14px; }
+  .tl.user .fg { color: #e6e6ea; }
+  .tl .note { text-decoration: underline; text-decoration-color: transparent; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+  .tl .spin { color: #d77757; }
+  .tl .url { color: #7fb4ff; }
+  .tinput { margin-top: 14px; border: 1px solid #5a5a63; border-radius: 8px; padding: 6px 12px; display: flex; gap: 1ch; min-height: 38px; }
+  .tinput .pr { color: #8a8a94; }
+  .tinput .txt { color: #f2f2f4; white-space: pre; }
+  .tcaret { display: inline-block; width: 1ch; height: 22px; vertical-align: -5px; background: #d4d4d8; }
+  .thint { padding: 4px 13px 0; color: #6e6e78; font-size: 13.5px; height: 26px; }
+  .tfoot { flex: none; }
+  .tmenu { padding: 6px 13px 0; }
+  .tmenu .row { display: flex; gap: 3ch; color: #8a8a94; }
+  .tmenu .row.on { color: #b8a6ff; }
+  .tmenu .row .c { width: 16ch; }
+
+  /* ---------- Draftmux window ---------- */
+  #dmx { position: absolute; left: 610px; top: 130px; width: 1220px; height: 800px; transform-origin: -60px 620px; }
+  #dmx .sidebar { overflow: hidden; }
+  #dmx .sb-list { width: 228px; overflow: hidden; }
+  #dmx .chat-col { width: 360px; display: flex; flex-direction: column; }
+  #dmx .pv-wrap { position: relative; height: 100%; overflow: hidden; flex: none; border-left: 1px solid var(--hairline); }
+  #dmx .editor-pane { flex: none; overflow: hidden; }
+  #dmx .pv-wrap .pane { position: absolute; top: 0; bottom: 0; left: 0; border-left: 0; }
+  .sel-layer { position: absolute; inset: 0; pointer-events: none; }
+  .sel-layer i { position: absolute; background: var(--selection); }
+  .sel-layer.inactive i { background: var(--inactive-selection); }
+  .psel { z-index: 2; mix-blend-mode: multiply; }
+  .tics { z-index: 2; mix-blend-mode: multiply; }
+  .tics i { background: #ffe45c; border-radius: 4px; }
+  #dmx .editor-hl { position: relative; z-index: 1; background: transparent; }
+  .composer-box .ctext { position: absolute; inset: 0; font: 13px/18.85px var(--ui); padding: 9px 11px 4px; color: var(--text); white-space: pre-wrap; }
+  .ccaret { display: inline-block; width: 1.5px; height: 16px; vertical-align: -3px; background: var(--accent); margin-left: 1px; }
+  /* Review takes the editor's and preview's place while it is open. */
+  #dmx .content { position: relative; }
+  #dmx .rv-pane { position: absolute; inset: 0; display: none; }
+  .pop-ctext { min-height: 19px; line-height: 19px; padding: 2px 0 1px; color: var(--text); white-space: pre-wrap; }
+  .bubble .ul { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; text-decoration-color: transparent; }
+  #ov { position: absolute; inset: 0; pointer-events: none; z-index: 90; }
+  /* The app's skeleton while pi writes an empty draft (chrome/skeleton.rs). */
+  .sk .ln { position: relative; font-size: var(--md-size); line-height: var(--md-lh); }
+  .sk .ln::before { content: '\200b'; }
+  .sk .ln > i { position: absolute; left: 0; top: 50%; height: .62em; margin-top: -.31em; border-radius: 99px; }
+  .sk .li > i { left: var(--md-indent); }
+  .sk .li > b { position: absolute; left: var(--md-bullet-left); top: 50%; width: var(--md-bullet); height: var(--md-bullet);
+    margin-top: calc(var(--md-bullet) / -2); border-radius: 50%; }
+  .sk .h2 { font-size: calc(var(--md-size) * 1.5); line-height: var(--md-hlh); padding-bottom: .3em; border-bottom: 1px solid var(--md-hrule); }
+  .sk .gap { height: 16px; }
+  /* A change bar in the gutter beside the text, in the app's change-flash hue
+     (theme.rs change_flash), so the text itself stays clear. */
+  .ring { position: absolute; width: 5px; border-radius: 3px; background: #f2b600; }
+  .tb-hint { font-size: 12px; color: var(--accent); white-space: nowrap; }
+
+  /* ---------- Cursor ---------- */
+  #cursor { position: absolute; left: 0; top: 0; pointer-events: none; width: 24px; height: 34px; transform-origin: 3px 2px; z-index: 200; }
+
+  /* ---------- Screen-space overlays ---------- */
+  .brand { position: absolute; left: 44px; top: 38px; display: flex; align-items: center; gap: 14px; color: #f2f3f6; font: 700 28px Lato, var(--ui); letter-spacing: .2px; }
+  .brand img { width: 46px; height: 46px; }
+  #cap { position: absolute; left: 0; right: 0; bottom: 54px; display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none; }
+  #cap .pill { display: flex; align-items: center; gap: 18px; padding: 16px 34px; border-radius: 999px; background: #0d0f14e8;
+    box-shadow: 0 0 0 1px #ffffff1f, 0 16px 40px #00000080; color: #f4f5f8; font: 600 34px var(--ui); white-space: nowrap; }
+  #cap .tag { font: 500 24px 'Iosevka Term', monospace; color: #9fc3ff; background: #0a6cf52e; border: 1px solid #0a6cf566; border-radius: 10px; padding: 2px 12px; }
+  #cap .sub { font: 500 24px var(--ui); color: #b9bfcc; padding: 6px 20px; border-radius: 999px; background: #0d0f14c4; }
+  #keys { position: absolute; left: 0; right: 0; bottom: 170px; display: flex; justify-content: center; gap: 12px; pointer-events: none; }
+  .key { min-width: 76px; height: 76px; padding: 0 18px; border-radius: 16px; display: grid; place-items: center;
+    background: linear-gradient(#fbfbfd, #e4e6ec); color: #22252c; font: 600 36px var(--ui);
+    box-shadow: 0 0 0 1px #00000026, 0 4px 0 #b6bac4, 0 16px 34px #00000073; }
+  /* The title card, also the thumbnail wherever frame 0 stands in for a
+     poster: the headline on the left, the app polishing a draft behind it on
+     the right. */
+  #title { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 30px;
+    padding-left: 130px; text-align: left; pointer-events: none; overflow: hidden;
+    background: linear-gradient(90deg, #0b0c10f7 0%, #0b0c10eb 42%, #0b0c10b3 100%); }
+  #title > div { position: relative; z-index: 1; }
+  /* Laid out at twice its size and scaled down inside the transform: Chrome
+     rasterizes a 3D-transformed layer at its layout size before tilting it,
+     so the doubled layout keeps the screenshot's text sharp in a 4K render. */
+  #title .hero { position: absolute; left: 420px; top: -121.5px; width: 2040px; border-radius: 32px; transform-origin: 50% 50%;
+    transform: perspective(1700px) rotateX(24deg) rotateZ(-10deg) rotateY(4deg) scale(.5);
+    box-shadow: 0 120px 280px #000000c8, 0 0 240px #3b82f62e, 0 0 0 2px #ffffff26; }
+  #title .l1 { font: 700 84px/1.1 var(--ui); letter-spacing: -1.5px; color: #f4f5f8; max-width: 800px; }
+  #title .l2 { font: 500 42px/1.35 var(--ui); color: #a9afbc; max-width: 700px; }
+  #lb { position: absolute; z-index: 50; pointer-events: none; filter: drop-shadow(0 6px 14px #0000004d); }
+  /* The end card: the desk fades to black behind the app's name. */
+  #outro { position: absolute; inset: 0; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; pointer-events: none; z-index: 200; }
+  #outro .card { display: flex; flex-direction: column; align-items: center; }
+  #outro .uses { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #outro .uses h2 { font: 700 72px/1.1 var(--ui); color: #f4f5f8; letter-spacing: -1px; margin: 0 0 56px; }
+  #outro .uses ul { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px 22px; max-width: 1300px; margin: 0; padding: 0; list-style: none; }
+  #outro .uses li { font: 500 38px/1 var(--ui); color: #d5d9e2; padding: 20px 32px; border-radius: 999px; background: #ffffff12; box-shadow: inset 0 0 0 1px #ffffff1f; }
+  #outro img { width: 168px; height: 168px; margin-bottom: 26px; }
+  #outro .name { font: 700 92px/1.1 Lato, var(--ui); color: #f4f5f8; letter-spacing: .5px; }
+  #outro .l2 { font: 500 40px/1.3 var(--ui); color: #c9cdd6; margin-top: 54px; }
+  #outro .l3 { font: 400 28px/1.3 var(--ui); color: #7d8391; margin-top: 18px; }
+  #title .l2 b { color: #f4f5f8; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="world">
+    <div id="term" class="window">
+      <div class="bar"><div class="traffic"><i></i><i></i><i></i></div>tidepool — claude</div>
+      <div class="tbody" id="tbody"></div>
+      <div class="dim" id="tdim"></div>
+    </div>
+    <div id="dmx" class="window main-win light"></div>
+    <img id="lb" src="img/load-bearing.webp" />
+    <svg id="cursor" viewBox="0 0 24 34"><path d="M3 2 L3 26 L9 20.5 L13 30 L17 28.3 L13.2 19 L21 19 Z" fill="#111" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+  </div>
+  <div id="title"><img class="hero" /><div class="l1">Drafting messages with your agent</div>
+    <div class="l2">What if there was a better UI for polishing message drafts?</div></div>
+  <div class="brand" id="brand"><img src="img/app-icon.webp" />Draftmux</div>
+  <div id="outro"><div class="uses"><h2>Many more use cases</h2><ul></ul></div>
+    <div class="card"><img src="img/app-icon.webp" /><div class="name">Draftmux</div><div class="l2">Now on Mac and Linux</div><div class="l3">Drafts with Claude Code or pi, built on GPUI</div></div></div>
+  <div id="keys"></div>
+  <div id="cap"><div class="pill" id="pill"></div><div class="sub" id="sub"></div></div>
+</div>
+<script src="icons.js"></script>
+<script src="markdown.js"></script>
+<script src="changes.js"></script>
+<script>
+// Everything on screen is a pure function of the story time t (seconds).
+const I = window.ICONS, MD = window.MD;
+const $ = (id) => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = (x) => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+// Camera moves: peaks at 1.875x mean speed, against the cubic's 3x.
+const smoother = (x) => { x = clamp(x); return x * x * x * (x * (6 * x - 15) + 10); };
+// Settles with a slight overshoot, like a spring.
+const easeOutBack = (x, c = .9) => { x = clamp(x) - 1; return 1 + (c + 1) * x * x * x + c * x * x; };
+const easeOut = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const fade = (t, t0, d = .35) => ease((t - t0) / d);
+const win = (t, a, b, d = .3) => fade(t, a, d) * (1 - fade(t, b, d));
+const esc = MD.esc;
+const el = (html) => { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; };
+const setHtml = (e, s) => { if (e.dataset.html !== s) { e.dataset.html = s; e.innerHTML = s; } };
+const typed = (s, t, a, b) => s.slice(0, Math.round(s.length * clamp((t - a) / (b - a))));
+
+// ---------- Timeline ----------
+const T = {
+  title: [3.3, 3.9], type1: [5.6, 7.0], enter1: 7.2, bash1: 7.6, bash1Done: 8.4, opened: 9.0, note: [7.9, 11.9],
+  launch: 10.35, sbIn: 10.8, sbHide: 15.9,
+  read1: 12.1, write1: 12.8, d1: 14.3, reply1: [14.9, 16.3],
+  click2: 22, type2: [22.2, 23.8], send2: 24.1, read2: 24.6, edit2: 25.2, d2: 26.4, reply2: [26.8, 28.4],
+  toggle: 29.4, slack: 31.6, github: 33.2, targets: [31.1, 33.9],
+  drag3: [35.4, 36.2], pop3: 36.4, alt3: 37.2, opts3: 38.2, down3: 39.8, apply3: 40.3,
+  // Comment from the popover: triple-click, Comment, type into its field, send.
+  sel4: 46.4, comment4: 47.3, type4: [47.7, 48.8], send4: 49.1, edit4: 49.7, d4: 51.4, reply4: [51.6, 52.8], ring4: [49.6, 54],
+  // Review: open Changes, compare since Alternatives, keep changes, and Done
+  // keeps the rest (the Workaround change, made in the beat before).
+  review: 55.5, range: 56.4, since: 57.4, step: 58.1, keeps: [58.9, 59.7], done: 60.9,
+  swap: 63, type5: [64.2, 65.6], enter5: 65.8, show5: 66.2, show5Done: 66.7, gh5: 67, url5: 67.8, done5: 68.8,
+  // The first draft's tics light up one by one; the load-bearing joke rides
+  // on the second.
+  tics: 17.3, lb: [17.7, 18.9],
+  outro: 69.8, uses: [70.3, 73.7], card: 73.9,
+};
+const DURATION = 78.4;
+const SEGMENTS = [
+  ['session', 'Session', 0.0, 10.5], ['handoff', 'Hand-off', 10.5, 12.1],
+  ['draft', 'First draft', 12.1, 21.8], ['chat', 'Chat', 21.8, 28.6], ['markdown', 'Markdown', 28.6, 34.4],
+  ['alts', 'Alternatives', 34.4, 45.6], ['part', 'This part', 45.6, 54.4], ['review', 'Review', 54.4, 62.4], ['send', 'Send', 62.4, T.outro], ['uses', 'Use cases', T.outro, T.card], ['end', 'End', T.card, DURATION],
+].map(([id, label, start, end]) => ({ id, label, start, end }));
+
+// ---------- Draft states ----------
+const S2 = 'This can cause a lot of load on the server.';
+const S2_NEW = 'In our app, one rate-limited client sent 40 retries a second.';
+const TESTED = 'We parse the header ourselves and pass the delay to the retry policy. Happy to open a PR that does this inside RetryClient.';
+const TESTED_NEW = 'We parse the header ourselves and pass the delay to the retry policy. The fix upstream is likely in `parse_retry_after` (`src/policy.rs`), which only accepts seconds. Happy to open a PR.';
+// The first draft packs in the house style of a model writing for everyone;
+// the humanizer pass keeps the facts and drops the performance.
+const D1 = `---
+title: Retry-After handling quietly breaks on HTTP-date values
+---
+
+## 🐛 Summary
+
+Here's the thing: \`RetryClient\`'s handling of \`Retry-After\` is **load-bearing**, and it genuinely breaks when the header is an HTTP date. This isn't just a parsing edge case — it's a structural gap in how retrykit honors server backpressure.
+
+## Why This Matters
+
+Honestly, this matters more than it looks. When the parse fails, retrykit quietly falls back to zero delay, so every rate-limited client retries instantly. The result? A retry storm, landing squarely on the server.
+
+## Steps to Reproduce
+
+1. Respond with \`429\` and \`Retry-After: Wed, 11 Nov 2026 14:30:00 GMT\`
+2. Send a request through \`RetryClient\` with the default policy
+3. Watch the retry land instantly — no backoff, no wait
+
+## Workaround
+
+We leaned into parsing the header ourselves and passing the delay to the retry policy. It's a dependable stopgap, and a testament to how small the real fix is.
+
+Happy to unpack any of this further! 🙏
+`;
+const D2 = `---
+title: Retry-After is ignored when it's an HTTP date
+---
+
+## Description
+
+\`RetryClient\` only parses \`Retry-After\` as a number of seconds. When the server sends an HTTP date, the parse fails and the retry fires with no delay. ${S2}
+
+## Steps to reproduce
+
+- Respond with \`429\` and \`Retry-After: Wed, 11 Nov 2026 14:30:00 GMT\`
+- Send a request through \`RetryClient\` with the default policy
+- The retry fires right away instead of waiting
+
+Headers in seconds (\`Retry-After: 120\`) work as expected.
+
+## Workaround
+
+${TESTED}
+`;
+// Selection actions after the Alternatives pick: [sentence, the popover item
+// clicked, its running label, the options; the first is applied].
+// Make concrete is a custom action from settings.json:
+// "Replace vague wording with specifics from our conversation."
+const PASSES = [
+  { drag: [41.2, 41.7], pop: 41.85, alt: 42.45, opts: 43.2, apply: 44.4, item: 3, label: 'Make concrete…',
+    from: 'The retry fires right away instead of waiting',
+    alts: ['The retry fires at once instead of waiting until 14:30:00 GMT', 'The client retries 40 times a second instead of waiting', 'The retry ignores the date and goes out within milliseconds'] },
+];
+const D3a = D2.replace(S2, S2_NEW);
+const D3 = D3a.replace(PASSES[0].from, PASSES[0].alts[0]);
+const D4 = D3.replace(TESTED, TESTED_NEW);
+function draftAt(t) {
+  if (t < T.d1) return '';
+  if (t < T.d2) return D1;
+  if (t < T.apply3) return D2;
+  if (t < PASSES[0].apply) return D3a;
+  if (t < T.d4) return D3;
+  return D4;
+}
+const lineOf = (text, offset) => text.slice(0, offset).split('\n').length;
+
+// Editor selection: [start, end, active] in the current draft text.
+function selectionAt(t, text) {
+  if (t >= T.drag3[0] && t < T.apply3 + .01) {
+    const a = D2.indexOf(S2);
+    return [a, a + Math.round(S2.length * ease((t - T.drag3[0]) / (T.drag3[1] - T.drag3[0]))), true];
+  }
+  const ps = previewSelAt(t);
+  if (ps && t < T.sel4) { const a = text.indexOf(ps[0]); return [a, a + ps[1], true]; }
+  if (t >= T.sel4 && t < T.d4) { const a = D3.indexOf(TESTED); return [a, a + TESTED.length, t < T.send4]; }
+  return null;
+}
+// The preview's selection, which the app mirrors to the Markdown as the
+// editor selection above: [text, characters selected, active].
+function previewSelAt(t) {
+  if (t >= T.drag3[0] && t < T.apply3) return [S2, Math.round(S2.length * ease((t - T.drag3[0]) / (T.drag3[1] - T.drag3[0]))), true];
+  const q = PASSES.findLast((q) => t >= q.drag[0]);
+  if (t >= T.apply3 && t < T.sel4 && !q) return [S2_NEW, S2_NEW.length, true];
+  if (q && t < T.sel4) {
+    if (t >= q.apply) return [q.alts[0], q.alts[0].length, true];
+    return [q.from, Math.round(q.from.length * ease((t - q.drag[0]) / (q.drag[1] - q.drag[0]))), true];
+  }
+  if (t >= T.sel4 && t < T.d4) return [TESTED, TESTED.length, t < T.send4];
+  return null;
+}
+// A Range over the first n characters of text in the preview.
+function previewRange(text, n = text.length) {
+  const r = findRange($('pvbody'), text);
+  if (r && n < text.length) r.setEnd(r.startContainer, r.startOffset + n);
+  return r;
+}
+// Whether the editor's selection is attached to the composer (shown as a chip).
+// It stays attached from the first selection until the message is sent.
+const CHIP_IN = T.drag3[1] + .25;
+function chipAt(t, text) {
+  const s = selectionAt(t, text);
+  if (!s || s[1] - s[0] < 2 || t >= T.send4) return null;
+  if (t < CHIP_IN) return null;
+  const quote = text.slice(s[0], s[1]);
+  return { text: quote, startLine: lineOf(text, s[0]), endLine: lineOf(text, s[1]) };
+}
+
+// The GitHub skeleton from chrome/skeleton.rs: [kind, widths] per block. Lines
+// brighten in the chat shimmer's wave, 90 ms apart, from alpha .08 to .14.
+const SKELETON = [['h2', [.26]], ['p', [.97, .91, .42]], ['p', [.88, .64]], ['li', [.71, .58, .76]]];
+function skeletonHtml(t) {
+  let ix = 0;
+  const shade = () => {
+    const p = ((((t - ix++ * .09) % 1.8) + 1.8) % 1.8) / 1.8;
+    const r = p < .15 ? p / .15 : p < .4 ? 1 - (p - .15) / .25 : 0;
+    return (.08 + .06 * r * r * (3 - 2 * r)).toFixed(3);
+  };
+  const tone = (a) => `background:color-mix(in srgb, var(--md-text) ${(a * 100).toFixed(1)}%, transparent)`;
+  const blocks = SKELETON.map(([kind, ws]) => ws.map((w) => {
+    const a = shade();
+    if (kind === 'li') return `<div class="ln li"><b style="${tone(a * 1.5)}"></b><i style="width:${w * 100}%;${tone(a)}"></i></div>`;
+    return `<div class="ln${kind === 'h2' ? ' h2' : ''}"><i style="width:${w * 100}%;${tone(a)}"></i></div>`;
+  }).join('')).join('<div class="gap"></div>');
+  return `<div class="md t-github sk">${blocks}</div>`;
+}
+
+// ---------- Chat transcript ----------
+const FIRST = 'Write the first draft of the message from our conversation.';
+const NOTE = 'Issue on retrykit: Retry-After as an HTTP date is ignored';
+const R1 = 'Wrote the issue: what breaks, why it matters, how to reproduce it, and our workaround.';
+const R2 = 'Rewrote it with the humanizer skill: no hype, no “load-bearing”, no emoji. Same facts, same workaround.';
+const R4 = 'Added where it breaks: `parse_retry_after` in `src/policy.rs`, which we read earlier.';
+const ASK2 = 'make it sound like a human wrote it';
+const ASK4 = 'point them to where it breaks';
+const ITEMS = [
+  { at: T.launch, type: 'notice', text: 'Continues the Claude Code session (14 earlier messages)' },
+  { at: T.launch, type: 'user', html: `${esc(FIRST)}\n\nWhat to write: <span class="ul">${esc(NOTE)}</span>` },
+  { at: T.read1, type: 'tool', tool: 'read', target: 'draft.md', done: T.read1 + .35, ms: 2 },
+  { at: T.write1, type: 'tool', tool: 'write', target: 'draft.md', done: T.d1, added: 23, ms: 4 },
+  { at: T.reply1[0], type: 'assistant', text: R1, stream: T.reply1 },
+  { at: T.send2, type: 'user', text: ASK2 },
+  { at: T.read2, type: 'tool', tool: 'read', target: 'skills/humanizer/SKILL.md', done: T.read2 + .4, ms: 3 },
+  { at: T.edit2, type: 'tool', tool: 'edit', target: 'draft.md', done: T.d2, from: D1, to: D2, ms: 7 },
+  { at: T.reply2[0], type: 'assistant', text: R2, stream: T.reply2 },
+  { at: T.send4, type: 'user', text: ASK4, quote: { text: TESTED, startLine: lineOf(D3, D3.indexOf(TESTED)), endLine: lineOf(D3, D3.indexOf(TESTED)) } },
+  { at: T.edit4, type: 'tool', tool: 'edit', target: 'draft.md', done: T.d4, from: D3, to: D4, ms: 6 },
+  { at: T.reply4[0], type: 'assistant', text: R4, stream: T.reply4 },
+];
+// Agent runs: the editor is read-only and the send button stops the run.
+const RUNS = [[T.launch, T.reply1[1]], [T.send2, T.reply2[1]], [T.send4, T.reply4[1]]];
+const runAt = (t) => RUNS.find(([a, b]) => t >= a && t < b);
+
+// ---------- Terminal ----------
+const CMD1 = '/draftmux issue on retrykit for this', CMD5 = 'done, file it';
+const SLASH = [['/doctor', 'Diagnose and verify your Claude Code installation'], ['/draftmux', 'Hand a GitHub, Slack or email message off to the Draftmux app'],
+  ['/diff', 'View uncommitted changes and per-turn diffs']];
+const TERM = [
+  // Earlier in the session, long enough to fill the terminal from the top.
+  { at: -1, bullet: 'ok', html: `<span class="tool">Bash</span>(cargo run --example sync -- --server staging)` },
+  { at: -1, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">synced 1,204 records in 3.8s</span>` },
+  { at: -1, gap: true, bullet: 'fg', html: `<span class="fg">Sync works against staging again.</span>` },
+  // The bug the issue reports.
+  { at: -1, gap: true, cls: 'user', html: `<span class="mut">&gt;</span> <span class="fg">why does sync hammer the server when we get rate limited?</span>` },
+  { at: -1, gap: true, bullet: 'ok', html: `<span class="tool">Read</span>(logs/sync.log)` },
+  { at: -1, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">40 retries/s from one client, each 429 with Retry-After: Wed, 11 Nov 2026 14:30:00 GMT</span>` },
+  { at: -1, gap: true, bullet: 'ok', html: `<span class="tool">Search</span>(pattern: "Retry-After", path: "~/.cargo/registry/src/retrykit-0.7.2")` },
+  { at: -1, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">Found 1 file: src/policy.rs. parse_retry_after reads seconds only</span>` },
+  { at: -1, gap: true, bullet: 'ok', html: `<span class="tool">Bash</span>(cargo test)` },
+  { at: -1, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">test result: ok. 42 passed; 0 failed</span>` },
+  { at: -1, gap: true, bullet: 'fg', html: `<span class="fg">Fixed on our side. The bug is in retrykit 0.7: it reads Retry-After as seconds only, so a date falls back to no delay at all.</span>` },
+  { at: T.enter1, gap: true, cls: 'user', html: `<span class="mut">&gt;</span> <span class="fg">${CMD1}</span>` },
+  { at: T.bash1, id: 'note', gap: true, bullet: 'run', done: T.bash1Done, html: `<span class="tool">Bash</span>(draftmux open "$f" --target github --note <span class="note">'${NOTE}'</span>)` },
+  { at: T.bash1Done, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">01a1c900-4f2e-7b51-9c3e-2d7a1f0e8b61</span>` },
+  { at: T.opened, gap: true, bullet: 'fg', html: `<span class="fg">Opened draft 01a1c900 in Draftmux. It's writing the first draft there; tell me when it's done.</span>` },
+  { at: T.enter5, gap: true, cls: 'user', html: `<span class="mut">&gt;</span> <span class="fg">${CMD5}</span>` },
+  { at: T.show5, gap: true, bullet: 'run', done: T.show5Done, html: `<span class="tool">Bash</span>(draftmux show --source "$f" --json)` },
+  { at: T.show5Done, html: `<span class="b"></span><span class="mut">⎿</span>  <span class="out">{"fields":{"title":"Retry-After is ignored when it's an HTTP date"},"body":"## Description…</span>` },
+  { at: T.gh5, gap: true, bullet: 'run', done: T.url5, html: `<span class="tool">Bash</span>(jq -j .body &lt;&lt;&lt; "$draft" | gh issue create --repo retrykit/retrykit --title "$title" --body-file -)` },
+  { at: T.url5, id: 'url', html: `<span class="b"></span><span class="mut">⎿</span>  <span class="url">https://github.com/retrykit/retrykit/issues/214</span>` },
+  { at: T.done5, gap: true, bullet: 'fg', html: `<span class="fg">Filed retrykit#214 with your draft, exactly as written.</span>` },
+];
+// The agent is working (spinner line) between a prompt and its last reply.
+const TBUSY = [[T.enter1, T.opened], [T.enter5, T.done5]];
+const SPIN = ['·', '✢', '✳', '✶', '✻', '✽'];
+
+// ---------- Captions ----------
+// [from, to, text, tag, sub]
+const CAPTIONS = [
+  [3.9, 10.4, 'Hand a message off from your agent session', '/draftmux'],
+  [10.6, 14.1, 'Draftmux forks your session into a pi agent'],
+  [14.3, 21.8, 'Pi writes the first draft from your session'],
+  [22, 26.2, 'Ask for changes in the chat'],
+  [26.4, 28.7, 'Pi uses your skills, like humanizer'],
+  [28.9, 30.9, 'Edit the Markdown beside the preview', '⌥⌘E'],
+  [31.1, 34.3, 'Preview as GitHub, Slack, rich text or plain text'],
+  [34.5, 40.7, 'Select text for alternatives'],
+  [40.9, 45.5, 'Or add your own actions', 'settings.json'],
+  [45.7, 51.3, 'Select a part and say what to change'],
+  [51.4, 54.3, 'Only that part changes'],
+  [54.6, 58.7, 'Review every edit side by side', '⌘⇧E'],
+  [58.8, 62.3, 'Keep or revert each change'],
+  [62.5, T.outro, 'Back in the session, file it as written', null],
+];
+const KEYS = [[T.enter1 - .2, T.enter1 + .4, ['↵']], [T.toggle - .3, T.toggle + .6, ['⌥', '⌘', 'E']], [T.send2 - .2, T.send2 + .4, ['↵']],
+  [T.down3 - .2, T.down3 + .35, ['↓']], [T.apply3 - .15, T.apply3 + .45, ['↵']], ...PASSES.map((q) => [q.apply - .15, q.apply + .35, ['1']]), [T.send4 - .2, T.send4 + .4, ['↵']], [T.review - .3, T.review + .6, ['⌘', '⇧', 'E']], [T.step - .15, T.step + .35, [']']],
+  ...T.keeps.map((k) => [k - .15, k + .35, ['K']]), [T.enter5 - .2, T.enter5 + .4, ['↵']]];
+
+// ---------- Build the Draftmux window ----------
+const dmx = $('dmx');
+dmx.innerHTML = `<div class="traffic"><i></i><i></i><i></i></div><div class="main" id="main">
+  <div class="toolbar"><div class="tb-left"></div><div class="tb-main" id="tb"></div></div>
+  <div class="body-row">
+    <div class="sidebar" id="sb"><div class="sb-head">Drafts</div><div class="sb-listwrap"><div class="sb-list" id="sbl"></div></div></div>
+    <div class="content" id="content">
+      <div class="pane editor-pane" id="ed"><div class="editor-scroll scroll"><div class="editor-inner" id="edin"><div class="sel-layer" id="sel"></div><pre class="editor-flash" id="flash"></pre><pre class="editor-hl" id="hl"></pre></div></div></div>
+      <div class="pv-wrap" id="pvwrap"><div class="pane preview-pane" id="pv"><div class="preview-scroll scroll" id="pvscroll"><div class="preview-body" id="pvbody"></div><div class="sel-layer psel" id="psel"></div><div class="sel-layer tics" id="tics"></div></div></div></div>
+      <div class="pane rv-pane" id="rv"><div class="rv-bar" id="rvbar"></div><div class="rv-cols">
+        ${['before', 'now'].map((side) => `<div class="rv-col ${side}"><div class="rv-head"><i class="rv-dot"></i><span class="trunc" id="rvh-${side}"></span></div>
+          <div class="rv-body"><div class="preview-scroll scroll" id="rvs-${side}"><div class="preview-body" id="rvb-${side}"></div></div></div></div>`).join('')}</div></div>
+    </div>
+    <div class="chat-col"><div class="chat-head"><div class="agent">${I.pi}<span>Pi</span></div></div>
+      <div class="chat-log"><div class="transcript-wrap"><div class="transcript scroll" id="tr"><div class="tfill"></div></div></div></div>
+      <div class="composer"><div class="composer-box" id="cbox">
+        <div class="input-wrap"><div class="ctext" id="ctext"></div><div class="placeholder" id="ph"></div></div>
+        <div class="composer-foot"><div class="model"><div class="model-label"><span class="mname trunc">π anthropic/claude-sonnet-5-5</span><span class="mthink"> · thinking medium</span></div></div>
+          <span id="cfoot"></span><button class="send" id="send"></button></div></div></div>
+    </div>
+  </div></div><div id="ov"><div class="ring" id="ring"></div><div class="popover" id="pop"></div><div class="menu rv-menu" id="rvmenu"></div></div>`;
+const tr = $('tr');
+const VERBS = { read: ['Reading', 'Read'], edit: ['Editing', 'Edited'], write: ['Writing', 'Wrote'] };
+const spinner = (t) => `<span class="spinner"><span class="tr">${I['spinner-track']}</span><span class="arc" style="position:absolute;inset:0;display:block;transform:rotate(${Math.round(t * 514) % 360}deg)">${I['spinner-arc']}</span></span>`;
+const quoteLabel = (q) => {
+  let ex = q.text.replace(/\s+/g, ' ').trim();
+  if (ex.length > 80) ex = ex.slice(0, 80) + '…';
+  const lines = q.startLine === q.endLine ? `Line ${q.startLine}` : `Lines ${q.startLine}–${q.endLine}`;
+  return `<div class="quote">${I.quote}<span class="q-text trunc">${esc(ex)}</span><span class="q-lines">${lines}</span></div>`;
+};
+for (const it of ITEMS) {
+  it.el = el(`<div class="item${it.type === 'tool' ? ' tool' : ''}"></div>`);
+  if (it.type === 'notice') it.el.innerHTML = `<div class="notice">${esc(it.text)}</div>`;
+  if (it.type === 'user') it.el.innerHTML = `<div class="user-row"><div class="bubble">${it.quote ? `<div class="quotes">${quoteLabel(it.quote)}</div>` : ''}${it.html ?? esc(it.text)}</div></div>`;
+  // An edit row counts the word changes in its diff (edit_changes.rs).
+  if (it.from != null) it.changes = window.editChanges.editHunks(window.editChanges.lineDiff(it.from, it.to).lines).reduce((n, hk) => n + hk.changes.length, 0);
+  tr.appendChild(it.el);
+}
+const activity = el('<div class="activity"></div>');
+tr.appendChild(activity);
+
+function toolHtml(it, t) {
+  const running = t < it.done, [ing, ed] = VERBS[it.tool];
+  const count = it.changes == null ? '' : `<span class="changes-n">${it.changes === 1 ? '1 change' : `${it.changes} changes`}</span>`;
+  const stats = running ? '' : `${count}${it.added != null ? `<span class="stat add">+${it.added}</span>` : ''}<span class="dur">${it.ms}ms</span>${I.chevron.replace('<svg', '<svg class="chev"')}`;
+  const settle = running ? '' : ` style="opacity:${easeOut((t - it.done) / .15).toFixed(3)}"`;
+  return `<div class="tool-row"><span class="tool-ic"${settle}>${running ? spinner(t) : I['tool-' + it.tool]}</span>
+    <span class="tool-txt"><span class="tool-verb">${running ? ing : ed}</span><span class="tool-target trunc">${it.target}</span></span>
+    <span class="tool-meta"${settle}>${stats}</span></div>`;
+}
+// The activity label's shimmer: a highlight sweeps across the letters every 1.8 s.
+function shimmerHtml(text, t) {
+  return [...text].map((c, i) => {
+    const p = ((((t * 1000 - i * 45) % 1800) + 1800) % 1800) / 1800;
+    const k = p < .15 ? ease(p / .15) : p < .4 ? 1 - ease((p - .15) / .25) : 0;
+    return `<span style="color:color-mix(in srgb, var(--text) ${Math.round(k * 100)}%, var(--shimmer-base))">${esc(c)}</span>`;
+  }).join('');
+}
+// Streams by whole words, so markdown markers never show half-open.
+function streamed(text, t, [a, b]) {
+  const words = text.split(' '), n = Math.ceil(words.length * clamp((t - a) / (b - a)));
+  let s = words.slice(0, n).join(' ');
+  if ((s.match(/\*\*/g) || []).length % 2) s += '**';
+  return s;
+}
+
+function chatAt(t) {
+  for (const it of ITEMS) {
+    const on = t >= it.at;
+    it.el.style.display = on ? '' : 'none';
+    if (!on) continue;
+    const p = easeOut((t - it.at) / .25);
+    it.el.style.opacity = it.type === 'assistant' ? 1 : p;
+    it.el.style.transform = it.type === 'assistant' ? '' : `translateY(${(1 - p) * 6}px)`;
+    it.el.classList.toggle('running', it.type === 'tool' && t < it.done);
+    if (it.type === 'tool') setHtml(it.el, toolHtml(it, t));
+    if (it.type === 'assistant') setHtml(it.el, `<div class="asst">${MD.renderChat(streamed(it.text, t, it.stream))}</div>`);
+    const ul = it.el.querySelector('.ul');
+    if (ul) ul.style.textDecorationColor = `rgba(255,255,255,${.9 * win(t, T.launch + .4, T.note[1] + .4, .3)})`;
+  }
+  // "Thinking…" while a run waits on the model: no tool running, no reply yet.
+  const run = runAt(t);
+  const busyTool = ITEMS.some((it) => it.type === 'tool' && t >= it.at && t < it.done);
+  const replying = ITEMS.some((it) => it.type === 'assistant' && run && it.at >= run[0] && it.at <= t);
+  const thinking = run && !busyTool && !replying && t >= run[0] + .15;
+  activity.style.display = thinking ? '' : 'none';
+  if (thinking) activity.innerHTML = shimmerHtml('Thinking…', t);
+  tr.scrollTop = tr.scrollHeight;
+}
+
+// Typed text in the composer: [from, to, text].
+const COMPOSE = [[T.type2[0], T.type2[1], T.send2, ASK2], [T.type4[0], T.type4[1], T.send4, ASK4]];
+function composerAt(t, text) {
+  const c = COMPOSE.find(([a, , s]) => t >= a - .4 && t < s);
+  const value = c ? typed(c[3], t, c[0], c[1]) : '';
+  const focus = t >= T.click2 && t < T.send2;
+  setHtml($('ctext'), esc(value) + (focus && (value || Math.floor(t * 2.2) % 2 === 0) ? '<span class="ccaret"></span>' : ''));
+  const chip = chipAt(t, text);
+  $('ph').textContent = value ? '' : chip ? 'Ask pi to change the selection, or ask about it…' : 'Ask pi to change the draft, or ask about the session…';
+  const busy = !!runAt(t);
+  // The attached selection shows as a chip in the footer, in place of the
+  // send hint; the hint also hides while the agent runs.
+  const rise = easeOut((t - CHIP_IN) / .2);
+  setHtml($('cfoot'), chip ? `<span class="qwrap" style="opacity:${rise.toFixed(3)}"><button class="qchip">${I.quote}1 selection</button></span>` : busy ? '' : '<span class="hint">↵ send · ⇧↵ newline</span>');
+  $('cfoot').style.cssText = 'display:contents';
+  // A Claude run reports the model it uses as it starts.
+  const send = $('send');
+  send.className = 'send' + (busy ? ' busy' : value ? '' : ' disabled');
+  setHtml(send, busy ? I.stop : I.send);
+  $('cbox').style.borderColor = focus ? 'var(--accent)' : '';
+}
+
+const TARGETS = [['github', 'GitHub'], ['slack', 'Slack'], ['rich', 'Rich text'], ['plain', 'Plain text']];
+function toolbarAt(t, text, editor, target) {
+  const title = text ? MD.draftTitle(text, { emoji: false }) : 'Issue on retrykit';
+  setHtml($('tb'), `<button class="icon-btn" id="b-sidebar">${I.sidebar}</button>
+    <div class="tb-title trunc">${esc(title)}</div><div class="tb-sub trunc">~/code/tidepool</div><div class="spacer"></div>
+    <div class="tb-actions">${changesButton(t, text)}<div class="format-wrap">${target === 'slack' ? '' : `<div class="format-group${runAt(t) ? ' disabled' : ''}"><button class="format-btn">Format <span class="kbd">⌘⇧F</span></button><button class="format-chev">${I.chevron}</button></div>`}</div>
+      <button class="icon-btn pane-toggle${editor ? '' : ' off'}" id="b-editor">${I['editor-pane']}</button>
+      <button class="icon-btn pane-toggle" id="b-preview">${I.preview}</button>
+      <div class="segments" id="segs">${TARGETS.map(([k, l]) => `<button class="segment${k === 'github' ? ' gh' : ''}${k === target ? ' on' : ''}" id="seg-${k}">${l}${k === 'github' ? I.chevron.replace('<svg', '<svg class="seg-chev"') : ''}</button>`).join('')}</div>
+      <button class="copy-btn">${I.copy}Copy <span class="kbd">⌘⇧C</span></button></div>`);
+}
+
+// Offsets in the draft -> a Range over the highlighted mirror's text.
+function textRange(root, start, end) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const r = document.createRange();
+  let n, pos = 0, set = false;
+  while ((n = w.nextNode())) {
+    const len = n.data.length;
+    if (!set && start <= pos + len) { r.setStart(n, start - pos); set = true; }
+    if (set && end <= pos + len) { r.setEnd(n, end - pos); return r; }
+    pos += len;
+  }
+  return r;
+}
+// The first text node range in root containing needle.
+function findRange(root, needle) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) { const i = n.data.indexOf(needle); if (i >= 0) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + needle.length); return r; } }
+  return null;
+}
+// A client rect in el's own (untransformed) coordinates.
+function rel(r, e) {
+  const b = e.getBoundingClientRect(), k = b.width / e.offsetWidth;
+  return { x: (r.left - b.left) / k, y: (r.top - b.top) / k, w: r.width / k, h: r.height / k };
+}
+const union = (a, b) => { const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y); return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y }; };
+const pad = (r, px, py = px) => ({ x: r.x - px, y: r.y - py, w: r.w + 2 * px, h: r.h + 2 * py });
+const world = $('world');
+const W = (e) => rel(e.getBoundingClientRect(), world);
+const WR = (r) => rel(r, world);
+
+// The preview's heading and body (paragraph or code) of the Workaround section.
+function testingBody() {
+  const h = [...$('pvbody').querySelectorAll('h2')].find((x) => x.textContent.includes('Workaround'));
+  return h && [h, h.nextElementSibling];
+}
+
+// The drafts already open when the hand-off arrives: [title, updated, cwd].
+const OTHER_DRAFTS = [
+  ['Reply to Mika about the sync outage', '25m', '~/code/tidepool'],
+  ['Release notes for 0.9', '2h', '~/code/tidepool'],
+  ['Add offline mode to the mobile client', 'Tue', '~/code/tidepool-mobile'],
+  ['Self-hosting section for the README', 'Mon', '~/code/harbor'],
+];
+const sbRow = (title, time, cwd, selected) => `<div class="row${selected ? ' selected' : ''}"><div class="row-col">
+  <div class="row-l1"><div class="row-title trunc">${esc(title)}</div><div class="row-time">${time}</div></div>
+  <div class="row-l2"><span class="row-cwd trunc">${cwd}</span></div></div></div>`;
+// The sidebar lists the other drafts; the hand-off's draft slides in on top,
+// selected, and ⌘\ hides the sidebar before the camera moves in.
+function sidebarAt(t, title) {
+  const open = 1 - ease((t - T.sbHide) / .35), k = ease((t - T.sbIn) / .4);
+  $('main').classList.toggle('no-sidebar', open <= 0);
+  $('sb').style.display = open > 0 ? '' : 'none';
+  $('sb').style.width = `${Math.round(228 * open)}px`;
+  $('sbl').style.transform = `translateX(${(228 * (open - 1)).toFixed(1)}px)`;
+  document.querySelector('#dmx .tb-left').style.width = open > 0 ? `${Math.round(100 + 128 * open)}px` : '';
+  if (open <= 0) return;
+  setHtml($('sbl'), `<div class="sb-new">${sbRow(title, 'now', '~/code/tidepool', true)}</div>`
+    + OTHER_DRAFTS.map(([a, b, c], i) => sbRow(a, b, c, k < .5 && i === 0)).join(''));
+  const row = $('sbl').firstElementChild;
+  Object.assign(row.style, { height: `${(row.scrollHeight * k).toFixed(2)}px`, overflow: 'hidden', opacity: k, flex: 'none' });
+}
+
+let lastHl = null;
+function draftmuxAt(ct) {
+  const text = draftAt(ct);
+  const target = ct >= T.slack && ct < T.github ? 'slack' : 'github';
+  toolbarAt(ct, text, ct >= T.toggle, target);
+  sidebarAt(ct, text ? MD.draftTitle(text, { emoji: false }) : 'Issue on retrykit');
+  // Editor.
+  const hl = $('hl');
+  if (lastHl !== text) { hl.innerHTML = MD.highlightSource(text) + '\n '; lastHl = text; }
+  $('ed').classList.toggle('read-only', !!runAt(ct));
+  const cascade = clamp((ct - (ct >= T.d2 ? T.d2 : T.d1)) / .5);
+  const mask = text && cascade < 1 ? `linear-gradient(#000 ${cascade * 100}%, transparent ${cascade * 100 + 12}%)` : '';
+  hl.style.webkitMaskImage = mask; $('pvbody').style.webkitMaskImage = mask;
+  // The draft opens in the preview alone; the editor slides in from the left
+  // at its full width, so its lines don't rewrap mid-move.
+  const cw = $('content').offsetWidth, half = Math.round(cw / 2);
+  const ew = Math.round(half * ease((ct - T.toggle) / .4));
+  const ed = $('ed');
+  ed.style.width = `${ew}px`; ed.style.display = ew > 0 ? '' : 'none';
+  ed.firstElementChild.style.right = 'auto'; ed.firstElementChild.style.width = `${half}px`;
+  $('pvwrap').style.width = `${cw - ew}px`;
+  $('pvwrap').style.borderLeftWidth = ew > 0 ? '' : '0';
+  $('pv').style.width = `${cw - ew}px`;
+  const { html } = MD.renderPreview(text, target);
+  // An empty draft shows the app's skeleton of the message while pi writes it.
+  setHtml($('pvbody'), text ? html : skeletonHtml(ct));
+  const md = $('pvbody').querySelector('.md');
+  $('pvscroll').style.background = md ? getComputedStyle(md).getPropertyValue('--md-bg') : '';
+  // Selection highlight, drawn behind the mirror.
+  const sel = selectionAt(ct, text), layer = $('sel');
+  let rects = [];
+  if (sel && sel[1] > sel[0]) rects = [...textRange(hl, sel[0], sel[1]).getClientRects()].map((r) => rel(r, $('edin')));
+  setHtml(layer, selHtml(rects));
+  const ps = previewSelAt(ct);
+  layer.classList.toggle('inactive', !!sel && (!sel[2] || !!ps));
+  const pr = ps && ps[1] > 0 && previewRange(ps[0], ps[1]);
+  const prects = pr ? [...pr.getClientRects()].map((r) => rel(r, $('pvscroll'))) : [];
+  setHtml($('psel'), selHtml(prects));
+  $('psel').classList.toggle('inactive', !!ps && !ps[2]);
+  ticsAt(ct);
+  flashAt(ct, text);
+  chatAt(ct);
+  composerAt(ct, text);
+  popoverAt(ct, text, sel);
+  ringAt(ct);
+  reviewAt(ct, text);
+}
+
+// Selection rects in the pane's own pixels. Measuring through the camera's
+// scale leaves sub-pixel noise that changes as the camera drifts; snapping it
+// keeps a still selection from creeping against its text.
+const selHtml = (rects) => rects.map((r) => {
+  const x = Math.round(r.x), y = Math.round(r.y);
+  return `<i style="left:${x}px;top:${y}px;width:${Math.round(r.x + r.w) - x}px;height:${Math.round(r.y + r.h) - y}px"></i>`;
+}).join('');
+
+// Text an edit changed gets a tint that fades by the square of its progress
+// over 900 ms, as the app's Editor::flash paints it. Applying an alternative
+// flashes the whole inserted option, as the selection popover does; an agent
+// edit flashes only the changed ranges. [at, before, after, inserted option].
+const inserted = (text, option) => { const a = text.indexOf(option); return [[a, a + option.length]]; };
+const FLASHES = [[T.apply3, D2, D3a, S2_NEW], [PASSES[0].apply, D3a, D3, PASSES[0].alts[0]], [T.d4, D3, D4]];
+function flashAt(t, text) {
+  const f = FLASHES.find(([a]) => t >= a && t < a + .9), layer = $('flash');
+  layer.style.display = f ? '' : 'none';
+  if (!f) return;
+  let html = '', at = 0;
+  for (const [a, b] of f[3] ? inserted(f[2], f[3]) : window.changedRanges(f[1], f[2])) { html += esc(text.slice(at, a)) + `<mark>${esc(text.slice(a, b))}</mark>`; at = b; }
+  setHtml(layer, html + esc(text.slice(at)) + '\n ');
+  const p = (t - f[0]) / .9;
+  layer.style.opacity = 1 - p * p;
+}
+
+// ---------- Selection popover ----------
+// selection_popover.rs: the actions for a selection, the options the agent
+// streams in, or the comment field.
+const ALTS = ['Every rate-limited client retries in a tight loop.', S2_NEW, 'Under a rate limit, this turns into a retry storm.'];
+const ACTIONS = ['Alternatives', 'Shorten', 'Tighten', 'Make concrete'], COMMENT = ACTIONS.length;
+const AGENT = 'pi';
+// Options stream in muted, one at a time, after a short wait.
+const PREVIEW_AT = .3, PREVIEW_GAP = .2;
+function popoverState(t) {
+  // at: when the popover appeared; since: when this mode started; hl: the
+  // highlighted row and hlAt when it landed; out: when it is dismissed.
+  const st = { mode: null, at: 0, since: 0, hl: -1, hlAt: 0, out: Infinity, alts: ALTS, label: 'Generating alternatives…' };
+  const pass = (pop, alt, opts, apply, item, hlOpt, hlOptAt) => {
+    if (t < pop || t >= apply) return false;
+    st.at = pop;
+    if (t < alt) Object.assign(st, { mode: 'actions', since: pop, hl: t >= alt - .3 ? item : -1, hlAt: alt - .3 });
+    else if (t < opts) Object.assign(st, { mode: 'running', since: alt, previews: Math.min(st.alts.length, Math.floor((t - alt - PREVIEW_AT) / PREVIEW_GAP) + 1) });
+    else Object.assign(st, { mode: 'results', since: alt, hl: hlOpt, hlAt: hlOptAt });
+    return true;
+  };
+  if (pass(T.pop3, T.alt3, T.opts3, T.apply3, 0, t >= T.down3 ? 1 : 0, t >= T.down3 ? T.down3 : T.opts3)) return st;
+  for (const q of PASSES) {
+    Object.assign(st, { alts: q.alts, label: q.label });
+    if (pass(q.pop, q.alt, q.opts, q.apply, q.item, 0, q.opts)) return st;
+  }
+  st.alts = ALTS;
+  // Comment: the field takes the popover's place, and sending closes it.
+  const pop4 = T.sel4 + .2;
+  if (t >= pop4 && t < T.send4 + .2) {
+    Object.assign(st, { at: pop4, out: T.send4 });
+    if (t < T.comment4) Object.assign(st, { mode: 'actions', since: pop4, hl: t >= T.comment4 - .25 ? COMMENT : -1, hlAt: T.comment4 - .25 });
+    else Object.assign(st, { mode: 'comment', since: T.comment4 });
+  }
+  return st;
+}
+function popoverHtml(st, t) {
+  const hlStyle = ` style="background-color:color-mix(in srgb, var(--accent) ${Math.round(easeOut((t - st.hlAt) / .12) * 100)}%, transparent)"`;
+  const item = (i, inner) => `<div class="pop-item${st.hl === i ? ' hl' : ''}"${st.hl === i ? hlStyle : ''}>${inner}</div>`;
+  const opt = (o, i, live) => `<div class="pop-opt${live && st.hl === i ? ' hl' : ''}"${live && st.hl === i ? hlStyle : ''}><span class="n">${i + 1}</span><span class="o">${esc(o)}</span></div>`;
+  if (st.mode === 'actions') {
+    return `<div class="pop-body"><div class="pop-actions">${ACTIONS.map((a, i) => item(i, `${i === 0 ? '<span class="spark">✦</span>' : ''}<span class="trunc" style="max-width:140px">${a}</span>`)).join('')}`
+      // The app adds a "⌘-drag to add" hint here until the first added
+      // selection; the video leaves it out so the row fits the camera's shots.
+      + `<div class="pop-div"></div>${item(COMMENT, `${COMMENT_ICON}<span>Comment</span>`)}</div></div>`;
+  }
+  if (st.mode === 'running' && st.previews < 1) return `<div class="pop-body"><div class="pop-running">${spinner(t)}<span>${esc(st.label)}</span></div></div>`;
+  if (st.mode === 'running') {
+    return `<div class="pop-body"><div class="pop-results previews">${st.alts.slice(0, st.previews).map((o, i) => opt(o, i, false)).join('')}
+      <div class="pop-foot run">${spinner(t)}<span>${esc(st.label)}</span><span class="esc">esc cancel</span></div></div></div>`;
+  }
+  if (st.mode === 'results') {
+    return `<div class="pop-body"><div class="pop-results">${st.alts.map((o, i) => opt(o, i, true)).join('')}
+      <div class="pop-foot"><span>1–${st.alts.length} or ↵ apply</span><span>↑↓ move</span><span>esc cancel</span></div></div></div>`;
+  }
+  const value = typed(ASK4, t, ...T.type4), caret = value || Math.floor(t * 2.2) % 2 === 0 ? '<span class="ccaret"></span>' : '';
+  return `<div class="pop-body"><div class="pop-comment"><div class="pop-field"><div class="pop-input"><div class="pop-ctext">${esc(value)}${caret}</div>
+    ${value ? '' : `<div class="pop-ph">Tell ${AGENT} what to change here…</div>`}</div><div class="pop-send${value ? '' : ' disabled'}">${I.send}</div></div>
+    <div class="pop-hints"><span>↵ send to ${AGENT}</span><span>⇧↵ newline</span><span>esc back</span></div></div></div>`;
+}
+const COMMENT_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2.75 4.25a1.5 1.5 0 0 1 1.5-1.5h7.5a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H7.5l-3 2.5v-2.5h-.25a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
+// The tallest the popover gets for a selection: its options list, measured
+// once, so it picks the side that fits them and stays there.
+const popNeed = new Map();
+function popoverAt(t, text, sel) {
+  const pop = $('pop'), st = popoverState(t);
+  pop.style.display = st.mode ? '' : 'none';
+  if (!st.mode) return;
+  if (!popNeed.has(st.at)) {
+    setHtml(pop, popoverHtml({ ...st, mode: st.at === T.sel4 + .2 ? 'comment' : 'results' }, t));
+    popNeed.set(st.at, pop.offsetHeight);
+  }
+  setHtml(pop, popoverHtml(st, t));
+  const k = easeOut((t - st.at) / .12) * (1 - ease((t - st.out) / .2));
+  pop.style.opacity = k; pop.style.transform = `scale(${.97 + .03 * k})`;
+  if (st.mode !== 'actions') pop.firstElementChild.style.opacity = easeOut((t - st.since) / .16);
+  // Above the selection's first line in the preview, or below its last when
+  // the options wouldn't fit above.
+  const range = previewRange(...previewSelAt(t).slice(0, 2));
+  const rs = [...range.getClientRects()].map((r) => rel(r, dmx));
+  const first = rs[0], last = rs[rs.length - 1];
+  const pane = rel($('pv').getBoundingClientRect(), dmx);
+  const w = pop.offsetWidth, h = pop.offsetHeight, need = Math.max(h, popNeed.get(st.at));
+  const x = Math.max(pane.x + 8, Math.min(first.x - 6, pane.x + pane.w - w - 8));
+  const above = first.y - 6 - need >= pane.y + 8;
+  pop.style.left = `${x}px`; pop.style.top = `${above ? first.y - 6 - h : last.y + last.h + 6}px`;
+}
+
+// ---------- Review (chrome/review.rs) ----------
+// Each agent turn that edits the draft, and each option applied from the
+// popover, adds an edit to the draft's history: [when, label, text before].
+// The menu's ages stand in for the minutes a real session takes.
+const EDITS = [[T.d2, ASK2, D1, '4m'], [T.apply3, 'Alternatives', D2, '2m'], [PASSES[0].apply, 'Make concrete', D3a, '2m'], [T.d4, ASK4, D3, 'now']];
+const editsAt = (t) => EDITS.filter(([at]) => t >= at);
+const clip = (s, n) => [...s].length <= n ? s : [...s].slice(0, n - 1).join('') + '…';
+// Review compares since the last edit until the range menu picks Alternatives.
+const SINCE = 1;
+// The selected change: ] selects the first, each K keeps it and moves on.
+const reviewSel = (t) => t < T.step ? null : T.keeps.filter((k) => t >= k).length;
+const keptAt = (t) => T.keeps.filter((k) => t >= k).length + (t >= T.done ? Infinity : 0);
+const cmpCache = new Map();
+function comparison(base, text) {
+  const key = base + '\0' + text;
+  if (!cmpCache.has(key)) cmpCache.set(key, window.reviewDiff.compare(base, text));
+  return cmpCache.get(key);
+}
+function reviewState(t, text) {
+  const edits = editsAt(t);
+  if (!edits.length) return null;
+  const since = t >= T.since ? SINCE : edits.length - 1;
+  const cmp = comparison(edits[since][2], text);
+  // Kept changes are those of the comparison since Alternatives.
+  const kept = since === SINCE ? Math.min(keptAt(t), cmp.hunks.length) : 0;
+  return { edits, since, cmp, kept, open: t >= T.review && t < T.done, selected: since === SINCE ? reviewSel(t) : null };
+}
+// The toolbar's Changes button, with the count not yet kept.
+function changesButton(t, text) {
+  const r = reviewState(t, text);
+  if (!r) return '';
+  const count = r.cmp.hunks.length - r.kept, fade = easeOut((t - r.edits[0][0]) / .2);
+  return `<button class="rv-btn${r.open ? ' on' : ''}${count ? ' counted' : ''}" id="b-review" style="opacity:${fade.toFixed(3)}">${count ? `<span class="rv-count">${count}</span>` : ''}${count === 1 ? 'Change' : 'Changes'}</button>`;
+}
+const chev = (cls = '') => I.chevron.replace('<svg', `<svg class="rv-chev ${cls}"`);
+let rvDrawn = null;
+function reviewAt(t, text) {
+  const r = reviewState(t, text), open = !!r && r.open;
+  $('rv').style.display = open ? 'block' : 'none';
+  $('ed').style.visibility = $('pvwrap').style.visibility = open ? 'hidden' : '';
+  $('rvmenu').style.display = 'none';
+  if (!open) return;
+  const n = r.edits.length, last = r.since + 1 >= n, count = r.cmp.hunks.length;
+  // The columns: each side's text with its changes marked.
+  const key = r.edits[r.since][2] + '\0' + text;
+  if (rvDrawn !== key) {
+    rvDrawn = key;
+    for (const [side, which] of [['before', 'before'], ['now', 'after']]) {
+      const box = window.reviewDiff.renderSide(window.reviewDiff.marked(r.cmp, which), 'github');
+      $(`rvb-${side}`).replaceChildren(...box.childNodes);
+      const md = $(`rvb-${side}`).querySelector('.md');
+      $(`rvs-${side}`).style.background = md ? getComputedStyle(md).getPropertyValue('--md-bg') : '';
+    }
+  }
+  $('rvh-before').textContent = last ? `Before “${clip(r.edits[r.since][1], 30)}”` : `Before the last ${n - r.since} edits`;
+  $('rvh-now').textContent = 'Now';
+  const sel = r.selected, pos = sel != null ? `${sel + 1} of ${count}` : `– of ${count}`;
+  const menuOpen = t >= T.range && t < T.since;
+  setHtml($('rvbar'), `<button class="rv-range${menuOpen ? ' open' : ''}" id="rv-range">${last ? 'Last edit' : `Last ${n - r.since} edits`}${chev('down')}</button>
+    <div class="rv-changes"><div class="rv-nav"><button class="rv-step">${chev('back')}</button><span class="rv-pos">${pos}</span><button class="rv-step">${chev()}</button></div>
+      ${sel != null ? '<button class="rv-b push">Revert</button>' : '<button class="rv-b push">Restore</button>'}
+      <button class="rv-b ${sel != null && sel < r.kept ? 'plain' : 'push'}${sel == null ? ' off' : ''}">${sel != null && sel < r.kept ? 'Kept' : 'Keep'}</button></div>
+    <div class="rv-spacer"></div><button class="rv-done" id="rv-done">Done</button>`);
+  for (const m of $('rv').querySelectorAll('.rl')) {
+    const i = +m.dataset.h;
+    m.classList.toggle('kept', i < r.kept);
+    m.classList.toggle('sel', i === sel);
+  }
+  // The changes stepped through all sit in the columns' first screen, so
+  // neither column scrolls.
+  // The range menu, newest edit first, under its button.
+  if (menuOpen) {
+    const menu = $('rvmenu'), rows = r.edits.map(([, label, , age], i) => ({ label: `“${clip(label, 34)}”`, age, i })).reverse();
+    const hl = t >= T.since - .35 ? rows.findIndex((x) => x.i === SINCE) : -1;
+    setHtml(menu, `<div class="rv-menu-head">Show Changes Since</div>${rows.map((x, k) => `<div class="menu-item${k === hl ? ' hl' : ''}"><span class="chk">${x.i === r.since ? '✓' : ''}</span><span class="trunc">${esc(x.label)}</span><span class="rv-menu-detail">${x.age}</span></div>`).join('')}
+      <div class="menu-sep"></div><div class="menu-item"><span class="chk"></span><span class="trunc">Restore the Before Column</span></div>`);
+    const b = rel($('rv-range').getBoundingClientRect(), dmx);
+    Object.assign(menu.style, { display: 'flex', left: `${b.x}px`, top: `${b.y + b.h + 4}px`, opacity: easeOut((t - T.range) / .1) });
+  }
+}
+
+// Rings around what an edit changed in the preview: [from, to, rect in dmx].
+const RINGS = [
+  [T.ring4[0], T.ring4[1], () => { const [, body] = testingBody(); return pad(rel(body.getBoundingClientRect(), dmx), 8, 4); }],
+];
+function ringAt(t) {
+  const ring = $('ring'), g = RINGS.find(([a, b]) => t >= a - .3 && t < b + .3);
+  const on = g ? win(t, g[0], g[1], .3) : 0;
+  const r = on > 0 && g[2]();
+  ring.style.opacity = r ? on : 0;
+  if (r) Object.assign(ring.style, { left: `${r.x - 8}px`, top: `${r.y}px`, height: `${r.h}px` });
+}
+
+// ---------- Terminal ----------
+for (const l of TERM) {
+  l.el = el(`<div class="tl${l.gap ? ' gap' : ''}${l.cls ? ' ' + l.cls : ''}">${l.bullet ? '<span class="b">⏺</span>' : ''}${l.html}</div>`);
+  l.b = l.el.querySelector('.b');
+  $('tbody').appendChild(l.el);
+}
+const spinLine = el('<div class="tl gap"></div>');
+const tinput = el('<div class="tinput"><span class="pr">&gt;</span><span class="txt"></span></div>');
+const tmenu = el('<div class="tmenu"></div>');
+const thint = el('<div class="thint">? for shortcuts</div>');
+// The menu and the hint share a footer as tall as the full menu, so the
+// bottom-aligned transcript doesn't jump as the menu narrows while typing.
+const tfoot = el('<div class="tfoot"></div>');
+tfoot.append(tmenu, thint);
+$('tbody').append(spinLine, tinput, tfoot);
+
+
+function terminalAt(t) {
+  for (const l of TERM) {
+    l.el.style.display = t >= l.at ? '' : 'none';
+    if (!l.b) continue;
+    const running = l.done && t < l.done;
+    l.b.className = 'b ' + (running ? 'mut' : l.bullet === 'run' ? 'ok' : l.bullet);
+    l.b.style.opacity = running ? (Math.floor(t * 2.5) % 2 ? .25 : 1) : 1;
+  }
+  const note = TERM.find((l) => l.id === 'note').el.querySelector('.note');
+  note.style.textDecorationColor = `rgba(122,166,255,${win(t, T.note[0], T.note[1], .3)})`;
+  // Spinner line while the agent works.
+  const busy = TBUSY.find(([a, b]) => t >= a && t < b);
+  spinLine.style.display = busy ? '' : 'none';
+  if (busy) {
+    const s = Math.floor((t - busy[0]) * 1);
+    setHtml(spinLine, `<span class="spin">${SPIN[Math.floor(t * 8) % SPIN.length]} Pondering…</span> <span class="mut">(${s}s · esc to interrupt)</span>`);
+  }
+  // Prompt typing.
+  let value = '';
+  if (t >= T.type1[0] && t < T.enter1) value = typed(CMD1, t, ...T.type1);
+  if (t >= T.type5[0] && t < T.enter5) value = typed(CMD5, t, ...T.type5);
+  setHtml(tinput.querySelector('.txt'), esc(value) + (Math.floor(t * 2.2) % 2 === 0 || value ? '<span class="tcaret"></span>' : ''));
+  // Slash command menu while the command name is being typed.
+  const cmd = value.startsWith('/') && !value.includes(' ') ? value : '';
+  if (!tfoot.style.height && document.fonts.status === 'loaded') {
+    setHtml(tmenu, SLASH.map(([c, d]) => `<div class="row"><span class="c">${c}</span><span>${d}</span></div>`).join(''));
+    tfoot.style.height = `${tmenu.offsetHeight}px`;
+  }
+  const rows = cmd ? SLASH.filter(([c]) => c.startsWith(cmd)).slice(0, 3) : [];
+  setHtml(tmenu, rows.map(([c, d]) => `<div class="row${c === '/draftmux' ? ' on' : ''}"><span class="c">${c}</span><span>${d}</span></div>`).join(''));
+  thint.style.display = rows.length ? 'none' : '';
+}
+
+// ---------- Camera ----------
+// Named shots, as world rects. The camera fits the rect into the frame.
+// Every Draftmux shot has this height, so all fit at 2x and moves between
+// them are pans. Scale changes only when the story changes window.
+const WORK_H = 465;
+const SHOTS = {
+  desk: () => ({ x: 0, y: 0, w: 1920, h: 1080 }),
+  // The whole Draftmux window, for orienting when it opens.
+  // Its laid-out box, since the window may be hidden or mid-launch.
+  dmx: () => pad({ x: 610, y: 130, w: 1220, h: 800 }, 16),
+  term: () => pad(W($('term')), 40),
+  // Bottom of the terminal: the prompt and the output that appears above it.
+  termTail: () => { const b = W($('term')); return { x: b.x - 20, y: b.y + b.h - 504, w: b.w + 40, h: 504 }; },
+  // Top of editor and preview (the whole preview before the toggle), toolbar included.
+  source: () => { const r = W($('content')); return { x: r.x - 10, y: W(dmx).y, w: r.w + 20, h: WORK_H }; },
+  // Preview and the target switch above it.
+  targets: () => { const p = W($('pv')), g = W($('segs')); return { x: p.x - 10, y: W(dmx).y, w: g.x + g.w + 20 - p.x, h: WORK_H }; },
+  // From just above Steps to reproduce, so a popover over the last step fits,
+  // down through Workaround.
+  steps: () => { const r = W($('content')), h = W([...$('pvbody').querySelectorAll('h2')].find((e) => /^Steps/.test(e.textContent)));
+    return { x: r.x - 10, y: Math.min(h.y - 70, r.y + r.h - WORK_H), w: r.w + 20, h: WORK_H }; },
+  // Bottom of preview and chat: composer, transcript tail and the preview's Workaround section.
+  chat: () => { const r = W($('content')), c = W(document.querySelector('.chat-col')), x = r.x + r.w / 2 - 10;
+    return { x, y: c.y + c.h - WORK_H, w: c.x + c.w + 10 - x, h: WORK_H }; },
+  // Review's bar and columns, with the toolbar's Changes button above them.
+  review: () => { const r = W($('content')); return { x: r.x - 10, y: W(dmx).y, w: r.w + 20, h: 560 }; },
+};
+// [start, duration, shot, drift]: drift is a slow push while holding.
+const CAMERA = [
+  [0, 0, 'term'],
+  [T.type1[0] - 1.3, .8, 'termTail', .02],
+  // One move from the terminal to the Draftmux window through the whole
+  // desk, where the window launches.
+  [10.0, 1.1, 'dmx', 0, 'desk'],
+  [16.4, .8, 'source', .02],
+  [21.4, .7, 'chat', .02],
+  // The whole window while the rewrite lands, title to workaround.
+  [25.2, .8, 'dmx'],
+  [28.6, .8, 'source', .02],
+  [30.7, .8, 'targets'],
+  [34.4, .8, 'source', .02],
+  [40.5, .6, 'steps'],
+  // The comment is typed over the paragraph; the edit plays out beside the chat.
+  [T.send4 + .1, .7, 'chat', .02],
+  [54.4, .9, 'review'],
+  // One move back to the terminal, out through the whole desk, the way the
+  // window came in: the terminal comes forward as the camera passes the desk.
+  [T.swap - .55, 1.1, 'termTail', .02, 'desk'],
+];
+// Shots other than the desk, the window and the terminal's tail fit above the
+// caption band at the bottom.
+const BAND = 150;
+function fit(r, shot) {
+  if (shot === 'desk') return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, s: Math.min(1920 / r.w, 1080 / r.h) };
+  // The terminal's tail fills the frame's width with the terminal's bottom
+  // edge on the frame's; the caption sits over the empty lines below the
+  // prompt.
+  if (shot === 'termTail') { const s = 1920 / r.w; return { cx: r.x + r.w / 2, cy: r.y + r.h - 540 / s, s }; }
+  // The whole window fills the frame's height, at the right edge, so the
+  // caption falls on the preview's empty lower left instead of the chat.
+  if (shot === 'dmx') { const s = Math.min(1920 / r.w, 1080 / r.h); return { cx: r.x + r.w - 960 / s, cy: r.y + r.h / 2, s }; }
+  const s = Math.min(1920 / r.w, (1080 - BAND) / r.h);
+  return { cx: r.x + r.w / 2, cy: r.y + r.h / 2 + BAND / 2 / s, s };
+}
+function cameraAt(t) {
+  let i = 0; CAMERA.forEach((c, k) => { if (t >= c[0]) i = k; });
+  const [start, dur, shot, drift = 0, via] = CAMERA[i];
+  const to = fit(SHOTS[shot](), shot);
+  let cam = to;
+  window.__shot = shot;
+  if (dur > 0 && t < start + dur && i > 0) {
+    const prev = CAMERA[i - 1], from = fit(SHOTS[prev[2]](), prev[2]);
+    from.s *= 1 + (prev[3] ?? 0);
+    const p = smoother((t - start) / dur);
+    window.__shot = `${prev[2]} → ${shot}`;
+    cam = { cx: from.cx + (to.cx - from.cx) * p, cy: from.cy + (to.cy - from.cy) * p, s: Math.exp(Math.log(from.s) + (Math.log(to.s) - Math.log(from.s)) * p) };
+    // A move `via` a shot passes through it halfway: the centre follows a
+    // quadratic curve through the shot's centre, and the zoom dips to its scale.
+    if (via) {
+      const v = fit(SHOTS[via](), via), q = 1 - p;
+      const ctl = { x: 2 * v.cx - (from.cx + to.cx) / 2, y: 2 * v.cy - (from.cy + to.cy) / 2 };
+      cam.cx = q * q * from.cx + 2 * q * p * ctl.x + p * p * to.cx;
+      cam.cy = q * q * from.cy + 2 * q * p * ctl.y + p * p * to.cy;
+      const dip = Math.max(0, (Math.log(from.s) + Math.log(to.s)) / 2 - Math.log(v.s));
+      cam.s *= Math.exp(-dip * Math.sin(Math.PI * p));
+    }
+  } else if (drift) {
+    const next = CAMERA[i + 1]?.[0] ?? DURATION;
+    cam = { ...to, s: to.s * (1 + drift * ease((t - start - dur) / (next - start - dur))) };
+  }
+  return cam;
+}
+
+// ---------- Cursor ----------
+const pt = (r, fx = .5, fy = .5) => ({ x: r.x + r.w * fx, y: r.y + r.h * fy });
+const CP = {
+  center: () => pt(W($('content')), .45, .45),
+  editorBtn: () => pt(W($('b-editor'))),
+  slackBtn: () => pt(W($('seg-slack'))),
+  githubBtn: () => pt(W($('seg-github'))),
+  composer: () => pt(W($('cbox')), .35, .3),
+  s2start: () => { const r = WR(previewRange(S2, 1).getBoundingClientRect()); return { x: r.x, y: r.y + r.h * .6 }; },
+  selEnd: () => { const [text, n] = previewSelAt(window.__t); const rs = previewRange(text, Math.max(n, 1)).getClientRects(), r = WR(rs[rs.length - 1]); return { x: r.x + r.w, y: r.y + r.h * .6 }; },
+  // Where the clicked popover item sat: the cursor rests there while
+  // the popover runs, lists the options and closes.
+  altItem: () => ALT_AT.findLast(([from]) => window.__t >= from)?.[1] ?? ALT_AT[0]?.[1] ?? { x: 0, y: 0 },
+  q0start: () => { const r = WR(previewRange(PASSES[0].from, 1).getBoundingClientRect()); return { x: r.x, y: r.y + r.h * .6 }; },
+  aboveS2: () => { const p = CP.s2start(); return { x: p.x + 60, y: p.y - 90 }; },
+  tested: () => { const r = WR(findRange($('pvbody'), 'We parse the header').getBoundingClientRect()); return { x: r.x + r.w * .6, y: r.y + r.h * .6 }; },
+  belowTested: () => { const p = CP.tested(); return { x: p.x + 40, y: p.y + 120 }; },
+  reviewBtn: () => pt(W($('b-review'))),
+  rangeBtn: () => pt(W($('rv-range')), .4),
+  doneBtn: () => pt(W($('rv-done'))),
+  // Measured once the menu is laid out (measureAlternatives).
+  sinceRow: () => pt(W($('rv-range'))),
+};
+// The popover item each pass clicks, measured in the frame before the click,
+// from the start of that pass's drag.
+const ALT_AT = [];
+function measureAlternatives() {
+  for (const [from, a, item] of [[T.drag3[0], T.alt3, 0], ...PASSES.map((q) => [q.drag[0], q.alt, q.item]), [T.sel4 - .5, T.comment4, COMMENT]]) {
+    seek(a - .02);
+    ALT_AT.push([from, pt(W(document.querySelectorAll('#pop .pop-item')[item]), .5, .55)]);
+  }
+  // The range menu's Alternatives row, where the cursor rests once it closes.
+  seek(T.since - .05);
+  const since = pt(W([...$('rvmenu').querySelectorAll('.menu-item')].find((e) => e.textContent.includes('Alternatives'))), .35);
+  CP.sinceRow = () => since;
+  // Each pass's first option, where the cursor rests while it is applied.
+  PASSES.forEach((q, i) => { CP[`q${i}opt`] = CP.altItem; });
+  PASSES.forEach((q, i) => {
+    seek(q.opts + .5);
+    const r = W(document.querySelectorAll('#pop .pop-opt')[0]), p = pt(r, .6, .55);
+    CP[`q${i}opt`] = () => p;
+  });
+}
+// [t, point]; the cursor eases between consecutive points within a group.
+const CURSOR = [
+  [[21.3, 'center'], [T.click2 - .15, 'composer'], [T.click2 + .3, 'composer']],
+  [[28.4, 'center'], [T.toggle - .2, 'editorBtn'], [T.toggle + .5, 'editorBtn'], [T.slack - .15, 'slackBtn'], [T.slack + .3, 'slackBtn'],
+    [T.github - .15, 'githubBtn'], [T.github + .3, 'githubBtn']],
+  [[34.7, 'aboveS2'], [T.drag3[0] - .05, 's2start'], [T.drag3[0], 's2start'], [T.drag3[1], 'selEnd'], [T.pop3 + .25, 'selEnd'], [T.alt3 - .1, 'altItem'], [T.alt3 + .4, 'altItem'], [T.apply3 + .05, 'altItem'],
+    ...PASSES.flatMap((q, i) => [[q.drag[0] - .1, `q${i}start`], [q.drag[0], `q${i}start`], [q.drag[1], 'selEnd'], [q.alt - .12, 'altItem'], [q.alt + .15, 'altItem'], [q.opts + .1, `q${i}opt`], [q.apply + .1, `q${i}opt`]])],
+  [[45.6, 'belowTested'], [T.sel4 - .3, 'tested'], [T.sel4 + .3, 'tested'], [T.comment4 - .12, 'altItem'], [T.comment4 + .3, 'altItem']],
+  [[54.9, 'center'], [T.review - .15, 'reviewBtn'], [T.review + .3, 'reviewBtn'], [T.range - .15, 'rangeBtn'], [T.range + .3, 'rangeBtn'],
+    [T.since - .45, 'sinceRow'], [T.since + .3, 'sinceRow'], [T.done - .5, 'doneBtn'], [T.done + .3, 'doneBtn']],
+];
+const CLICKS = [T.review, T.range, T.since, T.done, T.toggle, T.slack, T.github, T.click2, T.drag3[0], T.alt3, ...PASSES.flatMap((q) => [q.drag[0], q.alt]), T.sel4 - .24, T.sel4 - .12, T.sel4, T.comment4];
+function cursorAt(t) {
+  const c = $('cursor');
+  const g = CURSOR.find((g) => t >= g[0][0] - .3 && t < g[g.length - 1][0] + .3);
+  c.style.display = g ? '' : 'none';
+  if (!g) return;
+  c.style.opacity = win(t, g[0][0] - .3, g[g.length - 1][0], .3);
+  let pos;
+  if (t <= g[0][0]) pos = CP[g[0][1]]();
+  else if (t >= g[g.length - 1][0]) pos = CP[g[g.length - 1][1]]();
+  else {
+    const i = g.findIndex(([a]) => a > t), [a, ka] = g[i - 1], [b, kb] = g[i];
+    const p = /start$/.test(ka) && kb === 'selEnd' ? 1 : ease((t - a) / (b - a));
+    const p0 = CP[ka](), p1 = CP[kb]();
+    pos = { x: p0.x + (p1.x - p0.x) * p, y: p0.y + (p1.y - p0.y) * p };
+  }
+  const click = CLICKS.find((k) => Math.abs(t - k) < .1);
+  const press = click != null ? 1 - .16 * (1 - Math.abs(t - click) / .1) : 1;
+  // Constant on-screen size whatever the zoom.
+  const s = window.__cam.s;
+  c.style.transform = `translate(${pos.x - 3}px, ${pos.y - 2}px) scale(${press / s * 1.25})`;
+}
+
+// ---------- Screen-space overlays ----------
+function captionAt(t) {
+  const c = CAPTIONS.find(([a, b]) => t >= a && t < b);
+  const pill = $('pill'), sub = $('sub');
+  if (!c) { pill.style.opacity = 0; sub.style.opacity = 0; return; }
+  const [a, b, text, tag, s] = c;
+  setHtml(pill, `<span>${text}</span>${tag ? `<span class="tag">${tag}</span>` : ''}`);
+  const k = win(t, a, b, .3);
+  pill.style.opacity = k; pill.style.transform = `translateY(${(1 - easeOut((t - a) / .4)) * 14}px)`;
+  setHtml(sub, s ? s[0] : '');
+  sub.style.opacity = s ? win(t, s[1][0], s[1][1], .3) * k : 0;
+}
+function keysAt(t) {
+  const k = KEYS.find(([a, b]) => t >= a && t < b);
+  setHtml($('keys'), k ? k[2].map((x) => `<div class="key">${x}</div>`).join('') : '');
+  if (!k) return;
+  const p = win(t, k[0], k[1], .12), pop = easeOut((t - k[0]) / .18);
+  $('keys').style.opacity = p; $('keys').style.transform = `translateY(${(1 - pop) * 10}px) scale(${.92 + .08 * pop})`;
+}
+
+// ---------- Windows ----------
+function windowsAt(t) {
+  // Draftmux: absent until /draftmux launches it.
+  let a = 0, s = 1;
+  // It grows out of the terminal that launched it.
+  if (t >= T.launch) { const x = clamp((t - T.launch) / .6); a = clamp(x * 4); s = .3 + .7 * easeOutBack(x); }
+  dmx.style.opacity = a; dmx.style.transform = `scale(${s})`;
+  dmx.style.display = a > 0 ? '' : 'none';
+  // Terminal comes forward for the read-back.
+  const termFront = t >= T.swap;
+  $('term').style.zIndex = termFront ? 2 : 0; dmx.style.zIndex = termFront ? 0 : 1;
+  const behind = a > .5 && !termFront;
+  $('tdim').style.opacity = behind ? .35 : 0;
+  $('term').classList.toggle('inactive', behind);
+  dmx.classList.toggle('inactive', termFront);
+  const pop = termFront ? easeOut((t - T.swap) / .3) : 1;
+  $('term').style.transform = termFront ? `scale(${.985 + .015 * pop})` : '';
+  // It fades in over Draftmux. A copy of the terminal stays behind while it
+  // does, so only the overlap cross-fades and the rest of the terminal stays put.
+  const fadeIn = termFront ? ease((t - T.swap) / .35) : 1;
+  $('term').style.opacity = fadeIn;
+  $('termghost')?.remove();
+  if (fadeIn < 1) {
+    const ghost = $('term').cloneNode(true);
+    ghost.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
+    ghost.id = 'termghost';
+    Object.assign(ghost.style, { zIndex: 0, opacity: 1, transform: '' });
+    ghost.classList.add('inactive');
+    ghost.querySelector('.dim').style.opacity = .35;
+    $('term').before(ghost);
+  }
+}
+
+// The first draft's tics, in reading order: [text around the tic, the tic].
+// Each step marks its tics with a highlighter sweep, and the marks stay until
+// the humanizer rewrite replaces the draft.
+const TICS = [
+  [["Here's the thing"]], [['load-bearing']], [['genuinely']], [["isn't just"], ['— it\'s']], [['structural']],
+  [['Honestly']], [['quietly falls', 'quietly']], [['The result?']], [['landing squarely']],
+];
+const TIC_GAP = .4;
+function ticsAt(t) {
+  const on = t >= T.tics && t < T.d2;
+  const rects = !on ? [] : TICS.flatMap((step, i) => {
+    const k = easeOut((t - T.tics - i * TIC_GAP) / .25);
+    if (k <= 0) return [];
+    return step.flatMap(([around, tic = around]) => {
+      const r = findRange($('pvbody'), around);
+      if (!r) return [];
+      r.setStart(r.startContainer, r.startOffset + around.indexOf(tic)); r.setEnd(r.startContainer, r.startOffset + tic.length);
+      return [...r.getClientRects()].map((c) => { const b = pad(rel(c, $('pvscroll')), 3, 1); return { ...b, w: b.w * k }; });
+    });
+  });
+  setHtml($('tics'), selHtml(rects));
+}
+
+// A joke on the first draft's "load-bearing": a beam of bricks on one thin
+// stick pops up over the word, wobbles, and goes.
+function loadBearingAt(t) {
+  const img = $('lb'), [a, b] = T.lb;
+  img.style.display = t >= a && t < b ? '' : 'none';
+  if (t < a || t >= b) return;
+  const word = [...$('pvbody').querySelectorAll('strong')].find((e) => e.textContent === 'load-bearing');
+  const r = W(word), size = r.h * 8.5;
+  const k = clamp((t - a) / .35);
+  const wobble = Math.sin((t - a) * 18) * 3 * (1 - clamp((t - a) / .9));
+  Object.assign(img.style, { width: `${size}px`, left: `${r.x + r.w / 2 - size / 2}px`, top: `${r.y - size - 4}px`,
+    opacity: Math.min(clamp((t - a) / .12), 1 - clamp((t - (b - .25)) / .25)),
+    transform: `rotate(${-4 + wobble}deg) scale(${.55 + .45 * easeOutBack(k)})`, transformOrigin: '50% 100%' });
+}
+
+// ---------- Frame ----------
+// The title card holds, complete, from frame 0, then lifts off the session as
+// the story starts.
+// Other drafts Draftmux suits, shown on black before the end card.
+const USES = ['README', 'Release notes', 'PR descriptions', 'Code review comments', 'Slack replies', 'Emails'];
+// The outro: black, then the other uses pop in one by one and leave, then the
+// end card's icon and name rise in, then its two lines.
+function outroAt(t) {
+  const o = $('outro'), k = ease((t - T.outro) / .6);
+  o.style.display = k > 0 ? '' : 'none';
+  o.style.opacity = k;
+  $('brand').style.opacity *= 1 - k;
+  const rise = (e, at) => { e.style.opacity = fade(t, at, .5); e.style.transform = `translateY(${(1 - easeOut((t - at) / .7)) * 18}px)`; };
+  const uses = o.querySelector('.uses'), list = uses.querySelector('ul'), [a, b] = T.uses;
+  if (!list.children.length) list.innerHTML = USES.map((u) => `<li>${u}</li>`).join('');
+  uses.style.display = t < b + .4 ? '' : 'none';
+  uses.style.opacity = 1 - fade(t, b, .4);
+  rise(uses.firstElementChild, a);
+  [...list.children].forEach((li, i) => {
+    const at = a + .6 + i * .18;
+    li.style.opacity = fade(t, at, .25);
+    li.style.transform = `scale(${.8 + .2 * easeOutBack(clamp((t - at) / .4))})`;
+  });
+  const [img, name, l2, l3] = o.querySelector('.card').children, c = T.card;
+  rise(img, c); rise(name, c + .2); rise(l2, c + .9); rise(l3, c + 1.3);
+  img.style.transform += ` scale(${.9 + .1 * easeOut((t - c) / .7)})`;
+}
+function titleAt(t) {
+  const out = ease((t - T.title[0]) / (T.title[1] - T.title[0]));
+  $('title').style.opacity = 1 - out;
+  $('title').style.display = out >= 1 ? 'none' : '';
+  world.style.filter = out < 1 ? `blur(${(8 * (1 - out)).toFixed(2)}px)` : '';
+}
+function seek(t) {
+  window.__t = t;
+  const ct = t, termT = t;
+  windowsAt(t);
+  draftmuxAt(ct);
+  terminalAt(termT);
+  window.__t = ct;
+  const cam = HERO ? heroCam() : cameraAt(t);
+  window.__cam = cam;
+  // The wordmark shows on the desk, and over the opening terminal shot until
+  // the push to the prompt.
+  const push = CAMERA[1][0];
+  $('brand').style.opacity = Math.max(1 - clamp((cam.s - 1.05) / .15), 1 - clamp((t - push) / .4));
+  world.style.transform = `translate(${960 - cam.cx * cam.s}px, ${540 - cam.cy * cam.s}px) scale(${cam.s})`;
+  cursorAt(t);
+  captionAt(t);
+  titleAt(t);
+  loadBearingAt(t);
+  outroAt(t);
+  keysAt(t);
+  if (HERO) for (const id of ['cursor', 'cap', 'keys', 'title', 'brand', 'lb']) $(id).style.display = 'none';
+}
+// index.html#hero draws the title card's screenshot (img/hero.webp): the
+// polishing moment with the whole window filling the frame, no overlays.
+// Capture it at 2x and crop to the window; see the storyboard.
+const HERO = location.hash === '#hero', HERO_T = 39.2;
+function heroCam() {
+  const r = W(dmx), s = Math.min(1920 / r.w, 1080 / r.h);
+  return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, s };
+}
+// Extra lines for the player's annotations; the player adds the element
+// under the region itself.
+window.inspect = (rect) => {
+  const { cx, cy, s } = window.__cam;
+  if (!rect) return [`Camera: shot "${window.__shot}" at zoom ${s.toFixed(2)}`];
+  const { x, y, w, h } = rect, wx = (x - 960) / s + cx, wy = (y - 540) / s + cy;
+  return [`Camera: shot "${window.__shot}" at zoom ${s.toFixed(2)}; the region in world coordinates is x=${Math.round(wx)} y=${Math.round(wy)} w=${Math.round(w / s)} h=${Math.round(h / s)}`];
+};
+
+window.DURATION = DURATION;
+window.SEGMENTS = SEGMENTS;
+window.seek = seek;
+window.FPS = 60;
+// The landing page embeds the scene as index.html?web and starts after the
+// title card, so only renders and the player fetch the card's screenshot.
+const heroLoaded = Object.assign(document.querySelector('#title .hero'), { src: 'img/hero.webp' }).decode().catch(() => {});
+window.ready = Promise.all([heroLoaded, document.fonts.ready.then(() => Promise.all([...document.fonts].map((f) => f.load())))])
+  .then(() => { measureAlternatives(); seek(HERO ? HERO_T : 0); });
+</script>
+</body>
+</html>

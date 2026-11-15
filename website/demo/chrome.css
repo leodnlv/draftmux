@@ -1,0 +1,118 @@
+/* Window chrome: Format's wrap menu, the update card, the sidebar's
+   Archived section and folds, pane slides, text zoom, tooltip and menu
+   fades, and the outside-edit question. Values follow chrome.rs,
+   chrome/sidebar.rs, chrome/update_offer.rs, format.rs, fold.rs, menu.rs
+   and tooltip.rs. */
+
+/* ---------- menus and tooltips fade in (menu.rs, tooltip.rs) ---------- */
+.menu { animation: fade-in 100ms var(--quint); }
+.tooltip { animation: fade-in 120ms var(--quint); }
+/* Longer text wraps in a card 360px wide. */
+.tooltip.wrap { width: 360px; white-space: normal; }
+
+/* ---------- Format with its wrap menu (format.rs) ---------- */
+.format-group { position: relative; display: flex; align-items: stretch; color: var(--text); font-weight: 500; }
+.format-group.disabled { opacity: .4; }
+.format-group .format-btn { padding: 2px 6px 2px 8px; border-radius: 6px 0 0 6px; }
+.format-chev { display: flex; align-items: center; padding: 0 4px; border-radius: 0 6px 6px 0; }
+.format-chev svg { width: 10px; height: 10px; color: var(--muted); transform: rotate(90deg); }
+.format-chev.open { background: var(--hover); }
+.format-group:not(.disabled) .format-chev:hover { background: var(--hover); }
+.format-group:not(.disabled) .format-chev:active { opacity: .8; }
+.format-group.disabled .format-btn:hover { background: none; }
+.format-group.disabled .format-btn:active { opacity: 1; }
+
+/* ---------- update button and card (chrome/update_offer.rs) ---------- */
+.update-wrap { position: relative; flex: none; }
+.update-card { position: absolute; z-index: 120; outline: none; width: 380px; display: flex; flex-direction: column;
+  border-radius: 10px; background: var(--menu); color: var(--text); font-size: 13px; line-height: 18px;
+  box-shadow: 0 0 0 0.5px #00000033, 0 6px 18px 0 #00000029; }
+.uc-head { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 3px; border-bottom: 1px solid var(--hairline); }
+.uc-title { font-weight: 600; }
+.uc-detail { font-size: 12px; line-height: 16px; color: var(--muted); }
+.uc-notes-wrap { position: relative; }
+.uc-notes { max-height: 320px; overflow-y: auto; scrollbar-width: none; padding: 12px 16px; user-select: text; -webkit-user-select: text; }
+.uc-notes::-webkit-scrollbar { display: none; }
+.uc-notes .chatmd { --md-size: 13px; }
+/* The version headings are no larger than the text, below the card's title. */
+.uc-notes .md h3 { font-size: 13px !important; }
+.uc-notes .missing { color: var(--muted); }
+.uc-foot { padding: 10px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--hairline);
+  font-size: 12px; font-weight: 500; line-height: 1.618; }
+.uc-later, .uc-take { height: 24px; padding: 0 9px; display: flex; align-items: center; border-radius: 6px; }
+.uc-later { background: var(--control); box-shadow: 0 0 0 0.5px var(--line-strong), 0 1px 1px 0 var(--card-drop); }
+.uc-later:hover { background: var(--control-hover); }
+.uc-take { color: var(--on-accent); background: linear-gradient(180deg, var(--primary-top), var(--primary-bottom));
+  box-shadow: 0 0 0 0.5px var(--primary-ring), 0 1px 1.5px 0 var(--primary-drop); }
+.uc-take:hover { background: linear-gradient(180deg, var(--primary-hover-top), var(--primary-hover-bottom)); }
+.uc-later:active, .uc-take:active { opacity: .8; }
+
+/* ---------- sidebar slide and Archived section (chrome/sidebar.rs) ---------- */
+/* The sidebar slides out to the left, uncovering the content; it is
+   clipped, not rewrapped. */
+.sb-slot { flex: none; height: 100%; width: 228px; display: flex; justify-content: flex-end; overflow: hidden; }
+.sb-slot.hidden { width: 0; }
+.sb-slot { transition: width 200ms var(--quint); }
+.sb-slot > .sidebar { width: 228px; }
+.sb-list { gap: 0; }
+.sb-list .row { margin-bottom: 1px; }
+.fold { flex: none; overflow: hidden; display: flex; flex-direction: column; }
+.sb-fill { flex: 1; min-height: 8px; }
+.arch { flex: none; display: flex; flex-direction: column; }
+.arch-head { flex: none; height: 30px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; color: var(--faint); }
+.arch-head:hover { color: var(--muted); }
+.arch-head svg { width: 10px; height: 10px; color: var(--faint); }
+.arch.open .arch-head svg { transform: rotate(90deg); }
+.arch-count { margin-left: auto; font-weight: 400; }
+.arch-body { display: flex; flex-direction: column; overflow: hidden; }
+.arch-rows { display: flex; flex-direction: column; }
+.arch-more { flex: none; margin-top: 2px; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--muted); }
+.arch-more:hover { color: var(--text); }
+
+/* ---------- pane slides (chrome.rs Slide) ---------- */
+.pane-slot { height: 100%; min-width: 0; display: flex; overflow: hidden; flex: 0 1 0; }
+.pane-slot.end { justify-content: flex-end; }
+.pane-slot > .pane { flex: none; }
+.content > .pane-slot + .pane, .content > .pane + .pane-slot > .pane { border-left: 1px solid var(--hairline); }
+
+/* ---------- text zoom (theme::set_zoom) ---------- */
+/* The editor's text and padding, the preview's markup and the chat's
+   messages and composer scale; the window chrome stays as it is. */
+.main { --zoom: 1; }
+.editor-inner, .preview-body, .asst { zoom: var(--zoom); }
+.bubble { font-size: calc(13px * var(--zoom)); line-height: calc(19.5px * var(--zoom)); }
+.composer-ta, .placeholder { font-size: calc(13px * var(--zoom)); line-height: calc(18.85px * var(--zoom)); }
+
+/* ---------- outside-edit question (window.prompt, a sheet on macOS) ---------- */
+.sheet-layer { position: absolute; inset: 0; z-index: 150; display: flex; justify-content: center; align-items: flex-start; padding-top: 52px; }
+.sheet-alert { width: 260px; margin-top: 6px; padding: 20px 16px 16px; display: flex; flex-direction: column; align-items: center; text-align: center;
+  border-radius: 16px; color: var(--text); background: var(--sheet-alert-bg);
+  backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  box-shadow: 0 0 0 0.5px #00000040, 0 18px 50px #00000052, 0 4px 12px #00000029;
+  animation: sheet-in 220ms var(--quint); }
+.sheet-alert.out { animation: sheet-out 140ms ease-in forwards; }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(-14px) scale(.98); } }
+@keyframes sheet-out { to { opacity: 0; transform: translateY(-8px); } }
+.light { --sheet-alert-bg: #f2f2f4eb; }
+.dark { --sheet-alert-bg: #2c2c2feb; }
+.dark .sheet-alert { box-shadow: 0 0 0 0.5px #ffffff26, 0 0 0 1px #000000a0, 0 18px 50px #00000099; }
+.sheet-alert-icon { width: 64px; height: 64px; }
+.sheet-alert-title { margin-top: 10px; font-size: 13px; line-height: 16px; font-weight: 700; }
+.sheet-alert-msg { margin-top: 6px; font-size: 11px; line-height: 14px; }
+.sheet-alert-btns { margin-top: 16px; align-self: stretch; display: flex; gap: 8px; }
+.sheet-alert-btns button { flex: 1; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px;
+  font-size: 13px; white-space: nowrap; background: var(--control); box-shadow: 0 0 0 0.5px var(--line-strong), 0 1px 1px 0 var(--card-drop); }
+.sheet-alert-btns button:active { opacity: .8; }
+.sheet-alert-btns .default { color: var(--on-accent); font-weight: 500;
+  background: linear-gradient(180deg, var(--primary-top), var(--primary-bottom));
+  box-shadow: 0 0 0 0.5px var(--primary-ring), 0 1px 1.5px 0 var(--primary-drop); }
+.sheet-alert-btns button.kbd-focus { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 0; }
+
+/* ---------- rich text in dark mode: WebKit's apple-invert-lightness() ---------- */
+.dark .t-rich { --md-link: #5656ff; --md-border: #4e5459; --md-code-border: 1px solid #4e5459; --md-qbar-c: #4e5459; --md-rule: #848484; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sb-slot { transition: none; }
+  .sheet-alert { animation-name: fade-in; }
+}

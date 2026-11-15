@@ -1,2 +1,5 @@
 /target
 .DS_Store
+
+# Renders and stills from scenecast
+/website/demo/out/

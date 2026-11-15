@@ -1,0 +1,133 @@
+/* Selection, selection popover, chat transcript and composer. Loaded after
+   style.css and overrides it where the app has moved on. Values follow
+   selection_popover.rs, chat.rs, chat_model.rs, tooltip.rs and
+   chrome/skeleton.rs. */
+
+/* ---------- selections ---------- */
+/* Extra selections (⌘-drag) paint under the mirror like the selection, in
+   the inactive colour while the editor isn't focused. The preview marks
+   them, and its own selection, in the selection colour behind its text. */
+/* The textarea's own selection sits over the mirror, so it is drawn in
+   translucent equivalents of the selection colours, which leave the text
+   under it readable. */
+.light .editor-ta::selection { background: #006fff4c; }
+.light .editor-ta:not(:focus)::selection { background: #00001d23; }
+.dark .editor-ta:not(:focus)::selection { background: #ffffff1f; }
+.editor-inner { z-index: 0; }
+.editor-marks { position: absolute; inset: 0; z-index: -1; color: transparent; pointer-events: none; }
+.editor-marks mark { color: transparent; background: var(--inactive-selection); }
+.editor-pane:focus-within .editor-marks mark { background: var(--selection); }
+.preview-body { position: relative; z-index: 0; }
+.preview-marks { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+.preview-marks i { position: absolute; background: var(--selection); }
+.preview-body ::selection { background: var(--selection); }
+
+/* ---------- selection popover ---------- */
+/* A pop-up panel that opens and closes without a fade, with the inactive
+   window's lighter shadow even while its comment field has the keyboard. */
+.popover { animation: none; }
+.pop-actions { align-items: center; flex-wrap: nowrap; }
+.pop-item { flex: none; }
+.pop-item svg { width: 13px; height: 13px; flex: none; }
+.pop-div { flex: none; width: 1px; height: 16px; margin: 0 3px; background: var(--menu-line); }
+.pop-hint { flex: none; padding: 0 7px 0 4px; font-size: 11px; color: var(--faint); white-space: nowrap; }
+.pop-count { flex: none; padding: 5px 9px; color: var(--muted); white-space: nowrap; }
+/* The highlight and the text on it fade in together, so white text never
+   shows on the light panel before the accent does. */
+.pop-item.hl, .pop-opt.hl { background: var(--accent); color: var(--on-accent); animation: pop-hl 120ms var(--quint); }
+.pop-opt.hl .n { color: var(--on-accent-muted); animation: pop-hl-n 120ms var(--quint); }
+@keyframes pop-hl { from { background-color: transparent; color: var(--text); } }
+@keyframes pop-hl-n { from { color: var(--faint); } }
+.pop-results.previews .pop-opt { color: var(--muted); }
+.pop-foot.run { align-items: center; gap: 6px; }
+.pop-foot.run .esc { margin-left: 4px; }
+.pop-error { max-width: 370px; padding: 8px 10px; color: var(--muted); }
+.pop-fade { animation: fade-in 160ms var(--quint); }
+.pop-comment { width: 330px; display: flex; flex-direction: column; }
+.pop-field { display: flex; align-items: flex-end; gap: 6px; padding: 4px 4px 4px 9px; border-radius: 9px;
+  background: var(--menu-field); border: 1px solid var(--hairline); cursor: text; }
+.pop-input { position: relative; flex: 1; min-width: 0; }
+.pop-input textarea { display: block; width: 100%; height: 22px; margin: 0; padding: 2px 0 1px; border: 0; outline: 0; resize: none;
+  overflow: hidden; background: transparent; font: 13px/19px var(--ui); color: var(--text); caret-color: var(--accent);
+  user-select: text; -webkit-user-select: text; }
+.pop-ph { position: absolute; top: 2px; left: 0; line-height: 19px; color: var(--faint); white-space: nowrap; pointer-events: none; }
+.pop-send { width: 22px; height: 22px; flex: none; border-radius: 6px; display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--on-accent); }
+.pop-send svg { width: 12px; height: 12px; }
+.pop-send:active { opacity: .8; }
+.pop-send.disabled { background: var(--send-disabled); }
+.pop-send.disabled:active { opacity: 1; }
+.pop-hints { display: flex; gap: 10px; margin-top: 6px; padding: 0 8px 3px; font-size: 11px; color: var(--faint); white-space: nowrap; }
+
+/* ---------- tooltips ---------- */
+/* A path with no spaces breaks between characters. */
+.tooltip.wrap { overflow-wrap: anywhere; }
+
+/* ---------- transcript ---------- */
+.bubble .quote + .quote { margin-top: 0; }
+.bubble .quotes { margin-bottom: 3px; }
+.bubble .quotes .quote { margin-bottom: 0; }
+.tool-fold { overflow: hidden; }
+
+/* ---------- composer ---------- */
+/* The thinking level shrinks with the model name. */
+.model-label .mthink { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+/* The attached selections' count, in place of the send hint. */
+.qwrap { position: relative; flex: none; display: flex; }
+.qchip { position: relative; flex: none; display: flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px;
+  border-radius: 5px; border: 1px solid var(--hairline); background: var(--hover); color: var(--text); font-size: 11px;
+  line-height: 18px; white-space: nowrap; }
+.qchip:hover, .qchip.listed { background: var(--control-hover); }
+.qchip:active { opacity: .8; }
+.qchip svg { width: 11px; height: 11px; flex: none; color: var(--faint); }
+/* Their quotes, listed above the chip on demand. */
+.qlist { position: absolute; z-index: 85; width: 360px; padding-bottom: 4px; border-radius: 10px; border: 1px solid var(--line-strong);
+  background: var(--control); box-shadow: 0 0 0 0.5px #00000033, 0 6px 18px 0 #00000029; color: var(--text); line-height: 1.618; }
+.qstack { display: flex; flex-direction: column; gap: 2px; padding: 6px 6px 2px; }
+.qhead { display: flex; align-items: center; gap: 6px; height: 18px; padding: 0 2px 2px 5px; font-size: 11px; color: var(--muted); }
+.qhead .qhint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
+.qclear { flex: none; padding: 0 5px; border-radius: 4px; line-height: 16px; }
+.qclear:hover { background: var(--control-hover); color: var(--text); }
+.qclear:active { opacity: .8; }
+.qrow { display: flex; align-items: center; gap: 2px; height: 22px; padding: 0 2px 0 7px; border-radius: 6px;
+  border: 1px solid var(--hairline); background: var(--hover); }
+.qrow .quote { flex: 1; justify-content: space-between; }
+.qrow .q-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.send.can:hover { background-image: linear-gradient(#ffffff26, #ffffff26); }
+
+/* ---------- preview while the agent writes ---------- */
+.preview-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding-bottom: 20px; }
+/* Grey bars in the outline of a typical message, one per line of text,
+   brightening in the chat's shimmer wave down the page. */
+.skeleton { display: flex; flex-direction: column; }
+.sk-line { display: flex; align-items: center; position: relative; }
+.sk-line i { display: block; border-radius: 999px; --rest: 8%; --crest: 14%;
+  background: color-mix(in srgb, var(--md-text) var(--rest), transparent); animation: sk-wave 1.8s infinite; }
+.sk-line.strong i { --rest: 12.8%; --crest: 18.8%; }
+.sk-line b { position: absolute; border-radius: 50%; --rest: 12%; --crest: 21%;
+  background: color-mix(in srgb, var(--md-text) var(--rest), transparent); animation: sk-wave 1.8s infinite; }
+.sk-head { border-bottom: 1px solid var(--md-hrule); }
+@keyframes sk-wave {
+  0% { background-color: color-mix(in srgb, var(--md-text) var(--rest), transparent); animation-timing-function: ease-in-out; }
+  15% { background-color: color-mix(in srgb, var(--md-text) var(--crest), transparent); animation-timing-function: ease-in-out; }
+  40%, 100% { background-color: color-mix(in srgb, var(--md-text) var(--rest), transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-line i, .sk-line b { animation: none; }
+}
+
+/* ---------- an expanded edit row's word changes (chat.rs changes_body) ---------- */
+.changes-n { font-size: 11px; color: var(--faint); line-height: 1.618; }
+.tool-body.changes { padding: 2px 0; overflow-y: auto; font: 12.5px/19px var(--ui); color: var(--muted); }
+.wc { display: flex; gap: 8px; padding: 6px 12px 6px 10px; }
+.wc + .wc { border-top: 1px solid var(--hairline); }
+.wc.live:hover { background: var(--hover); }
+.wc.live:active { opacity: .8; }
+.wc-n { width: 14px; flex: none; font-size: 11px; color: var(--faint); }
+.wc-t { min-width: 0; white-space: pre-wrap; overflow-wrap: break-word; }
+.wc-del { color: var(--diff-removed); text-decoration: line-through; text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--removed) 55%, transparent); }
+.wc-arrow { color: var(--faint); }
+.wc-add { color: var(--diff-added); background: var(--added-bg); }
+.wc-none { padding: 6px 10px; color: var(--faint); }

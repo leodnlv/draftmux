@@ -1,0 +1,93 @@
+/* Review of the agent's edits (chrome/review.rs, markup_view.rs Redline,
+   inline_text.rs paint_mark). Loaded after style.css. */
+.light { --change-mark: #0a6cf524; }
+.dark { --change-mark: #0a84ff3d; }
+
+/* ---------- toolbar's Changes button ---------- */
+.rv-btn { flex: none; height: 24px; padding: 0 9px; display: flex; align-items: center; gap: 6px; border-radius: 6px;
+  font-size: 12px; font-weight: 500; line-height: 1; color: var(--text); white-space: nowrap; }
+.rv-btn.counted { padding-left: 5px; }
+.rv-btn.on { background: var(--selected-row); }
+.rv-btn:hover { background: var(--hover); }
+.rv-btn:active { opacity: .8; }
+.rv-btn.fade { animation: fade-in 200ms var(--quint); }
+.rv-count { min-width: 16px; height: 16px; padding: 0 4px; display: flex; align-items: center; justify-content: center; border-radius: 8px;
+  font-size: 10.5px; font-weight: 600; color: var(--on-accent); background: var(--accent); }
+
+/* ---------- review pane: the bar over two columns ---------- */
+.rv-pane { flex: 1 1 100%; overflow: hidden; }
+.rv-bar { position: absolute; top: 0; left: 0; right: 0; height: 40px; z-index: 6; display: flex; align-items: center; gap: 4px;
+  padding: 0 8px 0 4px; background: var(--toolbar); border-bottom: 1px solid var(--hairline); font-size: 12px; line-height: 1.618;
+  cursor: default; user-select: none; -webkit-user-select: none; }
+.rv-spacer { flex: 1; }
+.rv-chev { width: 9px; height: 9px; color: var(--muted); }
+.rv-chev.down { transform: rotate(90deg); }
+.rv-chev.back { transform: rotate(180deg); }
+.rv-range { flex: none; height: 24px; padding: 0 6px 0 8px; display: flex; align-items: center; gap: 4px; border-radius: 6px; font-weight: 500; white-space: nowrap; }
+.rv-range:hover, .rv-range.open { background: var(--hover); }
+.rv-range:active { opacity: .8; }
+.rv-changes { display: flex; align-items: center; gap: 4px; }
+.rv-nav { display: flex; align-items: center; padding-left: 4px; margin-right: 2px; border-left: 1px solid var(--hairline); }
+.rv-step { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
+.rv-step .rv-chev { width: 10px; height: 10px; }
+.rv-step:hover { background: var(--hover); }
+.rv-step:hover .rv-chev { color: var(--text); }
+.rv-step:active { opacity: .8; }
+.rv-pos { padding: 0 2px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rv-none { padding-left: 10px; border-left: 1px solid var(--hairline); color: var(--muted); white-space: nowrap; }
+.rv-b { flex: none; height: 24px; padding: 0 7px; display: flex; align-items: center; border-radius: 6px; font-weight: 500; white-space: nowrap; }
+.rv-b.push { background: var(--control); box-shadow: 0 0 0 0.5px var(--line-strong), 0 1px 1px 0 var(--card-drop); }
+.rv-b.push:hover { background: var(--control-hover); }
+.rv-b.plain { color: var(--muted); }
+.rv-b.plain:hover { background: var(--hover); color: var(--text); }
+.rv-b:active { opacity: .8; }
+.rv-b.off { opacity: .45; pointer-events: none; }
+.rv-done { flex: none; height: 24px; padding: 0 9px; display: flex; align-items: center; border-radius: 6px; font-weight: 500;
+  color: var(--on-accent); background: linear-gradient(180deg, var(--primary-top), var(--primary-bottom));
+  box-shadow: 0 0 0 0.5px var(--primary-ring), 0 1px 1.5px 0 var(--primary-drop); }
+.rv-done:hover { background: linear-gradient(180deg, var(--primary-hover-top), var(--primary-hover-bottom)); }
+.rv-done:active { opacity: .8; }
+
+.rv-cols { position: absolute; top: 40px; left: 0; right: 0; bottom: 0; display: flex; }
+.rv-col { position: relative; flex: 1 1 0; min-width: 0; }
+.rv-col + .rv-col { border-left: 1px solid var(--hairline); }
+.rv-head { position: absolute; top: 0; left: 0; right: 0; height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 16px;
+  font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--toolbar); border-bottom: 1px solid var(--hairline);
+  cursor: default; user-select: none; -webkit-user-select: none; }
+.rv-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.rv-col.before .rv-dot { background: var(--removed); }
+.rv-col.now .rv-dot { background: var(--added); }
+.rv-head span { min-width: 0; }
+.rv-body { position: absolute; top: 28px; left: 0; right: 0; bottom: 0; }
+
+/* Range menu extras (menu.rs heading and detail). */
+.rv-menu { animation: none; }
+.rv-menu-head { flex: none; height: 22px; display: flex; align-items: center; padding: 0 10px 0 20px; font-size: 11px; font-weight: 600; color: var(--faint); }
+.rv-menu-detail { flex: none; margin-left: auto; padding-left: 18px; color: var(--faint); }
+.menu-item.hl .rv-menu-detail { color: var(--on-accent-muted); }
+
+/* ---------- the redline ---------- */
+/* Insertions on a green tint, deletions struck through on a red one; kept
+   changes lose the tint, insertions underlined and deletions faded. The
+   selected change is ringed in the accent, the hovered one at half. */
+.rl { border-radius: 2px; padding: 1px 0; }
+.rl.ins { color: var(--diff-added); background: var(--added-bg); }
+.rl.del { color: var(--diff-removed); background: var(--removed-bg); text-decoration: line-through; text-decoration-thickness: 1px; }
+.rl.ins.kept { background: none; text-decoration: underline; text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--diff-added) 45%, transparent); text-underline-offset: 3px; }
+.rl.del.kept { background: none; color: color-mix(in srgb, var(--diff-removed) 60%, transparent); }
+.rl.sel { border-radius: 3.5px; box-shadow: 0 0 0 1.5px var(--accent); }
+.rl.hov { border-radius: 3.5px; box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 50%, transparent); }
+/* A change with no text on this side is a point, drawn as a bar while it is
+   selected or hovered. Its hit target is wider than the bar. */
+.rl.pt { display: inline-block; position: relative; width: 2px; height: 1.15em; margin: 0 -4px; padding: 0 3px; vertical-align: -0.2em;
+  background: none; background-clip: content-box; }
+.rl.pt::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; border-radius: 1px; display: none; }
+.now .rl.pt::before { background: var(--removed); }
+.before .rl.pt::before { background: var(--added); }
+.rl.pt.kept::before { opacity: .6; }
+.rl.pt.sel::before, .rl.pt.hov::before { display: block; }
+.rl.pt.sel, .rl.pt.hov { box-shadow: none; }
+.rl.pt.sel::after, .rl.pt.hov::after { content: ""; position: absolute; left: 1.5px; right: 1.5px; top: -1.5px; bottom: -1.5px; border-radius: 3.5px;
+  box-shadow: 0 0 0 1.5px var(--accent); }
+.rl.pt.hov::after { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 50%, transparent); }

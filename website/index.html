@@ -150,6 +150,91 @@ p code { font-family: var(--mono); font-size: 0.88em; color: var(--text); }
 }
 .shot img { width: 100%; height: auto; border-radius: 12px; aspect-ratio: 2880 / 1760; }
 .shot img.only-light { display: block; }
+.shot { position: relative; cursor: pointer; }
+.shot.lifted { visibility: hidden; }
+
+/* ---------- demo ---------- */
+/* A round white button over the paused demo. */
+.round {
+  display: grid; place-items: center; width: 76px; height: 76px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+  background: rgba(255, 255, 255, 0.94); color: #1d1d1f;
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.1), 0 14px 36px rgba(0, 0, 0, 0.22);
+  transition: transform 160ms var(--out), background-color 150ms ease-out;
+}
+.round svg { width: 28px; height: 28px; display: block; }
+@media (hover: hover) { .round:hover { transform: scale(1.06); background: #fff; } }
+.round:active { transform: scale(0.96); }
+/* The screenshot's white pill: what it plays and how long it runs. */
+.watch {
+  position: absolute; left: 50%; top: 50%; translate: -50% -50%;
+  display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 22px 0 8px; border: 0; border-radius: 999px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.95); color: #1d1d1f; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap;
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.1), 0 14px 36px rgba(0, 0, 0, 0.22);
+  transition: transform 160ms var(--out), background-color 150ms ease-out;
+}
+.watch .disc { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: #1d1d1f; color: #fff; }
+.watch svg { width: 17px; height: 17px; display: block; }
+.watch .len { font-weight: 500; color: rgba(29, 29, 31, 0.5); font-variant-numeric: tabular-nums; }
+@media (hover: hover) { .shot:hover .watch { transform: scale(1.04); background: #fff; } }
+.watch.quiet:focus-visible { outline: none; }
+.shot:active .watch { transform: scale(0.97); }
+
+.demo { position: fixed; inset: 0; z-index: 50; outline: none; visibility: hidden; pointer-events: none; color: #fff; }
+.demo.open { visibility: visible; pointer-events: auto; }
+.demo-backdrop { position: absolute; inset: 0; background: #0c0d11; opacity: 0; }
+/* The scene is a 1920×1080 page, scaled to fit the viewport inside a margin. */
+.demo { --gap: clamp(12px, 4vw, 56px); --bar: 48px; --stage-w: min(100vw - 2 * var(--gap), (100dvh - 2 * var(--gap) - var(--bar)) * 16 / 9); --mid: calc(50% - var(--bar) / 2); }
+.demo-stage {
+  position: absolute; left: 50%; top: var(--mid); width: var(--stage-w); aspect-ratio: 16 / 9;
+  translate: -50% -50%; overflow: hidden; opacity: 0; cursor: pointer;
+}
+.demo-stage iframe { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; border: 0; transform-origin: 0 0; transform: scale(var(--k, 0.5)); pointer-events: none; }
+.demo-clone { position: fixed; z-index: 51; pointer-events: none; transform-origin: 0 0; }
+.demo .round { position: absolute; left: 50%; top: var(--mid); translate: -50% -50%; opacity: 0; pointer-events: none; transition: opacity 180ms ease-out, transform 160ms var(--out), background-color 150ms ease-out; }
+.demo[data-state="paused"] .round, .demo[data-state="ended"] .round { opacity: 1; pointer-events: auto; }
+.demo .round .replay, .demo[data-state="ended"] .round .tri { display: none; }
+.demo[data-state="ended"] .round .replay { display: block; width: 34px; height: 34px; }
+/* Below the end card's text rather than over it. */
+.demo[data-state="ended"] .round { top: calc(var(--mid) + var(--stage-w) * 9 / 16 * 0.36); }
+.demo-spinner {
+  position: absolute; left: 50%; top: var(--mid); width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.25); border-top-color: #fff; opacity: 0; transition: opacity 200ms ease-out 300ms;
+  animation: spin 800ms linear infinite; z-index: 52; pointer-events: none;
+}
+.demo[data-state="loading"] .demo-spinner { opacity: 1; }
+@keyframes spin { to { transform: rotate(1turn); } }
+.demo-close {
+  position: absolute; top: 16px; right: 16px; width: 38px; height: 38px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; cursor: pointer; color: #fff; background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset; transition: background-color 150ms ease-out, opacity 300ms ease-out, transform 120ms ease-out;
+}
+.demo-close svg { width: 14px; height: 14px; }
+@media (hover: hover) { .demo-close:hover { background: rgba(255, 255, 255, 0.2); } }
+.demo-close:active { transform: scale(0.94); }
+/* Progress under the stage, split at the scene's chapters; drag or click to seek. */
+.demo-chapters {
+  position: absolute; left: 50%; translate: -50% 0; width: var(--stage-w); top: calc(var(--mid) + var(--stage-w) * 9 / 32 + 6px);
+  font-size: 13px; transition: opacity 300ms ease-out;
+}
+.demo-track { position: relative; display: flex; gap: 3px; align-items: center; height: 22px; cursor: pointer; touch-action: none; }
+.demo-seg { position: relative; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.18); overflow: hidden; transition: height 150ms var(--out); }
+.demo-seg i { position: absolute; inset: 0; transform-origin: 0 50%; transform: scaleX(var(--f, 0)); background: rgba(255, 255, 255, 0.9); }
+.demo-seg.hover, .demo-track.drag .demo-seg { height: 8px; }
+.demo-tip {
+  position: absolute; bottom: calc(100% + 6px); translate: -50% 0; padding: 5px 9px; border-radius: 7px; background: rgba(255, 255, 255, 0.95); color: #1d1d1f;
+  font-size: 12px; font-weight: 600; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 120ms ease-out;
+}
+.demo-tip span, .demo-meta span { font-variant-numeric: tabular-nums; }
+.demo-tip span { margin-left: 6px; font-weight: 500; color: rgba(29, 29, 31, 0.55); }
+.demo-tip.on { opacity: 1; }
+.demo-meta { display: flex; justify-content: space-between; color: rgba(255, 255, 255, 0.6); }
+.demo-meta b { color: #fff; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .demo-seg { transition: none; } }
+/* While playing, the controls step aside once the pointer rests. */
+.demo.idle .demo-close, .demo.idle .demo-chapters { opacity: 0; }
+.demo.idle, .demo.idle .demo-stage { cursor: none; }
 
 /* ---------- pitch ---------- */
 .pitch { max-width: 1240px; margin: 0 auto; padding: 12px 32px 0; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 32px 72px; align-items: start; }
@@ -177,6 +262,7 @@ h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-heig
 @media (prefers-reduced-motion: reduce) {
   .rise, .shot { animation: none; }
 }
+html.demo-open { overflow: hidden; }
 
 @media (max-width: 820px) {
   .nav { padding: 14px 24px; }
@@ -184,6 +270,12 @@ h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-heig
   .navlinks .download { margin-left: 4px; }
   .top { padding: 4px 16px 32px; }
   .shot { min-width: 0; }
+  .round { width: 58px; height: 58px; }
+  .round svg { width: 22px; height: 22px; }
+  .watch { gap: 10px; height: 46px; padding: 0 18px 0 6px; font-size: 15px; }
+  .watch .disc { width: 34px; height: 34px; }
+  .watch svg { width: 14px; height: 14px; }
+  .demo[data-state="ended"] .round .replay { width: 27px; height: 27px; }
   .pitch { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 8px 24px 0; }
   .features { grid-template-columns: minmax(0, 1fr); gap: 28px; padding: 56px 24px 0; }
   .foot { margin-top: 56px; padding: 0 24px; }
@@ -193,7 +285,8 @@ h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-heig
 <body>
 
 <svg width="0" height="0" style="position: absolute" aria-hidden="true">
-  <symbol id="arrow" viewBox="0 0 17 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 2.5v8.2M5 7.6l3.5 3.5L12 7.6M3 14h11"/></symbol>
+  <symbol id="play-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M8.2 5.2v13.6c0 .9 1 1.4 1.7.9l10-6.8a1.1 1.1 0 0 0 0-1.8l-10-6.8c-.7-.5-1.7 0-1.7.9Z"/></symbol>
+  <symbol id="arrow"viewBox="0 0 17 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 2.5v8.2M5 7.6l3.5 3.5L12 7.6M3 14h11"/></symbol>
 </svg>
 
 <header class="nav">
@@ -211,9 +304,10 @@ h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-heig
 
 <main>
   <div class="top">
-    <div class="shot">
+    <div class="shot" id="shot">
       <img class="only-light" src="img/app-light.webp" width="1440" height="880" loading="lazy" alt="Draftmux with a pull request description open: Markdown on the left, its GitHub preview in the middle and the agent chat on the right">
       <img class="only-dark" src="img/app-dark.webp" width="1440" height="880" loading="lazy" alt="Draftmux with a pull request description open: Markdown on the left, its GitHub preview in the middle and the agent chat on the right">
+      <button class="watch" id="play"><span class="disc"><svg aria-hidden="true"><use href="#play-icon"/></svg></span>Watch the demo <span class="len">1:08</span></button>
     </div>
   </div>
 
@@ -254,6 +348,18 @@ h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-heig
   </section>
 </main>
 
+<div class="demo" id="demo" role="dialog" aria-modal="true" aria-label="Draftmux demo" data-state="loading" tabindex="-1">
+  <div class="demo-backdrop" id="demo-backdrop"></div>
+  <div class="demo-stage" id="demo-stage"></div>
+  <div class="demo-spinner" aria-hidden="true"></div>
+  <button class="round" id="demo-toggle" aria-label="Play"><svg class="tri" aria-hidden="true"><use href="#play-icon"/></svg><svg class="replay" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.95 10.43A7.5 7.5 0 1 0 12 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/><path d="M13.6 2.2v6.6a.6.6 0 0 1-.92.5L8.1 6a.6.6 0 0 1 0-1l4.58-3.3a.6.6 0 0 1 .92.5Z" fill="currentColor"/></svg></button>
+  <button class="demo-close" id="demo-close" aria-label="Close the demo"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l10 10M12 2 2 12"/></svg></button>
+  <div class="demo-chapters">
+    <div class="demo-track" id="demo-track" role="slider" tabindex="0" aria-label="Demo position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div class="demo-tip" id="demo-tip"></div></div>
+    <div class="demo-meta"><span id="demo-now"></span><span id="demo-dur"></span></div>
+  </div>
+</div>
+
 <footer class="foot">
   <div class="foot-inner">
     <a href="https://github.com/raine/draftmux">GitHub</a>
@@ -273,6 +379,241 @@ $('theme-toggle').addEventListener('click', () => {
   root.dataset.theme = dark ? 'light' : 'dark';
   try { localStorage.setItem('theme', root.dataset.theme); } catch {}
 });
+
+// ---------- demo ----------
+// demo/ is the demo video's scene, live: it plays itself on request and
+// reports its time with postMessage. The screenshot grows into it.
+const demo = (() => {
+  const root = $('demo'), stage = $('demo-stage'), track = $('demo-track'), toggle = $('demo-toggle');
+  const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
+  const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let frame = null, scene = { ready: false, playing: false, t: 0, start: 0, duration: 0 }, chapters = [], segs = [];
+  let open = false, wantPlay = false, grown = null, clone = null, idleTimer = 0, scrub = null;
+
+  const send = (msg) => frame?.contentWindow?.postMessage(msg, '*');
+  // Loading starts as soon as a visitor is likely to press play.
+  function load() {
+    if (frame) return;
+    frame = document.createElement('iframe');
+    frame.title = 'Draftmux demo';
+    frame.tabIndex = -1;
+    frame.src = 'demo/index.html?web';
+    stage.append(frame);
+    fit();
+  }
+  function fit() {
+    stage.style.setProperty('--k', String(stage.getBoundingClientRect().width / 1920));
+  }
+  addEventListener('resize', fit);
+
+  function render() {
+    const { t, start, duration, ready, playing } = scene;
+    const state = !ready ? 'loading' : playing ? 'playing' : t >= duration ? 'ended' : 'paused';
+    root.dataset.state = state;
+    toggle.setAttribute('aria-label', state === 'ended' ? 'Replay' : 'Play');
+    segs.forEach((el, i) => {
+      const c = chapters[i];
+      el.firstChild.style.setProperty('--f', String(Math.min(1, Math.max(0, (t - c.start) / (c.end - c.start)))));
+    });
+    if (chapters.length) {
+      $('demo-now').innerHTML = `<b>${chapterAt(t).label}</b> · <span>${clock(t - start)}</span>`;
+      $('demo-dur').textContent = clock(duration - start);
+    }
+    track.setAttribute('aria-valuetext', chapters.length ? `${chapterAt(t).label}, ${clock(t - start)}` : '');
+    track.setAttribute('aria-valuemax', String(Math.round(duration - start)));
+    track.setAttribute('aria-valuenow', String(Math.round(t - start)));
+    if (state !== 'playing') root.classList.remove('idle');
+  }
+  addEventListener('message', (e) => {
+    if (!frame || e.source !== frame.contentWindow || e.data?.demo !== 'state') return;
+    const wasReady = scene.ready;
+    scene = e.data;
+    if (scene.chapters && !chapters.length) buildTrack(scene.chapters);
+    render();
+    if (!wasReady && scene.ready) reveal();
+  });
+
+  // The visible screenshot, as it sits in the page and as it would fit the stage.
+  const shotImg = () => [...$('shot').querySelectorAll('img')].find((img) => img.offsetParent);
+  function stageFit(img) {
+    const s = stage.getBoundingClientRect(), a = img.naturalWidth / img.naturalHeight || 2880 / 1760;
+    const w = Math.min(s.width, s.height * a), h = w / a;
+    return { left: s.left + (s.width - w) / 2, top: s.top + (s.height - h) / 2, width: w, height: h };
+  }
+  const flip = (from, to) => `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width})`;
+  function makeClone(img) {
+    const to = stageFit(img), c = img.cloneNode();
+    c.className = 'demo-clone';
+    c.removeAttribute('loading');
+    c.alt = '';
+    Object.assign(c.style, { left: `${to.left}px`, top: `${to.top}px`, width: `${to.width}px`, height: `${to.height}px`, borderRadius: '12px' });
+    document.body.append(c);
+    return { c, to };
+  }
+
+  // A keyboard press of the play button has no click count.
+  let byKeys = false;
+  function show(e) {
+    if (open) return;
+    open = true;
+    byKeys = e?.detail === 0;
+    load();
+    send({ demo: 'seek', t: 0 });
+    wantPlay = true;
+    document.documentElement.classList.add('demo-open');
+    for (const el of document.querySelectorAll('body > header, body > main, body > footer')) el.inert = true;
+    root.classList.add('open');
+    fit();
+    const img = shotImg(), quick = reduced();
+    const backdrop = $('demo-backdrop').animate([{ opacity: 0 }, { opacity: 1 }], { duration: quick ? 150 : 420, easing: 'ease-out', fill: 'forwards' });
+    if (img && !quick) {
+      const { c, to } = makeClone(img);
+      clone = c;
+      $('shot').classList.add('lifted');
+      grown = c.animate([{ transform: flip(img.getBoundingClientRect(), to) }, { transform: 'none' }], { duration: 560, easing: EASE, fill: 'forwards' }).finished;
+    } else {
+      grown = backdrop.finished;
+    }
+    grown.then(reveal, () => {});
+    // The dialog itself takes focus, so Space plays and pauses.
+    root.focus({ preventScroll: true });
+  }
+  // The scene fades in over the grown screenshot once both are there.
+  async function reveal() {
+    if (!open || !grown || !scene.ready) return;
+    const g = grown;
+    await g;
+    if (!open || grown !== g) return;
+    grown = null;
+    const fade = reduced() ? 1 : 260;
+    stage.animate([{ opacity: 0 }, { opacity: 1 }], { duration: fade, easing: 'ease-out', fill: 'forwards' });
+    if (clone) {
+      const c = clone;
+      clone = null;
+      c.animate([{ opacity: 1 }, { opacity: 0 }], { duration: fade, easing: 'ease-out', fill: 'forwards' }).finished.then(() => c.remove());
+    }
+    if (wantPlay) send({ demo: 'play' });
+  }
+
+  async function hide() {
+    if (!open) return;
+    open = false;
+    grown = null;
+    wantPlay = false;
+    send({ demo: 'pause' });
+    clearTimeout(idleTimer);
+    root.classList.remove('idle');
+    clone?.remove();
+    clone = null;
+    const img = shotImg(), quick = reduced(), anims = [];
+    anims.push(stage.animate([{ opacity: getComputedStyle(stage).opacity }, { opacity: 0 }], { duration: quick ? 1 : 200, easing: 'ease-out', fill: 'forwards' }));
+    anims.push($('demo-backdrop').animate([{ opacity: getComputedStyle($('demo-backdrop')).opacity }, { opacity: 0 }], { duration: quick ? 150 : 420, easing: 'ease-out', fill: 'forwards' }));
+    if (img && !quick) {
+      const { c, to } = makeClone(img);
+      anims.push(c.animate([{ transform: 'none' }, { transform: flip(img.getBoundingClientRect(), to) }], { duration: 480, easing: EASE, fill: 'forwards' }));
+      anims.at(-1).finished.then(() => c.remove());
+    }
+    await Promise.all(anims.map((a) => a.finished)).catch(() => {});
+    if (open) return;
+    root.classList.remove('open');
+    $('shot').classList.remove('lifted');
+    for (const el of document.querySelectorAll('body > header, body > main, body > footer')) el.inert = false;
+    document.documentElement.classList.remove('demo-open');
+    // Focus goes back to the play button, ringed only if the demo was opened from the keyboard.
+    const play = $('play');
+    if (!byKeys) {
+      play.classList.add('quiet');
+      play.addEventListener('blur', () => play.classList.remove('quiet'), { once: true });
+    }
+    play.focus({ preventScroll: true, focusVisible: byKeys });
+  }
+
+  function playPause() {
+    if (!scene.ready || grown) return;
+    send({ demo: scene.playing ? 'pause' : 'play' });
+  }
+  const seekBy = (dt) => send({ demo: 'seek', t: scene.t + dt });
+
+  // Controls
+  $('shot').addEventListener('click', show);
+  for (const ev of ['pointerenter', 'focusin', 'touchstart']) $('shot').addEventListener(ev, load, { passive: true });
+  stage.addEventListener('click', playPause);
+  toggle.addEventListener('click', playPause);
+  $('demo-close').addEventListener('click', hide);
+  $('demo-backdrop').addEventListener('click', hide);
+  root.addEventListener('pointermove', () => {
+    root.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { if (scene.playing && !scrub) root.classList.add('idle'); }, 2200);
+  });
+  addEventListener('keydown', (e) => {
+    if (!open || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape') hide();
+    else if (e.key === ' ' || e.key === 'k') {
+      // Space on a focused button presses that button.
+      if (e.key === ' ' && e.target.closest?.('button')) return;
+      playPause();
+    }
+    else if (e.key === 'ArrowLeft') seekBy(-5);
+    else if (e.key === 'ArrowRight') seekBy(5);
+    else return;
+    e.preventDefault();
+  });
+  const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  const chapterAt = (t) => chapters.findLast((c) => t >= c.start) || chapters[0];
+  // One segment per chapter, as wide as the chapter is long.
+  function buildTrack(list) {
+    chapters = list;
+    segs = chapters.map((c) => {
+      const el = document.createElement('div');
+      el.className = 'demo-seg';
+      el.style.flex = String(c.end - c.start);
+      el.append(document.createElement('i'));
+      track.insertBefore(el, $('demo-tip'));
+      return el;
+    });
+  }
+  // The segments sit apart, so x picks a segment, then a time within it.
+  const trackTime = (e) => {
+    if (!segs.length) return scene.t;
+    let i = segs.findIndex((el) => e.clientX <= el.getBoundingClientRect().right);
+    if (i < 0) i = segs.length - 1;
+    const r = segs[i].getBoundingClientRect(), c = chapters[i];
+    return c.start + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (c.end - c.start);
+  };
+  function hover(e) {
+    const tip = $('demo-tip');
+    segs.forEach((el) => el.classList.remove('hover'));
+    if (!e || !segs.length || e.pointerType === 'touch') { tip.classList.remove('on'); return; }
+    const t = trackTime(e), c = chapterAt(t);
+    segs[chapters.indexOf(c)].classList.add('hover');
+    tip.innerHTML = `${c.label}<span>${clock(t - scene.start)}</span>`;
+    tip.style.left = `${e.clientX - track.getBoundingClientRect().left}px`;
+    tip.classList.add('on');
+  }
+  track.addEventListener('pointerleave', () => hover(null));
+  track.addEventListener('pointerdown', (e) => {
+    if (!scene.ready) return;
+    scrub = { resume: scene.playing };
+    track.setPointerCapture(e.pointerId);
+    track.classList.add('drag');
+    send({ demo: 'pause' });
+    send({ demo: 'seek', t: trackTime(e) });
+  });
+  track.addEventListener('pointermove', (e) => {
+    if (scrub) send({ demo: 'seek', t: trackTime(e) });
+    hover(e);
+  });
+  const endScrub = () => {
+    if (!scrub) return;
+    track.classList.remove('drag');
+    if (scrub.resume) send({ demo: 'play' });
+    scrub = null;
+  };
+  track.addEventListener('pointerup', endScrub);
+  track.addEventListener('pointercancel', endScrub);
+  return { show, hide };
+})();
 
 // ---------- terminal install ----------
 $('install').addEventListener('click', (e) => {
