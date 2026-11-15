@@ -13,7 +13,7 @@ rewrite a selection with one click, or ask an agent forked from your session
 for changes in chat. When it's ready, tell your original agent it's done,
 and it uses the text exactly as you left it.
 
-https://github.com/user-attachments/assets/4de63c7c-1d4e-4981-8ede-8b7fd1b6875d
+https://github.com/user-attachments/assets/c01af06e-e89b-432c-b077-e68d4e0b0148
 
 Status: early release; expect rough edges.
 
