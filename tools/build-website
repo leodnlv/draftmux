@@ -2,6 +2,10 @@
 """Builds the website into a directory, ready to publish.
 
 Usage: tools/build-website OUT
+       tools/build-website --serve [PORT]
+
+--serve builds into a temporary directory and serves it on localhost
+(port 8000 by default), rebuilding when the sources change.
 
 Copies website/ to OUT and fills changelog/index.html with the released
 versions in CHANGELOG.md. A version is released once its heading carries a
@@ -11,9 +15,12 @@ their "New:", "Fix:" and other prefixes; unprefixed bullets count as new.
 
 import datetime
 import html
+import http.server
 import re
 import shutil
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,14 +132,8 @@ def render(found):
     return "\n".join(out) + "\n"
 
 
-def main():
-    if len(sys.argv) != 2:
-        sys.exit("usage: build-website OUT")
-    out = Path(sys.argv[1]).resolve()
+def build(out):
     site = ROOT / "website"
-    if out == site or site in out.parents or out in site.parents:
-        sys.exit(f"OUT must be outside {site}")
-
     found = releases((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
     if not found:
         sys.exit("CHANGELOG.md has no released version")
@@ -147,7 +148,62 @@ def main():
     if len(MARKER.findall(template)) != 1:
         sys.exit("website/changelog/index.html needs one <!-- releases --> line")
     page.write_text(MARKER.sub(lambda _: render(found), template), encoding="utf-8")
-    print(f"Built {out} with {len(found)} releases")
+    return len(found)
+
+
+def sources_changed_at():
+    paths = [ROOT / "CHANGELOG.md", *(ROOT / "website").rglob("*")]
+    return max(path.stat().st_mtime for path in paths)
+
+
+def serve(port):
+    """Serves a build on localhost, rebuilt when a request finds the sources changed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "site"
+        built_at = None
+        lock = threading.Lock()
+
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=str(out), **kwargs)
+
+            def do_GET(self):
+                nonlocal built_at
+                # A page's requests arrive together; one of them rebuilds.
+                with lock:
+                    changed_at = sources_changed_at()
+                    if changed_at != built_at:
+                        build(out)
+                        built_at = changed_at
+                super().do_GET()
+
+            def end_headers(self):
+                self.send_header("Cache-Control", "no-store")
+                super().end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        with http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
+            print(f"Serving http://localhost:{port}/ (Ctrl-C to stop)")
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["--serve"] and len(args) <= 2:
+        serve(int(args[1]) if len(args) == 2 else 8000)
+        return
+    if len(args) != 1 or args[0].startswith("-"):
+        sys.exit("usage: build-website OUT | --serve [PORT]")
+    out = Path(args[0]).resolve()
+    site = ROOT / "website"
+    if out == site or site in out.parents or out in site.parents:
+        sys.exit(f"OUT must be outside {site}")
+    print(f"Built {out} with {build(out)} releases")
 
 
 if __name__ == "__main__":

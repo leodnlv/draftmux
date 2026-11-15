@@ -59,6 +59,10 @@ linux-install:
 website OUT="target/website":
     tools/build-website "$1"
 
+# Serve the website on localhost, rebuilt as its sources change
+website-serve PORT="8000":
+    tools/build-website --serve "$1"
+
 # Tag and push a release (patch, minor, major or current) for CI to publish
 release BUMP="patch" *ARGS:
     cargo-release --skip-publish "$@"
