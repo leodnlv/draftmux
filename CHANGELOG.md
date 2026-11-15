@@ -1,12 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 (2026-11-15)
 
-- New: Draftmux runs on x64 Windows 10 version 1803 and later. Install it
-  from PowerShell with
-  `irm https://raw.githubusercontent.com/raine/draftmux/main/install.ps1 | iex`.
-  It tells you about new versions; run the script again to update. Claude
-  Code drafts need Claude Code's native `claude.exe`.
+- New: Draftmux runs on Windows. See the README for installation.
+- Fix: Processes that pi starts no longer keep running after pi exits.
 
 ## v0.2.0 (2026-11-14)
 
