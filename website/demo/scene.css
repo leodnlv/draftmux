@@ -139,7 +139,7 @@ html[data-scenecast=preview] #world { will-change: transform; }
 /* Laid out at twice its size and scaled down inside the transform: Chrome
    rasterizes a 3D-transformed layer at its layout size before tilting it,
    so the doubled layout keeps the screenshot's text sharp in a 4K render. */
-#title .hero { position: absolute; left: 420px; top: -121.5px; width: 2040px; border-radius: 32px; transform-origin: 50% 50%;
+#title .hero { position: absolute; left: 420px; top: -22.5px; width: 2040px; border-radius: 32px; transform-origin: 50% 50%;
   transform: perspective(1700px) rotateX(24deg) rotateZ(-10deg) rotateY(4deg) scale(.5);
   box-shadow: 0 120px 280px #000000c8, 0 0 240px #3b82f62e, 0 0 0 2px #ffffff26; }
 #title .l1 { font: 700 84px/1.1 var(--ui); letter-spacing: -1.5px; color: #f4f5f8; max-width: 800px; }
