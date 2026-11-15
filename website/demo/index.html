@@ -197,9 +197,9 @@ const T = {
   // The first draft's tics light up one by one; the load-bearing joke rides
   // on the second.
   tics: 13.7, lb: [13.95, 15.15],
-  outro: 59.3, uses: [59.8, 63.8], card: 64.0,
+  outro: 59.3, uses: [59.8, 64.3], card: 64.5,
 };
-const DURATION = 68.5;
+const DURATION = 69.0;
 const SEGMENTS = [
   ['session', 'Session', 0.0, 7.4], ['handoff', 'Hand-off', 7.4, 9.0],
   ['draft', 'First draft', 9.0, 17.2], ['chat', 'Chat', 17.2, 24.0], ['markdown', 'Markdown', 24.0, 33.6],
@@ -1273,6 +1273,13 @@ Two devices can edit the same task offline. The last write wins, and the other e
 ## Alternatives
 
 Field-level CRDTs would avoid most conflicts, but cost a rewrite of the sync layer.`],
+  ['Landing pages', 'github-file', `# Run your agents side by side
+
+workmux gives each coding agent its own git worktree and tmux window, so five tasks can run at once without stepping on each other.
+
+- **One command per task:** \`workmux add fix-login\` creates the worktree, opens the window and starts the agent
+- **See who needs you:** the sidebar shows which agents are working, waiting or done
+- **Merge and move on:** \`workmux merge\` lands the branch and cleans up the worktree`],
   ['Slack updates', 'slack', `:white_check_mark: **Checkout latency is back to normal**
 
 From 14:05 to 14:40 UTC, about 8% of checkout requests timed out after a config change halved the payments connection pool.
@@ -1299,7 +1306,7 @@ Raine`],
 // then its two lines.
 const USE_STEP = .5;
 // Where each example lands on the pile: x and y offsets in px, tilt in degrees.
-const PILE = [[-70, 6, -3], [60, -8, 2.5], [-30, 10, -1.5], [80, 0, 3], [-60, -6, -2], [10, 4, 1]];
+const PILE = [[-70, 6, -3], [60, -8, 2.5], [-30, 10, -1.5], [80, 0, 3], [-50, -4, -2.5], [40, 8, 2], [10, 4, 1]];
 function outroAt(t) {
   const o = $('outro'), k = ease((t - T.outro) / .6);
   o.style.display = k > 0 ? '' : 'none';
