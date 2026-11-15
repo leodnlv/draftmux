@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changelog · Draftmux</title>
+<meta name="description" content="What's new in each release of Draftmux, the editor for iterating on a message with your coding agent.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://draftmux.raine.dev/changelog/">
+<meta property="og:site_name" content="Draftmux">
+<meta property="og:title" content="Changelog · Draftmux">
+<meta property="og:description" content="What's new in each release of Draftmux, the editor for iterating on a message with your coding agent.">
+<meta property="og:image" content="https://draftmux.raine.dev/img/social.png">
+<meta property="og:image:width" content="2400">
+<meta property="og:image:height" content="1260">
+<meta property="og:image:alt" content="Draftmux: polish what your agent writes before it goes out, beside the app with a PR description open">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="../img/app-icon.png">
+<script>
+// A theme chosen with the toggle overrides the system's, before first paint.
+try {
+  const theme = localStorage.getItem('theme');
+  if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme;
+} catch {}
+</script>
+<link rel="stylesheet" href="../site.css">
+<style>
+.navlinks a[aria-current="page"] { color: var(--text); }
+
+.log { max-width: 1240px; margin: 0 auto; padding: 40px 32px 0; }
+.log h1 { font-family: var(--display); font-size: clamp(34px, 4.2vw, 52px); line-height: 1.05; letter-spacing: -0.035em; font-weight: 650; }
+.log-lede { margin-top: 12px; font-size: 18px; color: var(--muted); }
+.releases { margin-top: 48px; }
+
+/* The version and date sit beside what changed, and stay in view while it scrolls. */
+.release { display: grid; grid-template-columns: 200px minmax(0, 720px); gap: 0 56px; padding: 40px 0; border-top: 1px solid var(--hairline); scroll-margin-top: 8px; }
+.release-meta { position: sticky; top: 24px; align-self: start; }
+.release h2 { font-family: var(--display); font-size: 22px; line-height: 1.25; font-weight: 650; letter-spacing: -0.02em; }
+.release time { display: block; margin-top: 2px; font-size: 14px; color: var(--muted); }
+.latest {
+  display: inline-block; margin-top: 10px; padding: 1px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.release-body > :first-child { margin-top: 0; }
+.release-body p { margin-top: 14px; text-wrap: pretty; }
+.release-body h3 { margin: 28px 0 0; font-size: 13px; font-weight: 600; color: var(--faint); }
+.release-body ul { margin: 8px 0 0; padding-left: 18px; }
+.release-body p + ul { margin-top: 14px; }
+.release-body li { margin-top: 7px; padding-left: 2px; text-wrap: pretty; }
+.release-body li::marker { color: var(--faint); }
+.release-body code {
+  padding: 1px 5px; border-radius: 5px; background: var(--bg-alt); box-shadow: 0 0 0 1px var(--hairline) inset;
+  font-family: var(--mono); font-size: 0.86em;
+}
+.release-body a { color: var(--accent); }
+@media (hover: hover) { .release-body a:hover { text-decoration: underline; text-underline-offset: 3px; } }
+
+@media (max-width: 820px) {
+  .log { padding: 24px 24px 0; }
+  .releases { margin-top: 32px; }
+  .release { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 32px 0; }
+  .release-meta { position: static; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .release time, .latest { margin-top: 0; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position: absolute" aria-hidden="true">
+  <symbol id="arrow" viewBox="0 0 17 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 2.5v8.2M5 7.6l3.5 3.5L12 7.6M3 14h11"/></symbol>
+</svg>
+
+<header class="nav">
+  <a class="brand" href="../"><img src="../img/app-icon.png" width="44" height="44" alt="">Draftmux</a>
+  <nav class="navlinks">
+    <a class="opt" href="./" aria-current="page">Changelog</a>
+    <a href="https://github.com/raine/draftmux">GitHub</a>
+    <button class="theme-toggle" id="theme-toggle" aria-label="Switch between light and dark">
+      <svg class="only-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.9"/><path d="M8 1.2v1.5M8 13.3v1.5M1.2 8h1.5M13.3 8h1.5M3.2 3.2l1.05 1.05M11.75 11.75l1.05 1.05M3.2 12.8l1.05-1.05M11.75 4.25l1.05-1.05"/></svg>
+      <svg class="only-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M13.4 9.6A5.6 5.6 0 0 1 6.4 2.6a5.7 5.7 0 1 0 7 7Z"/></svg>
+    </button>
+    <a class="download sm" href="https://github.com/raine/draftmux/releases/latest"><svg aria-hidden="true"><use href="#arrow"/></svg>Download</a>
+  </nav>
+</header>
+
+<main class="log">
+  <h1>Changelog</h1>
+  <p class="log-lede">What's new in each release of Draftmux.</p>
+  <div class="releases">
+<!-- releases: tools/build-website writes them here from CHANGELOG.md -->
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <a href="../">Draftmux</a>
+    <a href="https://github.com/raine/draftmux">GitHub</a>
+    <a href="https://github.com/raine/draftmux/blob/main/LICENSE">MIT license</a>
+  </div>
+</footer>
+
+<script src="../site.js"></script>
+</body>
+</html>

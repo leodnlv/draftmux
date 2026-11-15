@@ -55,6 +55,10 @@ linux-app:
 linux-install:
     scripts/bundle-linux --install
 
+# Build the website, with its changelog page, into a directory
+website OUT="target/website":
+    tools/build-website "$1"
+
 # Tag and push a release (patch, minor, major or current) for CI to publish
 release BUMP="patch" *ARGS:
     cargo-release --skip-publish "$@"

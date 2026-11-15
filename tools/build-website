@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Builds the website into a directory, ready to publish.
+
+Usage: tools/build-website OUT
+
+Copies website/ to OUT and fills changelog/index.html with the released
+versions in CHANGELOG.md. A version is released once its heading carries a
+date, such as "## v0.3.0 (2026-11-15)". Each version's bullets are grouped by
+their "New:", "Fix:" and other prefixes; unprefixed bullets count as new.
+"""
+
+import datetime
+import html
+import re
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MARKER = re.compile(r"^<!-- releases\b.*?-->\n", re.M)
+RELEASE = re.compile(r"^## (v\S+) \((\d{4}-\d{2}-\d{2})\)\s*$")
+BULLET_KIND = re.compile(r"^(\w+): +")
+# In the order a release shows them.
+KINDS = {
+    "Breaking": "Breaking",
+    "New": "New",
+    "Changed": "Changed",
+    "UX": "Improved",
+    "Perf": "Performance",
+    "Fix": "Fixes",
+}
+INLINE = re.compile(
+    r"`(?P<code>[^`]+)`"
+    r"|\[(?P<text>[^\]]+)\]\((?P<url>[^)\s]+)\)"
+    r"|\*\*(?P<bold>.+?)\*\*"
+)
+
+
+def inline(text):
+    """Markdown code spans, links and bold as HTML."""
+    out, at = [], 0
+    for m in INLINE.finditer(text):
+        out.append(html.escape(text[at : m.start()], quote=False))
+        if m["code"] is not None:
+            out.append(f"<code>{html.escape(m['code'], quote=False)}</code>")
+        elif m["url"] is not None:
+            out.append(f'<a href="{html.escape(m["url"])}">{inline(m["text"])}</a>')
+        else:
+            out.append(f"<strong>{inline(m['bold'])}</strong>")
+        at = m.end()
+    out.append(html.escape(text[at:], quote=False))
+    return "".join(out)
+
+
+def releases(changelog):
+    """(version, date, blocks) for each released version, newest first as written.
+
+    A block is a paragraph's text or a list of bullet texts, with wrapped
+    lines joined.
+    """
+    found, blocks, block = [], None, None
+    for line in changelog.splitlines():
+        if line.startswith("#"):
+            m = RELEASE.match(line)
+            blocks = [] if m else None
+            block = None
+            if m:
+                found.append((m[1], datetime.date.fromisoformat(m[2]), blocks))
+        elif blocks is None:
+            continue
+        elif not line.strip():
+            block = None
+        elif line.startswith("- "):
+            if not isinstance(block, list):
+                block = []
+                blocks.append(block)
+            block.append(line[2:].strip())
+        elif isinstance(block, list):
+            block[-1] += " " + line.strip()
+        elif block is None:
+            block = len(blocks)
+            blocks.append(line.strip())
+        else:
+            blocks[block] += " " + line.strip()
+    return found
+
+
+def render_list(bullets):
+    groups = {kind: [] for kind in KINDS}
+    for bullet in bullets:
+        m = BULLET_KIND.match(bullet)
+        if m and m[1] in KINDS:
+            groups[m[1]].append(bullet[m.end() :])
+        else:
+            groups["New"].append(bullet)
+    out = []
+    for kind, items in groups.items():
+        if items:
+            out.append(f"      <h3>{KINDS[kind]}</h3>")
+            out.append("      <ul>")
+            out.extend(f"        <li>{inline(item)}</li>" for item in items)
+            out.append("      </ul>")
+    return out
+
+
+def render(found):
+    out = []
+    for i, (version, date, blocks) in enumerate(found):
+        anchor = html.escape(version)
+        out.append(f'    <section class="release" id="{anchor}">')
+        out.append('      <div class="release-meta">')
+        out.append(f'        <h2><a href="#{anchor}">{anchor}</a></h2>')
+        out.append(f'        <time datetime="{date.isoformat()}">{date:%B} {date.day}, {date.year}</time>')
+        if i == 0:
+            out.append('        <span class="latest">Latest</span>')
+        out.append("      </div>")
+        out.append('      <div class="release-body">')
+        for block in blocks:
+            if isinstance(block, list):
+                out.extend(render_list(block))
+            else:
+                out.append(f"      <p>{inline(block)}</p>")
+        out.append("      </div>")
+        out.append("    </section>")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: build-website OUT")
+    out = Path(sys.argv[1]).resolve()
+    site = ROOT / "website"
+    if out == site or site in out.parents or out in site.parents:
+        sys.exit(f"OUT must be outside {site}")
+
+    found = releases((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+    if not found:
+        sys.exit("CHANGELOG.md has no released version")
+
+    if out.exists():
+        shutil.rmtree(out)
+    # demo/out holds local renders of the demo video.
+    shutil.copytree(site, out, ignore=lambda d, _: ["out"] if Path(d) == site / "demo" else [".DS_Store"])
+
+    page = out / "changelog" / "index.html"
+    template = page.read_text(encoding="utf-8")
+    if len(MARKER.findall(template)) != 1:
+        sys.exit("website/changelog/index.html needs one <!-- releases --> line")
+    page.write_text(MARKER.sub(lambda _: render(found), template), encoding="utf-8")
+    print(f"Built {out} with {len(found)} releases")
+
+
+if __name__ == "__main__":
+    main()
