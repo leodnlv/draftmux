@@ -1450,7 +1450,7 @@ impl SelectionPopover {
                     1 => format!("Tell {agent} what to change here…").into(),
                     n => format!("Tell {agent} what to do with these {n} selections…").into(),
                 };
-                let send = format!("↵ send to {agent}");
+                let send = format!("{} send to {agent}", editor::by_platform!("↵", "Enter"));
                 let focus = field.focus_handle(cx);
                 div()
                     .w(COMMENT_WIDTH - PADDING * 2.)
@@ -1532,9 +1532,16 @@ impl SelectionPopover {
                     // The field's edge sets the hints apart, so they need no
                     // rule.
                     .child(
-                        hints(&[&send, "⇧↵ newline", "esc back"], &palette)
-                            .mt(px(6.))
-                            .pb(px(3.)),
+                        hints(
+                            &[
+                                &send,
+                                editor::by_platform!("⇧↵ newline", "Shift+Enter newline"),
+                                "esc back",
+                            ],
+                            &palette,
+                        )
+                        .mt(px(6.))
+                        .pb(px(3.)),
                     )
                     .into_any_element()
             }
@@ -1557,7 +1564,11 @@ impl SelectionPopover {
                 .child(label.clone())
                 .into_any_element(),
             Mode::Results(options) => {
-                let keys = format!("1–{} or ↵ apply", options.len());
+                let keys = format!(
+                    "1–{} or {} apply",
+                    options.len(),
+                    editor::by_platform!("↵", "Enter")
+                );
                 div()
                     .w(RESULTS_WIDTH - PADDING * 2.)
                     .flex()

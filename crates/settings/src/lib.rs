@@ -30,7 +30,7 @@ pub const ALTERNATIVES: std::ops::RangeInclusive<usize> = 1..=5;
 
 /// The profile pi uses when nothing names one.
 pub fn default_profile(home: &Path) -> PathBuf {
-    home.join(".pi/agent")
+    home.join(".pi").join("agent")
 }
 
 /// Contents of `settings.json`.

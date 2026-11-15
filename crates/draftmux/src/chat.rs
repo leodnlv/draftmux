@@ -1698,7 +1698,10 @@ impl Chat {
                         .child(div().flex_1().min_w_0().overflow_hidden().children(model))
                         // While the agent runs, the transcript shows it.
                         .when(!busy && chip.is_none(), |footer| {
-                            footer.child("↵ send · ⇧↵ newline")
+                            footer.child(editor::by_platform!(
+                                "↵ send · ⇧↵ newline",
+                                "Enter send · Shift+Enter newline"
+                            ))
                         })
                         .children(chip)
                         .child(
