@@ -820,6 +820,9 @@ function terminalAt(t) {
 // Every Draftmux shot has this height, so all fit at 2x and moves between
 // them are pans. Scale changes only when the story changes window.
 const WORK_H = 465;
+// The desk shown beside a window edge that a shot reaches: enough that a
+// hold's slow push doesn't carry the edge to the frame's.
+const EDGE = 24;
 const SHOTS = {
   desk: () => ({ x: 0, y: 0, w: 1920, h: 1080 }),
   // The whole Draftmux window, for orienting when it opens.
@@ -830,18 +833,18 @@ const SHOTS = {
   // Bottom of the terminal: the prompt and the output that appears above it.
   termTail: () => { const b = W($('term')); return { x: b.x - 20, y: b.y + b.h - 504, w: b.w + 40, h: 504 }; },
   // Top of editor and preview (the whole preview before the toggle), toolbar included.
-  source: () => { const r = W($('content')); return { x: r.x - 10, y: W(dmx).y, w: r.w + 20, h: WORK_H }; },
+  source: () => { const r = W($('content')); return { x: r.x - EDGE, y: W(dmx).y, w: r.w + EDGE + 10, h: WORK_H }; },
   // Preview and the target switch above it.
   targets: () => { const p = W($('pv')), g = W($('segs')); return { x: p.x - 10, y: W(dmx).y, w: g.x + g.w + 20 - p.x, h: WORK_H }; },
   // From just above Steps to reproduce, so a popover over the last step fits,
   // down through Workaround.
   steps: () => { const r = W($('content')), h = W([...$('pvbody').querySelectorAll('h2')].find((e) => /^Steps/.test(e.textContent)));
-    return { x: r.x - 10, y: Math.min(h.y - 70, r.y + r.h - WORK_H), w: r.w + 20, h: WORK_H }; },
+    return { x: r.x - EDGE, y: Math.min(h.y - 70, r.y + r.h - WORK_H), w: r.w + EDGE + 10, h: WORK_H }; },
   // Bottom of preview and chat: composer, transcript tail and the preview's Workaround section.
   chat: () => { const r = W($('content')), c = W(document.querySelector('.chat-col')), x = r.x + r.w / 2 - 10;
-    return { x, y: c.y + c.h - WORK_H, w: c.x + c.w + 10 - x, h: WORK_H }; },
+    return { x, y: c.y + c.h - WORK_H, w: c.x + c.w + EDGE - x, h: WORK_H }; },
   // Review's bar and columns, with the toolbar's Changes button above them.
-  review: () => { const r = W($('content')); return { x: r.x - 10, y: W(dmx).y, w: r.w + 20, h: 560 }; },
+  review: () => { const r = W($('content')); return { x: r.x - EDGE, y: W(dmx).y, w: r.w + EDGE + 10, h: 560 }; },
 };
 // [start, duration, shot, drift]: drift is a slow push while holding.
 const CAMERA = [
@@ -870,14 +873,15 @@ const CAMERA = [
 // Shots other than the desk, the window and the terminal's tail fit above the
 // caption band at the bottom.
 const BAND = 150;
+const DESK_MARGIN = 14;
 function fit(r, shot) {
   if (shot === 'desk') return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, s: Math.min(1920 / r.w, 1080 / r.h) };
   // The terminal's tail fills the frame's width with the terminal's bottom
   // edge on the frame's; the caption sits over the empty lines below the
   // prompt.
   if (shot === 'termTail') { const s = 1920 / r.w; return { cx: r.x + r.w / 2, cy: r.y + r.h - 540 / s, s }; }
-  // The whole window covers the frame, with nothing of the desk around it.
-  if (shot === 'dmx') { const s = Math.max(1920 / r.w, 1080 / r.h); return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, s }; }
+  // The whole window, with a margin of the desk around it so it reads as a window.
+  if (shot === 'dmx') { const s = Math.min(1920 / (r.w + 2 * DESK_MARGIN), 1080 / (r.h + 2 * DESK_MARGIN)); return { cx: r.x + r.w / 2, cy: r.y + r.h / 2, s }; }
   const s = Math.min(1920 / r.w, (1080 - BAND) / r.h);
   return { cx: r.x + r.w / 2, cy: r.y + r.h / 2 + BAND / 2 / s, s };
 }
