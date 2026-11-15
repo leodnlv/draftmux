@@ -439,7 +439,8 @@ pub const DATA_DIR_VAR: &str = "DRAFTMUX_DATA_DIR";
 
 /// The app's data directory: `$DRAFTMUX_DATA_DIR` when set, else
 /// `~/Library/Application Support/Draftmux` on macOS or
-/// `$XDG_DATA_HOME/Draftmux` (normally `~/.local/share/Draftmux`) on Linux.
+/// `$XDG_DATA_HOME/Draftmux` (normally `~/.local/share/Draftmux`) on Linux,
+/// or `~\.local\share\Draftmux` on Windows.
 pub fn data_dir() -> Result<PathBuf> {
     data_dir_from(std::env::var_os(DATA_DIR_VAR))
 }
@@ -449,6 +450,16 @@ fn data_dir_from(var: Option<std::ffi::OsString>) -> Result<PathBuf> {
         Some(dir) if dir.is_absolute() => Ok(dir),
         Some(dir) => bail!("{DATA_DIR_VAR} must be an absolute path: {}", dir.display()),
         None => {
+            // Windows redirects writes under AppData by processes of packaged
+            // apps, such as the shells of Claude's desktop app, into a folder
+            // only that app sees. The home folder isn't redirected, so the app
+            // and every CLI share this one.
+            #[cfg(windows)]
+            let data = std::env::home_dir()
+                .context("can't find the home directory")?
+                .join(".local")
+                .join("share");
+            #[cfg(not(windows))]
             let data = dirs::data_dir().context("no application data directory")?;
             Ok(data.join("Draftmux"))
         }
@@ -521,7 +532,11 @@ mod tests {
         assert_eq!(data_dir_from(Some(dir.clone().into())).unwrap(), dir);
         assert!(data_dir_from(Some("data".into())).is_err());
         let default = data_dir_from(None).unwrap();
-        assert_eq!(default, dirs::data_dir().unwrap().join("Draftmux"));
+        #[cfg(windows)]
+        let expected = std::env::home_dir().unwrap().join(r".local\share\Draftmux");
+        #[cfg(not(windows))]
+        let expected = dirs::data_dir().unwrap().join("Draftmux");
+        assert_eq!(default, expected);
         assert_eq!(data_dir_from(Some("".into())).unwrap(), default);
     }
 

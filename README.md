@@ -81,6 +81,11 @@ Draftmux doesn't run the `claude.cmd` that npm installs. Draftmux reads tool
 paths and API keys from the environment it starts in rather than from your
 PowerShell profile.
 
+Run the script in your own PowerShell window rather than in an agent's shell.
+Agents in packaged apps such as Claude's desktop app run in shells whose
+writes under `AppData` Windows keeps private to that app, so an install from
+there isn't visible outside it.
+
 ### Agents
 
 Drafts are written by [pi](https://github.com/earendil-works/pi) or Claude Code
@@ -162,8 +167,8 @@ such as `title` for PRs and issues or `subject`, `to` and `cc` for emails.
 
 Errors and crash reports go to `draftmux.log` in
 `~/Library/Application Support/Draftmux` on macOS, `~/.local/share/Draftmux`
-on Linux and `%APPDATA%\Draftmux` on Windows. Once the log passes 1 MB, the app moves it to `draftmux.log.1` on its
-next start.
+on Linux and `~\.local\share\Draftmux` on Windows. Once the log passes 1 MB,
+the app moves it to `draftmux.log.1` on its next start.
 
 `draftmux` commands start the app and reach it through a local socket, so
 they need to run outside an agent's shell sandbox. If a command reports that
