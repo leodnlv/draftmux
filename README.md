@@ -165,6 +165,11 @@ Errors and crash reports go to `draftmux.log` in
 on Linux and `%APPDATA%\Draftmux` on Windows. Once the log passes 1 MB, the app moves it to `draftmux.log.1` on its
 next start.
 
+`draftmux` commands start the app and reach it through a local socket, so
+they need to run outside an agent's shell sandbox. If a command reports that
+it can't connect to `draftmux.sock`, quit Draftmux and run the command again
+from a shell without a sandbox.
+
 ## Development
 
 Needs the Rust toolchain in `rust-toolchain.toml`, plus full Xcode on macOS.

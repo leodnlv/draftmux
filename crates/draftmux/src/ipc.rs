@@ -196,7 +196,7 @@ pub fn send(request: &Request) -> Result<()> {
     let stream = match UnixStream::connect(&socket) {
         Ok(stream) => stream,
         Err(err) if not_listening(&err) => wait_for_app(&socket, Some(launch(&dir)?))?,
-        Err(err) => return Err(err).with_context(|| format!("connecting to {}", socket.display())),
+        Err(err) => return Err(unreachable(&socket, &err)),
     };
     exchange(stream, request)
 }
@@ -208,7 +208,7 @@ pub fn send_if_running(request: &Request) -> Result<bool> {
     match UnixStream::connect(&socket) {
         Ok(stream) => exchange(stream, request).map(|()| true),
         Err(err) if not_listening(&err) => Ok(false),
-        Err(err) => Err(err).with_context(|| format!("connecting to {}", socket.display())),
+        Err(err) => Err(unreachable(&socket, &err)),
     }
 }
 
@@ -298,7 +298,7 @@ fn wait_for_app(socket: &Path, mut child: Option<Child>) -> Result<UnixStream> {
             Ok(stream) => return Ok(stream),
             Err(err) if not_listening(&err) => {}
             Err(err) => {
-                return Err(err).with_context(|| format!("connecting to {}", socket.display()));
+                return Err(unreachable(socket, &err));
             }
         }
         if let Some(status) = child.as_mut().map(Child::try_wait).transpose()?.flatten() {
@@ -341,6 +341,17 @@ fn write_line(mut stream: &UnixStream, value: &impl Serialize) -> Result<()> {
     json.push(b'\n');
     stream.write_all(&json)?;
     Ok(())
+}
+
+/// Connecting failed for a reason other than no app listening, as when this
+/// command runs in a shell sandbox or the app was started in one.
+fn unreachable(socket: &Path, err: &io::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "connecting to {}: {err}\n\
+         draftmux: if this command or the app ran in a sandboxed shell, quit the \
+         app and run the command outside the sandbox",
+        socket.display()
+    )
 }
 
 /// No app is listening: the socket was never created, or its owner died.

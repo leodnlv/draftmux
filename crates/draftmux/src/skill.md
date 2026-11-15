@@ -17,6 +17,8 @@ draft, they either say so in the same conversation or run the skill again:
 
 Every command below starts with these lines. Shell variables don't survive
 between commands, so repeat them each time; never reuse a path from memory.
+Run them outside any shell sandbox: they start the Draftmux app and reach it
+through a local socket, which a sandbox blocks or leaves unusable.
 
 ```sh
 f=
