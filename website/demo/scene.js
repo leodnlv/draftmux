@@ -28,7 +28,7 @@ ${VIDEO ? `  <div id="title"><img class="hero" /><div class="l1">Drafting messag
     <div class="l2">What if there was a better UI for polishing message drafts?</div></div>
   <div class="brand" id="brand"><img src="img/app-icon.webp" />Draftmux</div>
 ` : ''}  <div id="outro"><div class="uses"><h2>Many more use cases</h2><ul></ul><div class="ex light"></div></div>
-    <div class="card"><img src="img/app-icon.webp" /><div class="name">Draftmux</div><div class="l2">Now on Mac and Linux</div><div class="l3">Drafts with Pi or Claude Code, built on GPUI</div></div></div>
+    <div class="card"><img src="img/app-icon.webp" /><div class="name">Draftmux</div><div class="l2">Now on Mac, Linux and Windows</div><div class="l3">Drafts with Pi or Claude Code, built on GPUI</div></div></div>
   <div id="keys"></div>
   <div id="cap"><div class="pill" id="pill"></div><div class="sub" id="sub"></div></div>
 </div>`);

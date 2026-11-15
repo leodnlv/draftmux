@@ -327,7 +327,7 @@ html.demo-open { overflow: hidden; }
       <div class="cta" id="cta">
         <div id="cta-download">
           <a class="download" data-asset="mac" href="https://github.com/raine/draftmux/releases/latest"><svg aria-hidden="true"><use href="#arrow"/></svg>Download for macOS</a>
-          <p class="cta-meta"><span data-version></span>Apple silicon, macOS 11 or later · <a data-asset="linux-x86_64" href="https://github.com/raine/draftmux/releases/latest">Linux</a></p>
+          <p class="cta-meta"><span data-version></span>Apple silicon, macOS 11 or later · <a data-asset="linux-x86_64" href="https://github.com/raine/draftmux/releases/latest">Linux</a> · <a data-asset="windows" href="https://github.com/raine/draftmux/releases/latest">Windows</a></p>
         </div>
         <div class="install" id="install">
           <div class="install-tabs">
@@ -672,20 +672,28 @@ if (os === 'linux') {
   $('nav-download').dataset.asset = mine;
   // The Homebrew cask installs the macOS app.
   for (const tab of $('install').querySelectorAll('.install-tab')) tab.remove();
+} else if (os === 'windows') {
+  $('cta-download').innerHTML = `
+    ${link('windows', `${arrow}Download for Windows`, 'download')}
+    <p class="cta-meta"><span data-version></span>x64, Windows 10 version 1803 or later · ${link('mac', 'macOS')} · ${link('linux-x86_64', 'Linux')}</p>`;
+  $('nav-download').dataset.asset = 'windows';
+  for (const tab of $('install').querySelectorAll('.install-tab')) tab.remove();
+  $('install').querySelector('.prompt').textContent = 'PS>';
+  $('install-cmd').textContent = 'irm https://raw.githubusercontent.com/raine/draftmux/main/install.ps1 | iex';
 } else if (os !== 'mac') {
   $('cta-download').innerHTML = `
     <div class="download-pair">
       ${link('mac', `${arrow}macOS`, 'download alt')}
       ${link('linux-x86_64', `${arrow}Linux`, 'download alt')}
     </div>
-    <p class="cta-meta">${os === 'windows' ? 'Not available for Windows yet. ' : ''}<span data-version></span>Apple silicon Macs, and Linux on x86_64 or ${link('linux-aarch64', 'arm64')}</p>`;
+    <p class="cta-meta"><span data-version></span>Apple silicon Macs, Linux on x86_64 or ${link('linux-aarch64', 'arm64')}, and ${link('windows', 'Windows')} on x64</p>`;
   $('nav-download').remove();
   $('install').remove();
 }
 
 // Download links lead to the latest release's page until its files are known,
 // then straight to the file.
-const SUFFIX = { mac: '-arm64.dmg', 'linux-x86_64': '-linux-x86_64.tar.gz', 'linux-aarch64': '-linux-aarch64.tar.gz' };
+const SUFFIX = { mac: '-arm64.dmg', 'linux-x86_64': '-linux-x86_64.tar.gz', 'linux-aarch64': '-linux-aarch64.tar.gz', windows: '-windows-x86_64.zip' };
 async function latestRelease() {
   try {
     const cached = JSON.parse(sessionStorage.getItem('release'));
