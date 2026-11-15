@@ -391,7 +391,7 @@ const demo = (() => {
   let open = false, wantPlay = false, grown = null, clone = null, idleTimer = 0, scrub = null;
 
   const send = (msg) => frame?.contentWindow?.postMessage(msg, '*');
-  // Loading starts as soon as a visitor is likely to press play.
+  // Loading starts when the page goes idle, or sooner if a visitor reaches for play.
   function load() {
     if (frame) return;
     frame = document.createElement('iframe');
@@ -537,6 +537,11 @@ const demo = (() => {
   // Controls
   $('shot').addEventListener('click', show);
   for (const ev of ['pointerenter', 'focusin', 'touchstart']) $('shot').addEventListener(ev, load, { passive: true });
+  // Otherwise once the page is idle, unless the visitor asked to save data.
+  if (!navigator.connection?.saveData && !/2g/.test(navigator.connection?.effectiveType ?? '')) {
+    const idle = window.requestIdleCallback ? (f) => requestIdleCallback(f, { timeout: 3000 }) : (f) => setTimeout(f, 500);
+    addEventListener('load', () => idle(load), { once: true });
+  }
   stage.addEventListener('click', playPause);
   toggle.addEventListener('click', playPause);
   $('demo-close').addEventListener('click', hide);
