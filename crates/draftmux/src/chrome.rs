@@ -1462,7 +1462,10 @@ impl Chrome {
                 .rows()
                 .iter()
                 .find(|row| row.draft.id == draft.id)
-                .map_or_else(|| "Untitled draft".into(), |row| row.title.clone().into()),
+                .map_or_else(
+                    || "Untitled draft".into(),
+                    |row| markup::replace_shortcodes(&row.title).into(),
+                ),
             None => "Draftmux".into(),
         };
         let subtitle = match (self.session.save_error(), current) {
@@ -1485,7 +1488,7 @@ impl Chrome {
                     }
                     None => tilde(&draft.meta.cwd, home.as_deref()),
                 };
-                Some((text.into(), palette.faint))
+                Some((markup::replace_shortcodes(&text).into(), palette.faint))
             }
             (None, None) => None,
         };
