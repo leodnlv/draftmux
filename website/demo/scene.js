@@ -932,8 +932,8 @@ const CP = {
   aboveS2: () => { const p = CP.s2start(); return { x: p.x + 60, y: p.y - 90 }; },
   reviewBtn: () => pt(W($('b-review'))),
   rangeBtn: () => pt(W($('rv-range')), .4),
+  // Measured once the review and its menu are laid out (measureAlternatives).
   doneBtn: () => pt(W($('rv-done'))),
-  // Measured once the menu is laid out (measureAlternatives).
   sinceRow: () => pt(W($('rv-range'))),
 };
 // The popover item each pass clicks, measured in the frame before the click,
@@ -954,6 +954,10 @@ function measureAlternatives() {
   seek(LEAD + T.since - .05);
   const since = pt(W([...$('rvmenu').querySelectorAll('.menu-item')].find((e) => e.textContent.includes('Alternatives'))), .35);
   CP.sinceRow = () => since;
+  // Done goes away with the review it closes; the cursor rests where it was.
+  seek(LEAD + T.done - .05);
+  const done = pt(W($('rv-done')));
+  CP.doneBtn = () => done;
 }
 // [t, point]; the cursor eases between consecutive points within a group.
 const CURSOR = [
