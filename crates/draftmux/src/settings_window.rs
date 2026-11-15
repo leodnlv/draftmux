@@ -1476,7 +1476,9 @@ impl SettingsWindow {
                 .map(|text| (text, self.source_name(i.instructions.source, cx)))
         });
         let desc = match (&inherited_text, replace) {
-            (None, _) => "Sent after the conversation, so the cached prefix is untouched",
+            (None, _) => {
+                "Tone, persona or rules the agent follows when drafting, like “British English, no emoji”"
+            }
             (Some(_), false) => "Added after the inherited instructions",
             (Some(_), true) => "Replace the inherited instructions; leave empty to clear them",
         };
