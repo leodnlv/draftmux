@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 (2026-11-16)
 
 - Fix: Switching to another app no longer closes the selection popover or
   drops its suggestions.
