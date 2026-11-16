@@ -156,7 +156,9 @@ impl Buffer {
         self.revision += 1;
     }
 
-    /// Moves the selection. Ends any undo grouping and the vertical goal.
+    /// Moves the selection. Ends any undo grouping and the vertical goal, and
+    /// commits the IME composition if the selection leaves it, so later input
+    /// lands at the new selection rather than replacing the old composition.
     pub fn set_selection(&mut self, selection: Selection) {
         let anchor = self.clamp(selection.anchor);
         let head = self.clamp(selection.head);
@@ -165,6 +167,12 @@ impl Buffer {
             head,
             affinity: selection.affinity,
         };
+        if let Some(marked) = &self.marked {
+            let range = self.selection.range();
+            if range.start < marked.start || range.end > marked.end {
+                self.end_composition();
+            }
+        }
         self.goal_x = None;
         self.can_coalesce = false;
     }
@@ -778,6 +786,31 @@ mod tests {
         assert_eq!(b.text(), "ab");
         assert_eq!(b.marked(), None);
         assert!(!b.can_undo());
+    }
+
+    #[test]
+    fn moving_the_selection_away_commits_the_composition() {
+        // A dead key leaves its accent marked until the next key.
+        let mut b = Buffer::new("a\nid");
+        b.set_selection(Selection::caret(4));
+        b.compose(None, "`", Some(1..1));
+        b.set_selection(Selection::caret(0));
+        assert_eq!(b.marked(), None);
+        b.insert("`");
+        assert_eq!(b.text(), "`a\nid`");
+        assert_eq!(b.selection(), Selection::caret(1));
+        b.undo();
+        assert_eq!(b.text(), "a\nid`");
+    }
+
+    #[test]
+    fn moving_the_selection_within_the_composition_keeps_it() {
+        let mut b = Buffer::new("");
+        b.compose(None, "にほ", None);
+        b.set_selection(Selection::caret(3));
+        assert_eq!(b.marked(), Some(0..6));
+        b.insert("日本");
+        assert_eq!(b.text(), "日本");
     }
 
     #[test]
