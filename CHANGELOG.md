@@ -3,8 +3,14 @@
 ## Unreleased
 
 - Fix: Switching to another app no longer closes the selection popover or
-  drops its suggestions. It hides while you're away and comes back when you
-  return.
+  drops its suggestions.
+- Fix: Clicking or moving the cursor away from a pending accent (a dead key
+  such as `` ` ``) finishes it, so the next keys type at the new cursor.
+- Fix: Swiping sideways across a wide table or code block in the preview no
+  longer scrolls the page up or down.
+
+Thanks [@erikjuhani](https://github.com/erikjuhani) and
+[@leodnlv](https://github.com/leodnlv)!
 
 ## v0.3.0 (2026-11-15)
 
