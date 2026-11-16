@@ -125,6 +125,16 @@ html[data-scenecast=preview] #world { will-change: transform; }
 #outro .name { font: 700 92px/1.1 Lato, var(--ui); color: #f4f5f8; letter-spacing: .5px; }
 #outro .l2 { font: 500 40px/1.3 var(--ui); color: #c9cdd6; margin-top: 54px; }
 #outro .l3 { font: 400 28px/1.3 var(--ui); color: #7d8391; margin-top: 18px; }
+/* The credits, rolling beside the end card once it slides aside. Every
+   credit is CREDIT_H (scene.js) tall, so the roll's length is known. */
+#outro .rule { position: absolute; left: 1060px; top: 200px; width: 1px; height: 680px; background: #ffffff1f; }
+#outro .credits { position: absolute; left: 1140px; top: 0; width: 680px; height: 1080px; overflow: hidden; text-align: left;
+  -webkit-mask-image: linear-gradient(#0000 8%, #000 26%, #000 74%, #0000 92%); mask-image: linear-gradient(#0000 8%, #000 26%, #000 74%, #0000 92%); }
+#outro .roll { position: absolute; left: 0; right: 0; top: 0; }
+#outro .roll > div { height: 160px; }
+#outro .role { font: 500 20px/1.3 var(--ui); letter-spacing: 3px; text-transform: uppercase; color: #7d8391; margin-bottom: 6px; }
+#outro .who { font: 500 40px/1.3 var(--ui); color: #f4f5f8; }
+#outro .who small { display: block; font: 400 24px/1.4 var(--ui); color: #7d8391; }
 
 /* ---------- Video cut only ---------- */
 .brand { position: absolute; left: 44px; top: 38px; display: flex; align-items: center; gap: 14px; color: #f2f3f6; font: 700 28px Lato, var(--ui); letter-spacing: .2px; }

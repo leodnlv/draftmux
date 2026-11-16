@@ -28,7 +28,8 @@ ${VIDEO ? `  <div id="title"><img class="hero" /><div class="l1">Drafting messag
     <div class="l2">What if there was a better UI for polishing message drafts?</div></div>
   <div class="brand" id="brand"><img src="img/app-icon.webp" />Draftmux</div>
 ` : ''}  <div id="outro"><div class="uses"><h2>Many more use cases</h2><ul></ul><div class="ex light"></div></div>
-    <div class="card"><img src="img/app-icon.webp" /><div class="name">Draftmux</div><div class="l2">Now on Mac, Linux and Windows</div><div class="l3">Drafts with Pi or Claude Code, built on GPUI</div></div></div>
+    <div class="card"><img src="img/app-icon.webp" /><div class="name">Draftmux</div><div class="l2">Now on Mac, Linux and Windows</div><div class="l3">Drafts with Pi or Claude Code, built on GPUI</div></div>
+    <div class="rule"></div><div class="credits"><div class="roll"></div></div></div>
   <div id="keys"></div>
   <div id="cap"><div class="pill" id="pill"></div><div class="sub" id="sub"></div></div>
 </div>`);
@@ -68,14 +69,36 @@ const T = {
   // on the second.
   tics: 13.7, lb: [13.95, 15.15],
   outro: 59.3, uses: [59.8, 64.3], card: 64.5,
+  // The end card slides aside and the credits roll up beside it.
+  squeeze: 66.6, roll: 67.4,
 };
 // The video cut opens on the session already on screen, under the title card.
 if (VIDEO) T.recall = [-LEAD - 2, -LEAD - 1];
-const DURATION = 69.0;
+// How the demo was made, measured from the transcripts of the sessions that
+// made it: [role, credit, note]. Running time is the cut's own length.
+const CREDITS = [
+  ['Directed by', 'Raine'],
+  ['Written by', 'Claude Opus 5.5'],
+  ['Additional material', 'Claude Fable 5.2', 'and GPT, by way of Pi'],
+  ['Second opinions', '15 consultations', 'via consult-llm'],
+  ['Continuity', '48 notes', 'pinned to frames in scenecast'],
+  ['Camera', '105 screenshots'],
+  ['Grips', '2,085 tool calls'],
+  ['Catering', '331M tokens', 'mostly reheated from cache'],
+  ['Running time', null],
+  ['Making time', 'about 11 hours', 'over 5 evenings'],
+];
+// Every credit takes the same height (scene.css), so the roll's length, and
+// with it the scene's, follows from the number of credits: the roll runs
+// until the last credit clears the top, and the frame fades to black as it
+// goes.
+const CREDIT_H = 160, ROLL_SPEED = 150;
+T.dark = T.roll + (1080 + CREDITS.length * CREDIT_H) / ROLL_SPEED - 1.2;
+const DURATION = T.dark + 2;
 const SEGMENTS = [
   ['session', 'Session', 0.0, 7.4], ['handoff', 'Hand-off', 7.4, 9.0],
   ['draft', 'First draft', 9.0, 17.2], ['chat', 'Chat', 17.2, 24.0], ['markdown', 'Markdown', 24.0, 33.6],
-  ['alts', 'Alternatives', 33.6, 38.9], ['part', 'This part', 38.9, 46.8], ['review', 'Review', 46.8, 52.9], ['send', 'Send', 52.9, T.outro], ['uses', 'Use cases', T.outro, T.card], ['end', 'End', T.card, DURATION],
+  ['alts', 'Alternatives', 33.6, 38.9], ['part', 'This part', 38.9, 46.8], ['review', 'Review', 46.8, 52.9], ['send', 'Send', 52.9, T.outro], ['uses', 'Use cases', T.outro, T.card], ['end', 'End', T.card, T.squeeze], ['credits', 'Credits', T.squeeze, DURATION],
 ].map(([id, label, start, end]) => ({ id, label, start, end }));
 
 // ---------- Draft states ----------
@@ -1189,7 +1212,7 @@ Raine`],
 ];
 // The outro: black, then the other uses pop in one by one, each swapping in
 // its example below, and leave; then the end card's icon and name rise in,
-// then its two lines.
+// then its two lines; then the card slides aside for the credits.
 const USE_STEP = .5;
 // Where each example lands on the pile: x and y offsets in px, tilt in degrees.
 const PILE = [[-70, 6, -3], [60, -8, 2.5], [-30, 10, -1.5], [80, 0, 3], [-50, -4, -2.5], [40, 8, 2], [10, 4, 1]];
@@ -1229,6 +1252,23 @@ function outroAt(t) {
   const [img, name, l2, l3] = o.querySelector('.card').children, c = T.card;
   rise(img, c); rise(name, c + .2); rise(l2, c + .9); rise(l3, c + 1.3);
   img.style.transform += ` scale(${.9 + .1 * easeOut((t - c) / .7)})`;
+  creditsAt(t);
+}
+// The end card slides left, as TV credits do, a rule draws down beside it,
+// and the credits roll up past it at a constant speed; then everything
+// fades to black.
+function creditsAt(t) {
+  const o = $('outro'), roll = o.querySelector('.roll'), rule = o.querySelector('.rule');
+  if (!roll.children.length) {
+    roll.innerHTML = CREDITS.map(([role, v, note]) => `<div><div class="role">${role}</div><div class="who">${v ?? `${Math.round(LEAD + DURATION)} seconds`}${note ? `<small>${note}</small>` : ''}</div></div>`).join('');
+  }
+  const k = ease((t - T.squeeze) / .9), card = o.querySelector('.card'), dark = 1 - fade(t, T.dark, 1.2);
+  card.style.transform = `translateX(${-440 * k}px) scale(${1 - .14 * k})`;
+  card.style.opacity = dark;
+  rule.style.opacity = fade(t, T.squeeze + .6, .4) * dark;
+  rule.style.transform = `scaleY(${easeOut((t - T.squeeze - .6) / .8)})`;
+  roll.parentElement.style.display = t >= T.roll ? '' : 'none';
+  roll.style.transform = `translateY(${1080 - (t - T.roll) * ROLL_SPEED}px)`;
 }
 // The video cut's title card holds, complete, from frame 0, then lifts off
 // the session as the story starts.
