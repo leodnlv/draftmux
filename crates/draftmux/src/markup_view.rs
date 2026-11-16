@@ -1901,6 +1901,7 @@ impl<'a> Renderer<'a> {
                     div.track_scroll(&scroll)
                 })
                 .overflow_x_scroll()
+                .restrict_scroll_to_axis()
                 .flex()
                 .child(
                     // Unshrunk so long lines widen the content and scroll.
@@ -2070,6 +2071,7 @@ impl<'a> Renderer<'a> {
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_x_scroll()
+                                    .restrict_scroll_to_axis()
                                     .flex()
                                     .child(code),
                             ),
@@ -2209,6 +2211,7 @@ impl<'a> Renderer<'a> {
                 div.track_scroll(&scroll)
             })
             .overflow_x_scroll()
+            .restrict_scroll_to_axis()
             .flex()
             .child(
                 // Like GitHub, the table takes its max-content width and

@@ -542,6 +542,7 @@ impl Preview {
             .size_full()
             .when_some(background, |this, background| this.bg(background))
             .overflow_y_scroll()
+            .restrict_scroll_to_axis()
             .track_scroll(&self.scroll)
             .px_6()
             .pt_5()
