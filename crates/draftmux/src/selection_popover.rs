@@ -26,6 +26,11 @@
 //! the mouse button is released. The comment field is the exception: the
 //! panel stays key while it's shown, and the main window keeps the editor
 //! focused behind it.
+//!
+//! The panel floats above other apps' windows, so it closes while the app
+//! is inactive and opens again once the main window is active. Losing focus
+//! never dismisses the popover itself: its actions, running call and options
+//! stay until the user picks one or dismisses it.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -168,6 +173,10 @@ pub struct SelectionPopover {
     reconcile_scheduled: bool,
     /// The panel is being opened; it is set once it has.
     opening: bool,
+    /// The app lost focus: the panel, which would float above other apps,
+    /// stays closed until the main window is active again. The popover keeps
+    /// its state meanwhile, so a running call goes on and its options wait.
+    hidden: bool,
     main_bounds: Option<Bounds<Pixels>>,
     /// The name of the action that was run last, which the edit history
     /// shows for an option applied from it.
@@ -250,7 +259,7 @@ struct Panel {
     side: Edge,
     /// The window, where the platform resizes it in place of gpui.
     native: Option<Rc<crate::platform::NativeWindow>>,
-    /// Dismisses the popover when the panel, key after a click on it, loses
+    /// Hides the popover when the panel, key after a click on it, loses
     /// focus to another app.
     _activation: Subscription,
 }
@@ -320,8 +329,10 @@ impl SelectionPopover {
                 }
             }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() {
-                    this.dismiss_unless_panel_active(cx);
+                if window.is_window_active() {
+                    this.unhide(cx);
+                } else {
+                    this.hide_unless_app_active(cx);
                 }
             }),
         ];
@@ -343,6 +354,7 @@ impl SelectionPopover {
             comment_observer: None,
             reconcile_scheduled: false,
             opening: false,
+            hidden: false,
             main_bounds: Some(window.bounds()),
             action_name: SharedString::default(),
             _subscriptions: subscriptions,
@@ -572,6 +584,7 @@ impl SelectionPopover {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.pending_show = None;
         self.comment_observer = None;
+        self.hidden = false;
         if self.open.take().is_some() {
             // Closed now rather than after the main window's next draw: a
             // window covered by another app may not draw until it's shown
@@ -599,19 +612,39 @@ impl SelectionPopover {
     /// back without the app losing it; checking either window's focus while
     /// that settles would catch both inactive and hide the popover under
     /// the click.
-    fn dismiss_unless_panel_active(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Only the panel closes. The popover stays open, with its options or
+    /// running call, until the user picks an option or dismisses it.
+    fn hide_unless_app_active(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(100))
                 .await;
             this.update(cx, |this, cx| {
                 if !crate::platform::app_active(cx) {
-                    this.dismiss(cx);
+                    this.hide(cx);
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Closes the panel and keeps it closed until [`Self::unhide`].
+    fn hide(&mut self, cx: &mut Context<Self>) {
+        if self.open.is_some() && !self.hidden {
+            self.hidden = true;
+            // Closed now: a main window covered by another app may not draw
+            // to reconcile until it's shown again.
+            self.close_panel(cx);
+        }
+    }
+
+    /// The main window is active again: show the hidden popover.
+    fn unhide(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.hidden) {
+            self.schedule_reconcile(cx);
+        }
     }
 
     /// The state changed: redraw and place the panel to match.
@@ -1009,6 +1042,9 @@ impl SelectionPopover {
     /// the edge that faces the selection. `None` when the popover is hidden
     /// or the selection is scrolled away.
     fn placement(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, Edge)> {
+        if self.hidden {
+            return None;
+        }
         self.open.as_ref()?;
         let (pane, rows) = if self.in_preview(cx) {
             let rows = self.preview.read(cx).selection_rects().to_vec();
@@ -1133,7 +1169,7 @@ impl SelectionPopover {
                     activation = Some(popover.update(cx, |_, cx| {
                         cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
-                                this.dismiss_unless_panel_active(cx);
+                                this.hide_unless_app_active(cx);
                             }
                         })
                     }));
@@ -1165,8 +1201,8 @@ impl SelectionPopover {
                             native: native.map(Rc::new),
                             _activation: activation.expect("set when the window opens"),
                         });
-                        // Dismissed while it opened.
-                        if this.open.is_none() {
+                        // Dismissed or hidden while it opened.
+                        if this.open.is_none() || this.hidden {
                             return this.close_panel(cx);
                         }
                         // Reopened elsewhere while the comment field shows.
@@ -2083,5 +2119,57 @@ mod tests {
                 assert!(matches!(&open.mode, Mode::Results(options) if options == &["a", "b"]));
             });
         });
+    }
+
+    #[gpui::test]
+    fn leaving_the_app_hides_the_options_until_it_is_back(cx: &mut gpui::TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::app_settings::init(config.path().to_owned(), cx));
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        let popover = window
+            .update(cx, |_, window, cx| {
+                let editor = cx.new(|cx| Editor::new("Hi there\n", cx));
+                let preview = cx.new(TextSelection::new);
+                let store = Store::new(config.path().join("drafts"));
+                cx.new(|cx| SelectionPopover::new(editor, preview, store, window, cx))
+            })
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            popover.update(cx, |popover, _| {
+                popover.open = Some(Open {
+                    text: "Hi there\n".into(),
+                    range: 3..8,
+                    highlighted: Some(1),
+                    mode: Mode::Results(vec!["a".into(), "b".into()]),
+                });
+            });
+        });
+        cx.run_until_parked();
+        let options_shown = |cx: &mut gpui::VisualTestContext| {
+            popover.read_with(cx, |popover, _| {
+                matches!(
+                    &popover.open,
+                    Some(Open { mode: Mode::Results(options), highlighted: Some(1), .. })
+                        if options == &["a", "b"]
+                )
+            })
+        };
+
+        cx.deactivate_window();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(options_shown(cx));
+        assert!(popover.read_with(cx, |popover, _| popover.hidden));
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(options_shown(cx));
+        assert!(popover.read_with(cx, |popover, _| !popover.hidden));
+
+        // Esc still closes it.
+        popover.update(cx, |popover, cx| popover.dismiss(cx));
+        assert!(popover.read_with(cx, |popover, _| popover.open.is_none()));
     }
 }

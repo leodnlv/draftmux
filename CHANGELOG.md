@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix: Switching to another app no longer closes the selection popover or
+  drops its suggestions. It hides while you're away and comes back when you
+  return.
+
 ## v0.3.0 (2026-11-15)
 
 - New: Draftmux runs on Windows. See the README for installation.
