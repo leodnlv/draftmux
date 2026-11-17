@@ -1,3 +1,4 @@
+mod about_window;
 mod app_settings;
 mod assets;
 mod block_cache;
@@ -166,10 +167,13 @@ fn run_app() -> Result<()> {
         chrome::init(cx);
         selection_popover::init(cx);
         settings_window::init(cx);
+        about_window::init(cx);
         update::init(cx);
         cx.bind_keys([KeyBinding::new(editor::secondary!("q"), Quit, None)]);
         cx.set_menus([
             Menu::new("Draftmux").items([
+                MenuItem::action("About Draftmux", about_window::OpenAbout),
+                MenuItem::separator(),
                 MenuItem::action("Check for Updates…", update::CheckForUpdates),
                 MenuItem::action("Settings…", settings_window::OpenSettings),
                 MenuItem::separator(),
@@ -203,7 +207,7 @@ fn run_app() -> Result<()> {
                 cx.new(|cx| chrome::Chrome::new(store, window, cx))
             })
             .expect("failed to open the main window");
-        // Closing the main window ends the app; Settings is secondary.
+        // Closing the main window ends the app; other windows are secondary.
         let main_id = window.window_id();
         cx.on_window_closed(move |cx, closed| {
             if closed == main_id {

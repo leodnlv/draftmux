@@ -4,6 +4,7 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
+pub const APP_ICON: &str = "app-icon.png";
 pub const PI_ICON: &str = "icons/pi.svg";
 pub const CLAUDE_CODE_ICON: &str = "icons/claude-code.svg";
 pub const ARCHIVE_ICON: &str = "icons/archive.svg";
@@ -45,6 +46,7 @@ pub const ALERT_WARNING_ICON: &str = "icons/alert-warning.svg";
 pub const ALERT_CAUTION_ICON: &str = "icons/alert-caution.svg";
 
 const ASSETS: &[(&str, &[u8])] = &[
+    (APP_ICON, include_bytes!("../../../macos/app-icon.png")),
     (PI_ICON, include_bytes!("../assets/icons/pi.svg")),
     (
         CLAUDE_CODE_ICON,
