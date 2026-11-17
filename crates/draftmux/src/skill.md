@@ -67,7 +67,11 @@ When the message is already written in a file, such as a draft the user asked
 you to write earlier, pass `--draft-file <path>` instead of `--note`. The
 draft starts with the file's text unchanged and Draftmux's agent doesn't write
 a first draft. Pass the path as is; don't read, copy or rewrite the file
-first. To polish a Markdown file in the repository, such as README.md, pass
+first.
+
+A `slack` draft file must be Markdown, not Slack mrkdwn: `*text*` is italic.
+
+To polish a Markdown file in the repository, such as README.md, pass
 the file itself: Draftmux previews a file that git doesn't ignore as
 `github-file` unless `--target` says otherwise. The draft remembers the file,
 and the user can save it back from Draftmux.
