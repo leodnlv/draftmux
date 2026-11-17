@@ -2021,6 +2021,7 @@ mod tests {
                     config_dir: None,
                     fork: None,
                     model: model.map(str::to_owned),
+                    effort: None,
                     selection_model: None,
                 }),
                 note: None,

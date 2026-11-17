@@ -645,6 +645,7 @@ mod tests {
             config_dir: None,
             fork: None,
             model: None,
+            effort: None,
             selection_model: None,
         };
         let config = |claude: &ClaudeSession| {

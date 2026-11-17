@@ -9,7 +9,9 @@ use draftmux_agent as contract;
 use futures::{FutureExt, StreamExt, future};
 use serde_json::Value;
 
-use crate::{Agent, AgentEvent, AssistantDelta, Disposition, Error, Event, LaunchSpec, State};
+use crate::{
+    Agent, AgentEvent, AssistantDelta, Disposition, Error, Event, LaunchSpec, State, ThinkingLevel,
+};
 
 /// The extension's hidden context message, added after each Draftmux prompt
 /// whose context changed (pi-extension/README.md). The Draftmux part of a
@@ -38,6 +40,7 @@ impl contract::Agent for PiAgent {
     fn capabilities(&self) -> contract::Capabilities {
         contract::Capabilities {
             model_switching: true,
+            default_thinking: false,
         }
     }
 
@@ -94,6 +97,34 @@ impl contract::Agent for PiAgent {
     ) -> future::BoxFuture<'static, Result<contract::State, contract::Error>> {
         self.0
             .switch_model(model.provider, model.id)
+            .map(|state| state.map(state_from).map_err(error))
+            .boxed()
+    }
+
+    fn thinking_levels(&self) -> future::BoxFuture<'static, Result<Vec<String>, contract::Error>> {
+        self.0
+            .get_available_thinking_levels()
+            .map(|levels| {
+                levels
+                    .map(|levels| levels.iter().map(|l| l.as_str().to_owned()).collect())
+                    .map_err(error)
+            })
+            .boxed()
+    }
+
+    fn set_thinking(
+        &self,
+        level: Option<String>,
+    ) -> future::BoxFuture<'static, Result<contract::State, contract::Error>> {
+        let Some(level) = level.as_deref().and_then(ThinkingLevel::parse) else {
+            return future::ready(Err(contract::Error {
+                kind: contract::ErrorKind::Other,
+                message: format!("pi has no thinking level {level:?}"),
+            }))
+            .boxed();
+        };
+        self.0
+            .change_thinking_level(level)
             .map(|state| state.map(state_from).map_err(error))
             .boxed()
     }

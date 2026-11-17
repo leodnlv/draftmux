@@ -234,6 +234,7 @@ fn create(
                 .value
                 .model()
                 .map(str::to_owned),
+            effort: None,
             selection_model: resolved
                 .claude_selection_model
                 .value

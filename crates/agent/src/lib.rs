@@ -53,6 +53,17 @@ pub trait Agent: Send + Sync {
     /// [`ErrorKind::Stopped`] when the agent stopped in between; the next
     /// [`Event::Ready`] reports the model then.
     fn switch_model(&self, model: Model) -> BoxFuture<'static, Result<State, Error>>;
+
+    /// The thinking settings the conversation's model takes, lowest first,
+    /// as the backend names them; empty when the model has none.
+    fn thinking_levels(&self) -> BoxFuture<'static, Result<Vec<String>, Error>>;
+
+    /// Sets the conversation's thinking setting, one of
+    /// [`Agent::thinking_levels`], or `None` for the backend's own when
+    /// [`Capabilities::default_thinking`] says it has one. Returns the
+    /// state the agent then reports, which may differ from the request.
+    /// Fails with [`ErrorKind::Stopped`] like [`Agent::switch_model`].
+    fn set_thinking(&self, level: Option<String>) -> BoxFuture<'static, Result<State, Error>>;
 }
 
 /// Everything an agent reports, across its process restarts.
@@ -62,6 +73,9 @@ pub type Events = BoxStream<'static, Event>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub model_switching: bool,
+    /// The thinking setting can be left to the backend, which picks one
+    /// for the model; [`State::thinking`] is then `None`.
+    pub default_thinking: bool,
 }
 
 /// What the agent did with a prompt it accepted.
@@ -103,7 +117,7 @@ pub struct State {
     /// it.
     pub model: Option<Model>,
     /// The thinking setting as the backend names it; none when the backend
-    /// has no setting Draftmux controls.
+    /// picks it.
     pub thinking: Option<String>,
     /// The model id the backend reported a run used, when that is a
     /// different name than `model`, such as the id an alias resolved to.

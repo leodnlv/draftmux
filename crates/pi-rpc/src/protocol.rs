@@ -24,6 +24,7 @@ pub(crate) enum Command {
     GetState,
     SetModel { provider: String, model_id: String },
     SetThinkingLevel { level: ThinkingLevel },
+    GetAvailableThinkingLevels,
     GetAvailableModels,
     GetMessages,
 }
@@ -130,6 +131,11 @@ pub(crate) struct PromptData {
 #[derive(Deserialize)]
 pub(crate) struct ModelsData {
     pub models: Vec<Model>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ThinkingLevelsData {
+    pub levels: Vec<ThinkingLevel>,
 }
 
 #[derive(Deserialize)]
@@ -424,6 +430,10 @@ mod tests {
             ),
             (Command::Abort, r#"{"id":"7","type":"abort"}"#),
             (Command::GetState, r#"{"id":"7","type":"get_state"}"#),
+            (
+                Command::GetAvailableThinkingLevels,
+                r#"{"id":"7","type":"get_available_thinking_levels"}"#,
+            ),
             (
                 Command::SetModel {
                     provider: "anthropic".into(),

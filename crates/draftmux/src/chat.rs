@@ -1696,13 +1696,6 @@ impl Chat {
                         .text_size(px(11.))
                         .text_color(palette.faint)
                         .child(div().flex_1().min_w_0().overflow_hidden().children(model))
-                        // While the agent runs, the transcript shows it.
-                        .when(!busy && chip.is_none(), |footer| {
-                            footer.child(editor::by_platform!(
-                                "↵ send · ⇧↵ newline",
-                                "Enter send · Shift+Enter newline"
-                            ))
-                        })
                         .children(chip)
                         .child(
                             div()
@@ -2369,6 +2362,7 @@ pub fn record(backend: &mut Backend, record: &Record) {
     match record {
         Record::Transcript(path) => claude.transcript = Some(path.clone()),
         Record::Model(model) => claude.model = Some(model.clone()),
+        Record::Effort(effort) => claude.effort = effort.clone(),
     }
 }
 
@@ -2464,6 +2458,7 @@ fn claude_agent(
         env: env.vars().to_vec(),
         extra_env: Vec::new(),
         model: claude.model.clone(),
+        effort: claude.effort.clone(),
         tools: Vec::new(),
         setting_sources: Vec::new(),
         session: Some(draftmux_claude_rpc::Session::Draft(draft_session(

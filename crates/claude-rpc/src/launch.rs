@@ -144,6 +144,12 @@ pub struct LaunchSpec {
     ///
     /// [`Agent::set_model`]: crate::Agent::set_model
     pub model: Option<String>,
+    /// The effort of the first process (`--effort`), such as `high`; none
+    /// for the model's default. A successful [`Agent::set_effort`] replaces
+    /// it for later processes.
+    ///
+    /// [`Agent::set_effort`]: crate::Agent::set_effort
+    pub effort: Option<String>,
     /// The built-in tools the model can use; empty disables them all.
     pub tools: Vec<Tool>,
     /// The settings files to load; empty loads none, which also skips
@@ -233,6 +239,7 @@ impl LaunchSpec {
     pub(crate) fn command(
         &self,
         model: Option<&str>,
+        effort: Option<&str>,
         tools: &[Tool],
         start: Option<&Start>,
     ) -> Command {
@@ -259,6 +266,9 @@ impl LaunchSpec {
         }
         if let Some(model) = model {
             command.arg("--model").arg(model);
+        }
+        if let Some(effort) = effort {
+            command.arg("--effort").arg(effort);
         }
         match start {
             Some(Start::New(id)) => {
@@ -318,6 +328,7 @@ mod tests {
             .collect(),
             extra_env: vec![("CLAUDE_CONFIG_DIR".into(), "/cfg".into())],
             model: Some("haiku".into()),
+            effort: None,
             tools: vec![Tool::Read, Tool::Edit],
             setting_sources: vec![],
             session: Some(Session::New("0b5c".into())),
@@ -385,6 +396,7 @@ mod tests {
         let spec = spec();
         let command = spec.command(
             Some("sonnet"),
+            Some("high"),
             &spec.tools,
             Some(&Start::New("0b5c".into())),
         );
@@ -409,6 +421,8 @@ mod tests {
                 "stdio",
                 "--model",
                 "sonnet",
+                "--effort",
+                "high",
                 "--session-id",
                 "0b5c",
             ]
@@ -437,6 +451,7 @@ mod tests {
         spec.permission_prompt = false;
         spec.system_prompt = Some("Be brief.".into());
         let command = spec.command(
+            None,
             None,
             &[],
             Some(&Start::Resume("/drafts/one/s.jsonl".into())),

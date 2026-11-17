@@ -165,6 +165,11 @@ pub struct ClaudeSession {
     /// on the session's own model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The effort the user chose for the draft, as Claude Code's
+    /// `--effort` takes it, such as `high`; passed to every process. None
+    /// leaves it to the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The model selection actions run on, as `--model` takes it, kept from
     /// the settings at creation. None uses `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -672,7 +677,7 @@ mod tests {
             }),
             ("null backend", |v| v["backend"] = serde_json::Value::Null),
             ("unknown Claude field", |v| {
-                v["backend"]["effort"] = "high".into()
+                v["backend"]["temperature"] = "high".into()
             }),
             ("Claude with a pi profile", |v| {
                 v["pi_agent_dir"] = "/Users/me/.pi/agent".into();

@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::connection::{Connection, Message};
 use crate::protocol::{
     self, Disposition, Event, Incoming, MessagesData, Model, ModelsData, PromptData, Response,
-    State, ThinkingLevel,
+    State, ThinkingLevel, ThinkingLevelsData,
 };
 
 /// Builds the base command for the pi executable. The app passes
@@ -456,16 +456,7 @@ impl Agent {
         model_id: String,
     ) -> impl Future<Output = Result<State, Error>> + Send + use<> {
         let set = self.set_model(provider, model_id);
-        let generation = self.shared.lock().generation;
-        let shared = Arc::downgrade(&self.shared);
-        async move {
-            set.await?;
-            let rx = match shared.upgrade() {
-                Some(shared) => shared.request_from(generation, protocol::Command::GetState),
-                None => Err(Error::Stopped),
-            };
-            decode(rx).await
-        }
+        self.then_state(async move { set.await.map(drop) })
     }
 
     /// Sets the session's thinking level. pi clamps it to what the model
@@ -478,6 +469,49 @@ impl Agent {
             .shared
             .request(protocol::Command::SetThinkingLevel { level });
         async move { reply(rx?).await.map(drop) }
+    }
+
+    /// Sets the session's thinking level, then reads back the state, as
+    /// [`Agent::switch_model`] does. pi records the level in the session,
+    /// clamped to what the model supports.
+    pub fn change_thinking_level(
+        &self,
+        level: ThinkingLevel,
+    ) -> impl Future<Output = Result<State, Error>> + Send + use<> {
+        let set = self.set_thinking_level(level);
+        self.then_state(set)
+    }
+
+    /// The state after `change`, read from the process that made it.
+    fn then_state<F>(&self, change: F) -> impl Future<Output = Result<State, Error>> + Send + use<F>
+    where
+        F: Future<Output = Result<(), Error>> + Send,
+    {
+        let generation = self.shared.lock().generation;
+        let shared = Arc::downgrade(&self.shared);
+        async move {
+            change.await?;
+            let rx = match shared.upgrade() {
+                Some(shared) => shared.request_from(generation, protocol::Command::GetState),
+                None => Err(Error::Stopped),
+            };
+            decode(rx).await
+        }
+    }
+
+    /// The thinking levels the session's model takes, lowest first; only
+    /// `off` for a model that doesn't reason.
+    pub fn get_available_thinking_levels(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ThinkingLevel>, Error>> + Send + use<> {
+        let rx = self
+            .shared
+            .request(protocol::Command::GetAvailableThinkingLevels);
+        async move {
+            decode::<ThinkingLevelsData>(rx)
+                .await
+                .map(|data| data.levels)
+        }
     }
 
     /// The models of the draft's profile that have credentials.

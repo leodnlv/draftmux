@@ -31,9 +31,11 @@
 //! - **Model.** The model the user picks is switched live with
 //!   `set_model` and passed to every later process. The state reports the
 //!   chosen model and, once a run starts, the model claude says it used.
+//!   The effort is the state's thinking setting: switched live with
+//!   `apply_flag_settings` and passed to later processes as `--effort`.
 //!
 //! What the draft's descriptor must keep, the transcript's path and the
-//! chosen model, arrives as [`Record`]s.
+//! chosen model and effort, arrives as [`Record`]s.
 //!
 //! Callbacks are answered on a thread of the agent's own, in order with
 //! the frames, not on the app's executor.
@@ -98,6 +100,9 @@ pub enum Record {
     Transcript(PathBuf),
     /// claude accepted this model for the session.
     Model(String),
+    /// claude accepted this effort for the session; `None` is the model's
+    /// default.
+    Effort(Option<String>),
 }
 
 /// A draft's Claude [`Agent`] as a [`contract::Agent`].
@@ -197,6 +202,7 @@ impl contract::Agent for ClaudeAgent {
     fn capabilities(&self) -> contract::Capabilities {
         contract::Capabilities {
             model_switching: true,
+            default_thinking: true,
         }
     }
 
@@ -291,13 +297,58 @@ impl contract::Agent for ClaudeAgent {
         let id = choice.id;
         let reply = self.agent.set_model(id.clone());
         let records = self.records.clone();
+        let agent = self.agent.clone();
         async move {
             reply.await.map_err(error)?;
             let _ = records.unbounded_send(Record::Model(id.clone()));
             Ok(contract::State {
                 model: Some(model(&id)),
-                thinking: None,
+                thinking: agent.effort(),
                 // Known again once a run reports it.
+                running: None,
+            })
+        }
+        .boxed()
+    }
+
+    /// The efforts of the chosen model, or of claude's `default` when the
+    /// session continues on its own model.
+    fn thinking_levels(&self) -> future::BoxFuture<'static, Result<Vec<String>, contract::Error>> {
+        let chosen = self.agent.model();
+        let chosen = chosen.as_deref().unwrap_or("default");
+        let models = self.models.lock().unwrap();
+        future::ready(match &*models {
+            Some(models) => Ok(models
+                .iter()
+                .find(|m| m.value == chosen)
+                .or_else(|| {
+                    models
+                        .iter()
+                        .find(|m| m.resolved_model.as_deref() == Some(chosen))
+                })
+                .map(|m| m.effort_levels.clone())
+                .unwrap_or_default()),
+            None => Err(contract::Error {
+                kind: contract::ErrorKind::Other,
+                message: "Claude Code lists its efforts once it has started.".into(),
+            }),
+        })
+        .boxed()
+    }
+
+    fn set_thinking(
+        &self,
+        level: Option<String>,
+    ) -> future::BoxFuture<'static, Result<contract::State, contract::Error>> {
+        let reply = self.agent.set_effort(level.clone());
+        let records = self.records.clone();
+        let agent = self.agent.clone();
+        async move {
+            reply.await.map_err(error)?;
+            let _ = records.unbounded_send(Record::Effort(level.clone()));
+            Ok(contract::State {
+                model: agent.model().as_deref().map(model),
+                thinking: level,
                 running: None,
             })
         }
@@ -430,7 +481,7 @@ impl Observer {
                 .and_then(|agent| agent.model())
                 .as_deref()
                 .map(model),
-            thinking: None,
+            thinking: self.agent.upgrade().and_then(|agent| agent.effort()),
             running: self.running.clone(),
         }
     }

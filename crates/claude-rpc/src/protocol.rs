@@ -25,6 +25,9 @@ pub struct ModelInfo {
     pub resolved_model: Option<String>,
     pub display_name: String,
     pub description: String,
+    /// The efforts `--effort` and `set_effort` take for the model
+    /// (`supportedEffortLevels`), lowest first; empty when it has none.
+    pub effort_levels: Vec<String>,
 }
 
 impl Init {
@@ -40,6 +43,12 @@ impl Init {
                     resolved_model: text(model, "resolvedModel"),
                     display_name: text(model, "displayName").unwrap_or_else(|| value.clone()),
                     description: text(model, "description").unwrap_or_default(),
+                    effort_levels: model["supportedEffortLevels"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|level| level.as_str().map(str::to_owned))
+                        .collect(),
                     value,
                 })
             })
@@ -183,7 +192,7 @@ mod tests {
             "models": [
                 {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5",
                  "displayName": "Sonnet 5.5", "description": "Efficient",
-                 "supportsEffort": true},
+                 "supportsEffort": true, "supportedEffortLevels": ["low", "high"]},
                 {"value": "claude-x"},
                 {"displayName": "no value"},
             ],
@@ -197,12 +206,14 @@ mod tests {
                     resolved_model: Some("claude-sonnet-5-5".into()),
                     display_name: "Sonnet 5.5".into(),
                     description: "Efficient".into(),
+                    effort_levels: vec!["low".into(), "high".into()],
                 },
                 ModelInfo {
                     value: "claude-x".into(),
                     resolved_model: None,
                     display_name: "claude-x".into(),
                     description: String::new(),
+                    effort_levels: vec![],
                 },
             ]
         );

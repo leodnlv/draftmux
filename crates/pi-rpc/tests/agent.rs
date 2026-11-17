@@ -397,6 +397,28 @@ fn switch_model_reads_state_back() {
     assert_eq!(state.thinking_level, ThinkingLevel::High);
 }
 
+/// A thinking change reports the level pi clamped it to, from the
+/// `get_state` that follows it.
+#[test]
+fn thinking_levels_and_change() {
+    let h = Harness::new(&[&script(&format!(
+        ">>> {{\"id\":\"2\",\"type\":\"get_available_thinking_levels\"}}\n\
+         {{\"id\":\"2\",\"type\":\"response\",\"command\":\"get_available_thinking_levels\",\"success\":true,\"data\":{{\"levels\":[\"off\",\"low\",\"high\"]}}}}\n\
+         >>> {{\"id\":\"3\",\"type\":\"set_thinking_level\",\"level\":\"max\"}}\n\
+         {{\"id\":\"3\",\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}}\n\
+         >>> {{\"id\":\"4\",\"type\":\"get_state\"}}\n{}\n### eof",
+        STATE
+            .replace(r#""id":"1""#, r#""id":"4""#)
+            .replace(r#""thinkingLevel":"medium""#, r#""thinkingLevel":"high""#)
+    ))]);
+    assert_eq!(
+        block_on(h.agent.get_available_thinking_levels()).unwrap(),
+        [ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+    );
+    let state = block_on(h.agent.change_thinking_level(ThinkingLevel::Max)).unwrap();
+    assert_eq!(state.thinking_level, ThinkingLevel::High);
+}
+
 /// Switching drafts while the switch is in flight stops pi once it
 /// answers; the read-back doesn't start another process.
 #[test]

@@ -151,8 +151,8 @@ struct Inner {
     /// Increments per process, so a replaced process's late output is
     /// ignored.
     generation: u64,
-    /// The model the next process starts with.
-    model: Option<String>,
+    /// The model and effort the next process starts with.
+    chosen: Chosen,
     /// The tools the next process starts with.
     tools: Vec<Tool>,
     live: Option<Live>,
@@ -161,6 +161,13 @@ struct Inner {
     previous: Option<Exit>,
     /// The draft is selected, so a process starts once `previous` exits.
     focused: bool,
+}
+
+/// What processes start with, as `--model` and `--effort` take it; `None`
+/// leaves it to claude.
+struct Chosen {
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 struct Live {
@@ -203,6 +210,9 @@ enum Waiter {
     Caller(oneshot::Sender<Reply>),
     /// `set_model`; the model applies to later processes once accepted.
     SetModel(oneshot::Sender<Reply>, String),
+    /// `apply_flag_settings` with `effortLevel`; the effort applies to
+    /// later processes once accepted.
+    SetEffort(oneshot::Sender<Reply>, Option<String>),
     /// An interrupt the agent sent on its own.
     Ignore,
 }
@@ -278,7 +288,7 @@ impl Live {
     fn abandon(&mut self, error: Error) {
         for (_, pending) in self.pending.drain() {
             match pending.waiter {
-                Waiter::Caller(tx) | Waiter::SetModel(tx, _) => {
+                Waiter::Caller(tx) | Waiter::SetModel(tx, _) | Waiter::SetEffort(tx, _) => {
                     let _ = tx.send(Err(error.clone()));
                 }
                 Waiter::Initialize | Waiter::Ignore => {}
@@ -310,7 +320,10 @@ impl Agent {
     /// process the agent starts arrive on the returned receiver.
     pub fn new(spec: LaunchSpec, config: Config) -> (Self, mpsc::UnboundedReceiver<AgentEvent>) {
         let (events, rx) = mpsc::unbounded();
-        let model = spec.model.clone();
+        let chosen = Chosen {
+            model: spec.model.clone(),
+            effort: spec.effort.clone(),
+        };
         let tools = spec.tools.clone();
         let (storage, recorded) = match &spec.session {
             Some(Session::Draft(draft)) => {
@@ -327,7 +340,7 @@ impl Agent {
             events,
             inner: Mutex::new(Inner {
                 generation: 0,
-                model,
+                chosen,
                 tools,
                 live: None,
                 previous: None,
@@ -469,7 +482,13 @@ impl Agent {
     /// The model processes start with, as `--model` takes it; `None` for
     /// the session's own.
     pub(crate) fn model(&self) -> Option<String> {
-        self.shared.lock().model.clone()
+        self.shared.lock().chosen.model.clone()
+    }
+
+    /// The effort processes start with, as `--effort` takes it; `None` for
+    /// the model's default.
+    pub(crate) fn effort(&self) -> Option<String> {
+        self.shared.lock().chosen.effort.clone()
     }
 
     /// The conversation of a [`Session::Draft`] so far, read from its
@@ -499,6 +518,33 @@ impl Agent {
             live.request(
                 request,
                 Waiter::SetModel(tx, model),
+                self.shared.config.request_timeout,
+            )?;
+            self.shared.changed.notify_all();
+            Ok(rx)
+        })();
+        async move { rx?.await.unwrap_or(Err(Error::Stopped)) }
+    }
+
+    /// Sets the session's effort from the next turn, one of the model's
+    /// [`ModelInfo::effort_levels`](crate::ModelInfo::effort_levels), or
+    /// `None` for the model's default. Once accepted, later processes
+    /// start with it too.
+    pub fn set_effort(
+        &self,
+        effort: Option<String>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        let rx = (|| {
+            let mut inner = self.shared.lock();
+            let live = self.shared.ensure_live(&mut inner)?;
+            let (tx, rx) = oneshot::channel();
+            let request = json!({
+                "subtype": "apply_flag_settings",
+                "settings": {"effortLevel": effort},
+            });
+            live.request(
+                request,
+                Waiter::SetEffort(tx, effort),
                 self.shared.config.request_timeout,
             )?;
             self.shared.changed.notify_all();
@@ -640,9 +686,12 @@ impl Shared {
             inner.generation += 1;
             let generation = inner.generation;
             let weak = Arc::downgrade(self);
-            let command = self
-                .spec
-                .command(inner.model.as_deref(), &inner.tools, start.as_ref());
+            let command = self.spec.command(
+                inner.chosen.model.as_deref(),
+                inner.chosen.effort.as_deref(),
+                &inner.tools,
+                start.as_ref(),
+            );
             let conn = Connection::spawn(command, self.config.max_record, move |message| {
                 on_message(&weak, generation, message)
             })
@@ -751,7 +800,7 @@ impl Shared {
                 let timeout = self.config.request_timeout;
                 for (_, pending) in live.pending.extract_if(|_, pending| pending.due <= now) {
                     match pending.waiter {
-                        Waiter::Caller(tx) | Waiter::SetModel(tx, _) => {
+                        Waiter::Caller(tx) | Waiter::SetModel(tx, _) | Waiter::SetEffort(tx, _) => {
                             let _ = tx.send(Err(Error::Timeout(timeout)));
                         }
                         Waiter::Initialize => {
@@ -805,7 +854,7 @@ fn on_message(shared: &Weak<Shared>, generation: u64, message: Message) {
         shared.adopt_on_exit();
         return;
     }
-    let Inner { model, live, .. } = &mut *inner;
+    let Inner { chosen, live, .. } = &mut *inner;
     let Some(live) = live else {
         return;
     };
@@ -813,7 +862,7 @@ fn on_message(shared: &Weak<Shared>, generation: u64, message: Message) {
     let mut callback = None;
     match message {
         Message::Line(_) if live.failed.is_some() => {}
-        Message::Line(frame) => match on_frame(&shared, live, model, frame) {
+        Message::Line(frame) => match on_frame(&shared, live, chosen, frame) {
             Ok(event) => callback = event,
             Err(()) => {
                 // initialize was rejected.
@@ -881,14 +930,14 @@ fn fail(live: &mut Live, reason: String, kill: bool) {
 fn on_frame(
     shared: &Arc<Shared>,
     live: &mut Live,
-    model: &mut Option<String>,
+    chosen: &mut Chosen,
     frame: Value,
 ) -> Result<Option<AgentEvent>, ()> {
     // Answers that were written no longer need tracking.
     live.callbacks
         .retain(|_, callback| !callback.answered || callback.ticket.queued());
     match frame["type"].as_str() {
-        Some("control_response") => return on_response(shared, live, model, &frame["response"]),
+        Some("control_response") => return on_response(shared, live, chosen, &frame["response"]),
         Some("control_request") => return Ok(on_request(shared, live, frame)),
         Some("control_cancel_request") => {
             let id = frame["request_id"].as_str().unwrap_or_default();
@@ -936,7 +985,7 @@ fn on_frame(
 fn on_response(
     shared: &Arc<Shared>,
     live: &mut Live,
-    model: &mut Option<String>,
+    chosen: &mut Chosen,
     response: &Value,
 ) -> Result<Option<AgentEvent>, ()> {
     let id = response["request_id"].as_str().unwrap_or_default();
@@ -956,7 +1005,13 @@ fn on_response(
         }
         Waiter::SetModel(tx, requested) => {
             if reply.is_ok() {
-                *model = Some(requested);
+                chosen.model = Some(requested);
+            }
+            let _ = tx.send(reply);
+        }
+        Waiter::SetEffort(tx, requested) => {
+            if reply.is_ok() {
+                chosen.effort = requested;
             }
             let _ = tx.send(reply);
         }

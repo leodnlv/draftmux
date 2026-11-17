@@ -13,7 +13,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const INIT: &str = r#"
 >>> {"type":"control_request","request_id":"init","request":{"subtype":"initialize","hooks":{"PreToolUse":[{"hookCallbackIds":["draftmux_hook_0"],"timeout":30}]}}}
-{"type":"control_response","response":{"subtype":"success","request_id":"init","response":{"models":[{"value":"haiku"}],"hooks_applied":true}}}
+{"type":"control_response","response":{"subtype":"success","request_id":"init","response":{"models":[{"value":"haiku","supportedEffortLevels":["low","high"]}],"hooks_applied":true}}}
 "#;
 
 pub const SLACK: &str = "Markdown for a Slack message";

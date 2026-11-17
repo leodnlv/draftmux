@@ -4,6 +4,11 @@
 
 - New: Click a task list checkbox in the GitHub preview to check or uncheck it
   in the Markdown. The change is a normal edit you can undo.
+- New: Change the chat's thinking level from the composer: click the level
+  after the model name. pi drafts list the levels the model supports; Claude
+  Code drafts set the effort, or leave it to the model with auto. A draft
+  keeps its level. The model name drops its provider (the tooltip still
+  shows it), and the send hint is gone to make room.
 
 ## v0.3.2 (2026-11-17)
 

@@ -111,6 +111,7 @@ impl Harness {
             ],
             extra_env: vec![("FAKE_CLAUDE_DIR".into(), dir.path().into())],
             model: Some("haiku".into()),
+            effort: None,
             tools: vec![Tool::Read, Tool::Edit],
             setting_sources: vec![],
             session: Some(Session::New("00000000-0000-4000-8000-000000000000".into())),

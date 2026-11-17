@@ -89,6 +89,7 @@ impl App {
                 config_dir: Some(self.config()),
                 fork: None,
                 model: None,
+                effort: None,
                 selection_model: None,
             }),
             note: None,
@@ -115,6 +116,7 @@ impl App {
             ],
             extra_env: vec![("FAKE_CLAUDE_DIR".into(), dir.clone().into())],
             model: claude.model.clone(),
+            effort: claude.effort.clone(),
             tools: vec![],
             setting_sources: vec![],
             session: Some(draftmux_claude_rpc::Session::Draft(DraftSession {
@@ -247,6 +249,7 @@ impl App {
                 match record {
                     Record::Transcript(path) => claude.transcript = Some(path),
                     Record::Model(model) => claude.model = Some(model),
+                    Record::Effort(effort) => claude.effort = effort,
                 }
             })
             .unwrap();

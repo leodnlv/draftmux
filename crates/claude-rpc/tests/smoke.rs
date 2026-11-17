@@ -97,6 +97,7 @@ fn spec(cwd: &Path, session: Session) -> LaunchSpec {
         env: std::env::vars_os().collect(),
         extra_env: vec![],
         model: Some("haiku".into()),
+        effort: None,
         tools: vec![],
         setting_sources: vec![],
         session: Some(session),

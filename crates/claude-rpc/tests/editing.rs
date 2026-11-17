@@ -49,6 +49,7 @@ impl Harness {
             env: vec![("PATH".into(), std::env::var_os("PATH").unwrap())],
             extra_env: vec![("FAKE_CLAUDE_DIR".into(), root.clone().into())],
             model: Some("haiku".into()),
+            effort: None,
             tools: vec![],
             setting_sources: vec![],
             session: Some(Session::New("00000000-0000-4000-8000-000000000000".into())),
@@ -596,6 +597,61 @@ fn streamed_messages_end_with_their_blocks() {
             },
             Event::RunSettled { aborted: false },
         ]
+    );
+}
+
+#[test]
+fn a_chosen_effort_is_recorded_reported_and_passed_to_the_next_process() {
+    let mut h = Harness::new("Hello\n", |_, _| {
+        let apply = |id: &str, effort: Value| {
+            [
+                expect(json!({"type": "control_request", "request_id": id,
+                    "request": {"subtype": "apply_flag_settings",
+                        "settings": {"effortLevel": effort}}})),
+                line(json!({"type": "control_response", "response":
+                    {"subtype": "success", "request_id": id, "response": null}})),
+            ]
+        };
+        let mut first = vec![INIT.to_owned()];
+        first.extend(apply("m", json!("high")));
+        first.push("### eof".into());
+        let mut second = vec![INIT.to_owned()];
+        second.extend(apply("m", Value::Null));
+        second.push("### eof".into());
+        vec![first.join("\n"), second.join("\n")]
+    });
+    h.agent().focus().unwrap();
+    let state = |thinking: Option<&str>| draftmux_agent::State {
+        model: Some(draftmux_agent::Model {
+            provider: "claude".into(),
+            id: "haiku".into(),
+        }),
+        thinking: thinking.map(Into::into),
+        running: None,
+    };
+    assert_eq!(h.next(), Event::Ready(state(None)));
+    assert_eq!(
+        block_on(h.agent().thinking_levels()).unwrap(),
+        ["low", "high"]
+    );
+    let set = block_on(h.agent().set_thinking(Some("high".into()))).unwrap();
+    assert_eq!(set, state(Some("high")));
+
+    h.agent().blur();
+    h.finished(0);
+    h.agent().focus().unwrap();
+    assert_eq!(h.next(), Event::Ready(state(Some("high"))));
+    let args = h.record(1)["args"].to_string();
+    assert!(args.contains(r#""--effort","high""#), "{args}");
+
+    // Auto clears it, for this process and the next.
+    let auto = block_on(h.agent().set_thinking(None)).unwrap();
+    assert_eq!(auto, state(None));
+    let mut records = h.records_now();
+    records.retain(|record| matches!(record, Record::Effort(_)));
+    assert_eq!(
+        records,
+        [Record::Effort(Some("high".into())), Record::Effort(None)]
     );
 }
 
