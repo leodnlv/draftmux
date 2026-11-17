@@ -1,16 +1,18 @@
 # Changelog
 
-## Unreleased
+## v0.3.2 (2026-11-17)
 
-- New: Settings shows where updating stands: when Draftmux last checked, a
-  check or download in progress, an installed update with Restart to Update,
-  or why this copy can't update itself.
+- New: An About window shows the version and links to the website and source.
+- New: Drag the divider between the editor and preview to resize them.
+- New: Settings shows when Draftmux last checked for updates and whether one is
+  downloading or ready to install.
 - Fix: Draftmux checks for updates every time it starts, then once a day.
-  Before, a new release could go unnoticed for up to a day.
-- Fix: Check for Updates in the app menu opens the release notes with Restart
-  to Update once the new version is installed, instead of a message that
-  disappeared before it could be read. The toolbar's update button pulses when
-  it appears.
+- Fix: Check for Updates in the app menu shows the release notes once the update
+  is installed, instead of a message that vanished too quickly to read.
+- Fix: The Draftmux skill tells agents to write a Slack message handed off as a
+  file in Markdown, so bold titles no longer show as italic.
+
+Thanks [@erikjuhani](https://github.com/erikjuhani) for the feedback!
 
 ## v0.3.1 (2026-11-16)
 
