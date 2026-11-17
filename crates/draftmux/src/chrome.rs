@@ -77,10 +77,15 @@ const CONTENT_MIN_WIDTH: Pixels = px(320.);
 /// Below this, the editor and preview are too narrow to share the room
 /// beside the sidebar and chat, so the editor collapses.
 const SPLIT_MIN_WIDTH: Pixels = px(640.);
+/// The narrowest the divider leaves the editor or the preview, as far as
+/// the room they share allows.
+const SPLIT_PANE_MIN_WIDTH: Pixels = px(240.);
+/// How close to the middle the divider snaps to an even split.
+const SPLIT_SNAP: Pixels = px(12.);
 /// How long the sidebar, editor and preview take to slide in or out.
 const PANE_SLIDE: Duration = Duration::from_millis(200);
-/// How long the chat width settles before it is saved.
-const CHAT_WIDTH_SAVE_DELAY: Duration = Duration::from_millis(300);
+/// How long the chat width or the split ratio settles before it is saved.
+const RESIZE_SAVE_DELAY: Duration = Duration::from_millis(300);
 /// Origin of the close button; vertically centres the buttons in the toolbar.
 pub const TRAFFIC_LIGHT_POSITION: Point<Pixels> = point(px(20.), px(19.));
 /// How often relative times in the sidebar are redrawn.
@@ -105,6 +110,9 @@ pub fn init(cx: &mut App) {
 /// The drag that resizes the chat column.
 struct ChatResize;
 
+/// The drag that moves the divider between the editor and the preview.
+struct SplitResize;
+
 pub struct Chrome {
     /// Set on toolbar mouse-down; the first mouse-move then hands the drag to
     /// the window server, so a plain click never starts a move.
@@ -114,6 +122,10 @@ pub struct Chrome {
     store: Store,
     chat_width: Pixels,
     save_chat_width: Task<()>,
+    /// The editor's share of the room it splits with the preview, as the
+    /// user set it; see [`editor_share`] for the share it gets.
+    split_ratio: f32,
+    save_split_ratio: Task<()>,
     /// Shows the selected draft; reused across drafts.
     editor: Entity<Editor>,
     formatter: Entity<Formatter>,
@@ -212,16 +224,21 @@ impl Render for Chrome {
             self.chat_width,
             self.show_sidebar,
         );
-        let open_width = |slide: &Slide, other: &Slide| {
+        let editor_share = editor_share(self.split_ratio, split);
+        let [editor_grow, preview_grow] = split_grow(editor_share);
+        let open_width = |slide: &Slide, other: &Slide, share: f32| {
             let shared = if slide.shown {
                 other.shown
             } else {
                 other.was_open()
             };
-            if shared { split / 2. } else { split }
+            if shared { split * share } else { split }
         };
-        let editor_width = (editor_open < 1.).then(|| open_width(&editor_slide, &preview_slide));
-        let preview_width = (preview_open < 1.).then(|| open_width(&preview_slide, &editor_slide));
+        let editor_width =
+            (editor_open < 1.).then(|| open_width(&editor_slide, &preview_slide, editor_share));
+        let preview_width = (preview_open < 1.)
+            .then(|| open_width(&preview_slide, &editor_slide, 1. - editor_share));
+        let both_open = editor_width.is_none() && preview_width.is_none();
         let [sidebar_bar, editor_bar, preview_bar] = &self.scrollbars;
         let reviewing = self.review.is_some();
         let content = if self.session.drafts().current().is_some() {
@@ -229,12 +246,21 @@ impl Render for Chrome {
                 .flex_1()
                 .min_w_0()
                 .flex()
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<SplitResize>, _, cx| {
+                        let bounds = event.bounds;
+                        this.resize_split(
+                            drag_ratio(event.event.position.x - bounds.left(), bounds.size.width),
+                            cx,
+                        );
+                    }),
+                )
                 .when(reviewing, |row| {
                     row.child(self.review_columns(&palette, cx))
                 })
                 .when(!reviewing && editor_open > 0., |row| {
                     row.child(
-                        slot(editor_open, editor_width, false).child(
+                        slot(editor_open * editor_grow, false).child(
                             pane(palette.pane, &palette)
                                 .when_some(editor_width, |pane, width| pane.w(width).flex_none())
                                 .when(editor_width.is_none(), |pane| pane.flex_1())
@@ -256,7 +282,7 @@ impl Render for Chrome {
                 })
                 .when(!reviewing && preview_open > 0., |row| {
                     row.child(
-                        slot(preview_open, preview_width, true).child(
+                        slot(preview_open * preview_grow, true).child(
                             pane(palette.pane, &palette)
                                 .when_some(preview_width, |pane, width| pane.w(width).flex_none())
                                 .when(preview_width.is_none(), |pane| pane.flex_1())
@@ -275,7 +301,10 @@ impl Render for Chrome {
                                 .child(scrollbar(
                                     Source::Handle(self.preview_scroll.clone()),
                                     preview_bar,
-                                )),
+                                ))
+                                .when(editor_open > 0. && both_open, |pane| {
+                                    pane.child(split_resize_handle(&palette, cx))
+                                }),
                         ),
                     )
                 })
@@ -546,6 +575,7 @@ impl Chrome {
         });
 
         let chat_width = store.chat_width().map_or(CHAT_WIDTH, px);
+        let split_ratio = store.split_ratio().unwrap_or(0.5);
         let show_sidebar = !store.sidebar_hidden();
         let preview = new_preview(preview_selection.clone(), preview_scroll.clone(), cx);
         let before_preview = {
@@ -568,6 +598,8 @@ impl Chrome {
             store,
             chat_width,
             save_chat_width: Task::ready(()),
+            split_ratio,
+            save_split_ratio: Task::ready(()),
             editor,
             formatter,
             chat,
@@ -788,9 +820,24 @@ impl Chrome {
         self.chat_width = width;
         let store = self.store.clone();
         self.save_chat_width = cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(CHAT_WIDTH_SAVE_DELAY).await;
+            cx.background_executor().timer(RESIZE_SAVE_DELAY).await;
             if let Err(err) = store.set_chat_width(f32::from(width)) {
                 eprintln!("draftmux: saving the chat width: {err:#}");
+            }
+        });
+        cx.notify();
+    }
+
+    fn resize_split(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        if ratio == self.split_ratio {
+            return;
+        }
+        self.split_ratio = ratio;
+        let store = self.store.clone();
+        self.save_split_ratio = cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(RESIZE_SAVE_DELAY).await;
+            if let Err(err) = store.set_split_ratio(ratio) {
+                eprintln!("draftmux: saving the split ratio: {err:#}");
             }
         });
         cx.notify();
@@ -1930,6 +1977,60 @@ fn chat_resize_handle(cx: &mut Context<Chrome>) -> impl IntoElement {
         }))
 }
 
+/// The editor's share of the `split` room for the user's `ratio`, leaving
+/// each pane at least [`SPLIT_PANE_MIN_WIDTH`] when the room allows it.
+fn editor_share(ratio: f32, split: Pixels) -> f32 {
+    let min = (SPLIT_PANE_MIN_WIDTH / split).clamp(0., 0.5);
+    ratio.clamp(min, 1. - min)
+}
+
+/// The ratio for the divider dragged to `x` across `width`, snapped to an
+/// even split near the middle.
+fn drag_ratio(x: Pixels, width: Pixels) -> f32 {
+    if (x - width / 2.).abs() <= SPLIT_SNAP {
+        return 0.5;
+    }
+    editor_share(x / width, width)
+}
+
+/// Flex grow factors giving the editor `share` of the room and the preview
+/// the rest. Neither is below 1, since factors summing to under 1 would
+/// leave part of the room empty.
+fn split_grow(share: f32) -> [f32; 2] {
+    let unit = share.min(1. - share).max(f32::EPSILON);
+    [share / unit, (1. - share) / unit]
+}
+
+/// A strip over the divider between the editor and the preview that drags
+/// to resize them; a double click restores the even split.
+fn split_resize_handle(palette: &Palette, cx: &mut Context<Chrome>) -> impl IntoElement {
+    div()
+        .id("split-resize")
+        .group("split-resize")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(-3.))
+        .w(px(6.))
+        .cursor(CursorStyle::ResizeLeftRight)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(SplitResize, |_, _, _, cx| cx.new(|_| Empty))
+        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+            if event.click_count() == 2 {
+                this.resize_split(0.5, cx);
+            }
+        }))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(2.))
+                .w(px(2.))
+                .group_hover("split-resize", |style| style.bg(palette.line_strong)),
+        )
+}
+
 /// A pane's place in the window, sliding open or shut.
 #[derive(Clone)]
 struct Slide {
@@ -1984,19 +2085,16 @@ impl Slide {
     }
 }
 
-/// Holds the editor or the preview. While its pane slides, its share of
-/// the room follows how `open` it is, and it shows the pane, `width` wide,
-/// from its start or, with `end`, its end.
-fn slot(open: f32, width: Option<Pixels>, end: bool) -> gpui::Div {
+/// Holds the editor or the preview, taking the room in proportion to
+/// `grow`, which follows how open its pane is while it slides. It shows
+/// the pane from its start or, with `end`, its end, so a pane wider than
+/// the slot is clipped on the side it slides out from.
+fn slot(grow: f32, end: bool) -> gpui::Div {
     let mut slot = div().h_full().min_w_0().flex().overflow_hidden();
-    if width.is_some() {
-        let style = slot.style();
-        style.flex_grow = Some(open);
-        style.flex_shrink = Some(1.);
-        style.flex_basis = Some(gpui::relative(0.).into());
-    } else {
-        slot = slot.flex_1();
-    }
+    let style = slot.style();
+    style.flex_grow = Some(grow);
+    style.flex_shrink = Some(1.);
+    style.flex_basis = Some(gpui::relative(0.).into());
     slot.when(end, |slot| slot.justify_end())
 }
 
@@ -2056,6 +2154,32 @@ mod tests {
                 CHAT_MIN_WIDTH
             );
         }
+    }
+
+    #[test]
+    fn editor_share_keeps_both_panes_at_their_minimum() {
+        assert_eq!(editor_share(0.5, px(960.)), 0.5);
+        assert_eq!(editor_share(0.7, px(960.)), 0.7);
+        assert_eq!(editor_share(0.95, px(960.)), 0.75);
+        assert_eq!(editor_share(0.05, px(960.)), 0.25);
+        // Too narrow for both minimums: an even split.
+        assert_eq!(editor_share(0.8, px(400.)), 0.5);
+    }
+
+    #[test]
+    fn drag_ratio_snaps_to_an_even_split_near_the_middle() {
+        assert_eq!(drag_ratio(px(490.), px(960.)), 0.5);
+        assert_eq!(drag_ratio(px(468.), px(960.)), 0.5);
+        assert_eq!(drag_ratio(px(528.), px(960.)), 0.55);
+        assert_eq!(drag_ratio(px(950.), px(960.)), 0.75);
+        assert_eq!(drag_ratio(px(-50.), px(960.)), 0.25);
+    }
+
+    #[test]
+    fn split_grow_fills_the_room_in_proportion() {
+        assert_eq!(split_grow(0.5), [1., 1.]);
+        assert_eq!(split_grow(0.75), [3., 1.]);
+        assert_eq!(split_grow(0.25), [1., 3.]);
     }
 
     #[test]

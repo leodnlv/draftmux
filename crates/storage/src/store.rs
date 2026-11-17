@@ -22,6 +22,7 @@ const SESSION_DIR: &str = "session";
 /// [`Store::scan`] never takes it for a draft.
 const SAMPLE_MARKER: &str = ".sample-created";
 const CHAT_WIDTH: &str = ".chat-width";
+const SPLIT_RATIO: &str = ".split-ratio";
 const SIDEBAR_HIDDEN: &str = ".sidebar-hidden";
 const TEXT_ZOOM: &str = ".text-zoom";
 const SELECTION_ADDED: &str = ".selection-added";
@@ -386,6 +387,22 @@ impl Store {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("creating {}", self.root.display()))?;
         atomic::write(&self.root.join(CHAT_WIDTH), width.to_string().as_bytes())
+    }
+
+    /// The editor's share of the room it splits with the preview, as the
+    /// user last left it, if it was ever resized. Always between 0 and 1.
+    pub fn split_ratio(&self) -> Option<f32> {
+        let text = std::fs::read_to_string(self.root.join(SPLIT_RATIO)).ok()?;
+        text.trim()
+            .parse()
+            .ok()
+            .filter(|ratio: &f32| *ratio > 0. && *ratio < 1.)
+    }
+
+    pub fn set_split_ratio(&self, ratio: f32) -> Result<()> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        atomic::write(&self.root.join(SPLIT_RATIO), ratio.to_string().as_bytes())
     }
 
     /// The factor the user last scaled text by, if it was ever changed.
@@ -1053,6 +1070,20 @@ mod tests {
         assert_eq!(store.chat_width(), None);
         store.set_chat_width(412.5).unwrap();
         assert_eq!(store.chat_width(), Some(412.5));
+        assert!(store.scan().unwrap().drafts.is_empty());
+    }
+
+    #[test]
+    fn split_ratio_round_trips_and_is_not_a_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        assert_eq!(store.split_ratio(), None);
+        store.set_split_ratio(0.625).unwrap();
+        assert_eq!(store.split_ratio(), Some(0.625));
+        for invalid in ["1", "0", "-0.5", "NaN", "wide"] {
+            std::fs::write(root.path().join(SPLIT_RATIO), invalid).unwrap();
+            assert_eq!(store.split_ratio(), None, "{invalid}");
+        }
         assert!(store.scan().unwrap().drafts.is_empty());
     }
 
