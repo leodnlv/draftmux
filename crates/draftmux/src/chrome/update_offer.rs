@@ -1,10 +1,12 @@
 //! The toolbar's update button and the card it opens with what changed in
 //! the offered release and a way to take it.
 
+use std::time::Duration;
+
 use gpui::{
-    Anchor, App, Context, FocusHandle, FontWeight, IntoElement, KeyBinding, MouseButton,
-    ScrollHandle, SharedString, Window, anchored, deferred, div, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    Anchor, Animation, AnimationExt as _, App, Context, ElementId, FocusHandle, FontWeight,
+    IntoElement, KeyBinding, MouseButton, ScrollHandle, SharedString, Window, anchored, deferred,
+    div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use markup::Document;
 use semver::Version;
@@ -15,6 +17,14 @@ use crate::theme::{self, Palette, hex};
 use crate::update::{self, CURRENT_VERSION, Release, Updater};
 
 gpui::actions!(update_card, [CloseUpdateCard]);
+
+/// How long the update button takes to appear, and each of the two rings it
+/// sends out after that.
+const BUTTON_ENTER: f32 = 0.22;
+const BUTTON_RING: f32 = 1.4;
+const BUTTON_RINGS: f32 = 2.;
+/// The widest the ring spreads, in pixels.
+const RING_SPREAD: f32 = 8.;
 
 pub(super) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(
@@ -35,6 +45,25 @@ pub(super) struct UpdateCard {
 }
 
 impl Chrome {
+    /// Opens the card of the offered release, if there is one, taking the
+    /// focus so Escape closes it.
+    pub(super) fn open_update_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((release, _)) = offer(cx) else {
+            return;
+        };
+        let focus = cx.focus_handle();
+        let previous = window.focused(cx);
+        focus.focus(window, cx);
+        self.update_card = Some(UpdateCard {
+            notes: release.notes.as_deref().map(markup::github::parse_file),
+            version: release.version,
+            scroll: ScrollHandle::new(),
+            focus,
+            previous,
+        });
+        cx.notify();
+    }
+
     fn close_update_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(card) = self.update_card.take() else {
             return;
@@ -62,6 +91,9 @@ impl Chrome {
             "Update Available"
         };
         let tooltip: SharedString = format!("What’s New in Draftmux {}", release.version).into();
+        // Keyed by the offer, so each new offer is announced once.
+        let pulse = ElementId::Name(format!("update-{}-{ready}", release.version).into());
+        let ring = palette.accent;
         let card = self
             .update_card
             .as_ref()
@@ -92,24 +124,41 @@ impl Chrome {
                     .tooltip(crate::tooltip::text(tooltip))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     // Only opens: the mouse-down already closed an open card.
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
-                        let focus = cx.focus_handle();
-                        let previous = window.focused(cx);
-                        focus.focus(window, cx);
-                        this.update_card = Some(UpdateCard {
-                            version: release.version.clone(),
-                            notes: release.notes.as_deref().map(markup::github::parse_file),
-                            scroll: ScrollHandle::new(),
-                            focus,
-                            previous,
-                        });
-                        cx.notify();
+                        this.open_update_card(window, cx);
                     }))
-                    .child(label),
+                    .child(label)
+                    .with_animation(
+                        pulse,
+                        Animation::new(Duration::from_secs_f32(
+                            BUTTON_ENTER + BUTTON_RING * BUTTON_RINGS,
+                        )),
+                        move |button, delta| {
+                            let elapsed = delta * (BUTTON_ENTER + BUTTON_RING * BUTTON_RINGS);
+                            let enter = ease_out((elapsed / BUTTON_ENTER).min(1.));
+                            let rings = (elapsed - BUTTON_ENTER).max(0.) / BUTTON_RING;
+                            let button = button.opacity(enter);
+                            if rings >= BUTTON_RINGS {
+                                return button;
+                            }
+                            let spread = ease_out(rings.fract());
+                            button.shadow(vec![shadow(
+                                ring.opacity(0.45 * (1. - spread)),
+                                0.,
+                                0.,
+                                RING_SPREAD * spread,
+                            )])
+                        },
+                    ),
             ),
         )
     }
+}
+
+/// Cubic ease-out over `t` in 0..=1.
+fn ease_out(t: f32) -> f32 {
+    1. - (1. - t).powi(3)
 }
 
 /// The release the toolbar offers, and whether it is installed and only
@@ -265,11 +314,7 @@ fn update_card(
                             this.close_update_card(window, cx);
                             match &page {
                                 Some(page) => cx.open_url(page),
-                                None => {
-                                    if this.flush_before_exit(cx) {
-                                        cx.restart();
-                                    }
-                                }
+                                None => this.restart_to_update(cx),
                             }
                         }))
                         .child(action),

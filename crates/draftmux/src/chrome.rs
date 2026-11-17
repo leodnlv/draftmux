@@ -495,14 +495,23 @@ impl Chrome {
                 async {}
             }),
             cx.observe(&Updater::global(cx), |_, _, cx| cx.notify()),
-            cx.subscribe(
+            cx.subscribe_in(
                 &Updater::global(cx),
-                |this, _, notice: &update::Notice, cx| {
-                    if notice.error {
-                        this.show_error(notice.text.clone(), cx);
-                    } else {
-                        this.show_toast(notice.text.clone(), cx);
+                window,
+                |this, _, event: &update::Event, window, cx| match event {
+                    update::Event::Notice { text, error: true } => {
+                        this.show_error(text.clone(), cx);
                     }
+                    update::Event::Notice { text, error: false } => {
+                        this.show_toast(text.clone(), cx);
+                    }
+                    update::Event::ShowOffer => {
+                        // The card answers the check; "Downloading…" is over.
+                        this.toast = None;
+                        window.activate_window();
+                        this.open_update_card(window, cx);
+                    }
+                    update::Event::Restart => this.restart_to_update(cx),
                 },
             ),
         ];
@@ -1337,6 +1346,13 @@ impl Chrome {
             })
             .ok();
         });
+    }
+
+    /// Saves the drafts and restarts into the installed update.
+    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        if self.flush_before_exit(cx) {
+            cx.restart();
+        }
     }
 
     /// Saves before the window closes or the app quits. On failure, shows the

@@ -1,10 +1,13 @@
 //! Automatic updates of a released Draftmux from the GitHub releases of
 //! raine/draftmux. A Developer ID signed `Draftmux.app`, or a Linux app tree
-//! from a release tarball, checks for a newer release once a day, installs
-//! it in the background by swapping the app in place and offers to restart
-//! into it. A Windows release checks as often and offers the download. Development builds never check on their own; Check for Updates
-//! still reports a newer release to them. The toolbar offers a newer release
-//! with what changed in it.
+//! from a release tarball, checks for a newer release when it starts and
+//! then once a day, installs it in the background by swapping the app in
+//! place and offers to restart into it. A Homebrew cask install updates
+//! itself too: the cask declares `auto_updates`. A Windows release checks as
+//! often and offers the download. Development builds never check on their
+//! own; Check for Updates still reports a newer release to them. The toolbar
+//! offers a newer release with what changed in it, and Settings shows where
+//! updating stands.
 
 mod cache;
 #[cfg_attr(windows, path = "update/install_windows.rs")]
@@ -12,7 +15,7 @@ mod install;
 mod notes;
 mod release;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
 use semver::Version;
@@ -26,7 +29,8 @@ const BUNDLE_ID: &str = "fi.zendit.Draftmux";
 /// Disables automatic checks when set to `1`, `true` or `yes`.
 const NO_CHECK_VAR: &str = "DRAFTMUX_NO_UPDATE_CHECK";
 /// How long after launch the first automatic check waits, and how often a
-/// running app looks again whether one is due.
+/// running app looks again whether one is due. The first check runs however
+/// recently the last one did; later ones once a day.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 const RECHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -87,6 +91,10 @@ impl Ineligible {
 pub enum Status {
     Idle,
     Checking,
+    /// The last check found no newer release.
+    Current,
+    /// A check asked for in Settings failed, with why.
+    Failed(String),
     Installing(Version),
     /// The new version is installed and runs after a restart.
     Ready(Release),
@@ -97,14 +105,40 @@ pub enum Status {
     },
 }
 
-/// A message for the user about a check they asked for.
-pub struct Notice {
-    pub text: SharedString,
-    pub error: bool,
+/// Where a check was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The first automatic check after launch.
+    Launch,
+    /// A later automatic check, which runs only when one is due.
+    Scheduled,
+    /// Check for Updates in the app menu: the main window reports the
+    /// result.
+    Menu,
+    /// Check Now in Settings, which shows the result itself.
+    Settings,
+}
+
+impl Origin {
+    fn manual(self) -> bool {
+        matches!(self, Self::Menu | Self::Settings)
+    }
+}
+
+/// What the main window does for the updater.
+pub enum Event {
+    /// Show a message about a check from the menu.
+    Notice { text: SharedString, error: bool },
+    /// Open the toolbar's update card on the offered release.
+    ShowOffer,
+    /// Save and restart into the installed update.
+    Restart,
 }
 
 pub struct Updater {
     pub status: Status,
+    /// When a check last reached GitHub.
+    pub checked_at: Option<SystemTime>,
     _poll: Task<()>,
 }
 
@@ -112,24 +146,28 @@ struct GlobalUpdater(Entity<Updater>);
 
 impl Global for GlobalUpdater {}
 
-impl EventEmitter<Notice> for Updater {}
+impl EventEmitter<Event> for Updater {}
 
 pub fn init(cx: &mut App) {
     let entity = cx.new(|cx| Updater {
         status: dev_offer().unwrap_or(Status::Idle),
+        checked_at: cache::last_checked(),
         _poll: cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FIRST_CHECK_DELAY).await;
+            let mut origin = Origin::Launch;
             loop {
-                let Ok(()) = this.update(cx, |this: &mut Updater, cx| this.check(false, cx)) else {
+                let Ok(()) = this.update(cx, |this: &mut Updater, cx| this.check(origin, cx))
+                else {
                     return;
                 };
+                origin = Origin::Scheduled;
                 cx.background_executor().timer(RECHECK_INTERVAL).await;
             }
         }),
     });
     cx.set_global(GlobalUpdater(entity));
     cx.on_action(|_: &CheckForUpdates, cx| {
-        Updater::global(cx).update(cx, |updater, cx| updater.check(true, cx));
+        Updater::global(cx).update(cx, |updater, cx| updater.check(Origin::Menu, cx));
     });
 }
 
@@ -139,21 +177,18 @@ impl Updater {
     }
 
     /// Looks for a newer release and installs it when this copy can. An
-    /// automatic check runs only when one is due, only for an installable
-    /// app and only while checks are on; it reports nothing but its result.
-    fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
+    /// automatic check runs only for an installable app and only while
+    /// checks are on, and after the first one only when one is due; it
+    /// reports nothing but its result. A check from the menu ends in a
+    /// message or the update card; one from Settings only in `status`.
+    pub fn check(&mut self, origin: Origin, cx: &mut Context<Self>) {
+        let manual = origin.manual();
         match &self.status {
-            Status::Idle | Status::Blocked { .. } => {}
+            Status::Idle | Status::Current | Status::Failed(_) | Status::Blocked { .. } => {}
             Status::Checking | Status::Installing(_) => return,
-            Status::Ready(release) => {
-                if manual {
-                    cx.emit(notice(
-                        format!(
-                            "Draftmux {} is installed. Restart to use it.",
-                            release.version
-                        ),
-                        false,
-                    ));
+            Status::Ready(_) => {
+                if origin == Origin::Menu {
+                    cx.emit(Event::ShowOffer);
                 }
                 return;
             }
@@ -166,7 +201,7 @@ impl Updater {
         let task = cx.background_spawn(async move {
             let eligibility = install::installation();
             let built_here = matches!(eligibility, Err(Ineligible::Development));
-            if !manual && (built_here || !cache::check_due()) {
+            if !manual && (built_here || (origin == Origin::Scheduled && !cache::check_due())) {
                 return Ok(None);
             }
             let release = cache::check()?.map(|mut release| {
@@ -182,10 +217,14 @@ impl Updater {
             let result = task.await;
             this.update(cx, |this, cx| {
                 this.status = previous;
+                if let Ok(Some(_)) = &result {
+                    this.checked_at = Some(SystemTime::now());
+                }
                 match result {
                     Ok(None) => {}
                     Ok(Some((None, _))) => {
-                        if manual {
+                        this.status = Status::Current;
+                        if origin == Origin::Menu {
                             cx.emit(notice(
                                 format!("Draftmux {CURRENT_VERSION} is the latest version."),
                                 false,
@@ -193,22 +232,19 @@ impl Updater {
                         }
                     }
                     Ok(Some((Some(release), Ok(installation)))) => {
-                        this.install(release, installation, manual, cx);
+                        this.install(release, installation, origin, cx);
                     }
                     Ok(Some((Some(release), Err(reason)))) => {
-                        let guidance = reason.guidance(&release.version);
-                        if manual {
-                            cx.emit(notice(guidance.clone(), false));
-                        }
                         this.status = Status::Blocked {
+                            reason: reason.guidance(&release.version),
                             release,
-                            reason: guidance,
                         };
+                        if origin == Origin::Menu {
+                            cx.emit(Event::ShowOffer);
+                        }
                     }
                     Err(err) => {
-                        if manual {
-                            cx.emit(notice(format!("Couldn't check for updates: {err:#}"), true));
-                        }
+                        this.failed(format!("Couldn't check for updates: {err:#}"), origin, cx)
                     }
                 }
                 cx.notify();
@@ -218,16 +254,34 @@ impl Updater {
         .detach();
     }
 
+    /// Reports a failed check or install where it was asked for; an
+    /// automatic one tries again later without a word.
+    fn failed(&mut self, message: String, origin: Origin, cx: &mut Context<Self>) {
+        match origin {
+            Origin::Menu => cx.emit(notice(message, true)),
+            Origin::Settings => self.status = Status::Failed(message),
+            Origin::Launch | Origin::Scheduled => {}
+        }
+    }
+
+    /// Asks the main window to save the drafts and restart into the
+    /// installed update.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Ready(_)) {
+            cx.emit(Event::Restart);
+        }
+    }
+
     fn install(
         &mut self,
         release: Release,
         installation: Installation,
-        manual: bool,
+        origin: Origin,
         cx: &mut Context<Self>,
     ) {
         let version = release.version.clone();
         let ready = release.clone();
-        if manual {
+        if origin == Origin::Menu {
             cx.emit(notice(format!("Downloading Draftmux {version}…"), false));
         }
         self.status = Status::Installing(version.clone());
@@ -244,15 +298,17 @@ impl Updater {
                             cx.set_restart_path(exe);
                         }
                         this.status = Status::Ready(ready);
+                        if origin == Origin::Menu {
+                            cx.emit(Event::ShowOffer);
+                        }
                     }
                     Err(err) => {
                         this.status = Status::Idle;
-                        if manual {
-                            cx.emit(notice(
-                                format!("Couldn't install Draftmux {version}: {err:#}"),
-                                true,
-                            ));
-                        }
+                        this.failed(
+                            format!("Couldn't install Draftmux {version}: {err:#}"),
+                            origin,
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -311,8 +367,8 @@ fn env_disables(value: Option<&str>) -> bool {
     })
 }
 
-fn notice(text: String, error: bool) -> Notice {
-    Notice {
+fn notice(text: String, error: bool) -> Event {
+    Event::Notice {
         text: text.into(),
         error,
     }

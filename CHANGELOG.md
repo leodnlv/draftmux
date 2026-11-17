@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- New: Settings shows where updating stands: when Draftmux last checked, a
+  check or download in progress, an installed update with Restart to Update,
+  or why this copy can't update itself.
+- Fix: Draftmux checks for updates every time it starts, then once a day.
+  Before, a new release could go unnoticed for up to a day.
+- Fix: Check for Updates in the app menu opens the release notes with Restart
+  to Update once the new version is installed, instead of a message that
+  disappeared before it could be read. The toolbar's update button pulses when
+  it appears.
+
 ## v0.3.1 (2026-11-16)
 
 - Fix: Switching to another app no longer closes the selection popover or

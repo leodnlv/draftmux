@@ -33,6 +33,7 @@ use crate::model_picker::{ModelPicker, PickerEvent};
 use crate::profiles::{ModelList, ProfileCatalog};
 use crate::scrollbar::{ScrollbarState, scrollbar};
 use crate::theme::{self, MONO, Palette};
+use crate::update::{self, Origin, Updater};
 use widgets::*;
 
 actions!(settings, [OpenSettings, CloseSettings]);
@@ -247,6 +248,7 @@ impl SettingsWindow {
             cx.observe_in(&settings, window, |this, _, window, cx| {
                 this.settings_changed(window, cx);
             }),
+            cx.observe(&Updater::global(cx), |_, _, cx| cx.notify()),
             cx.observe(&catalog, |this, _, cx| {
                 this.refresh_picker_models(cx);
                 cx.notify();
@@ -1854,8 +1856,8 @@ impl SettingsWindow {
                         "Check for updates automatically",
                         vec![description(
                             c,
-                            "Once a day, from GitHub. A new version installs in the background \
-                         and runs when you restart Draftmux",
+                            "When Draftmux starts and once a day, from GitHub. A new version \
+                             installs in the background and runs when you restart Draftmux",
                         )],
                         switch(
                             c,
@@ -1871,14 +1873,7 @@ impl SettingsWindow {
                         ),
                     )
                     .into_any_element(),
-                    row(
-                        format!("Draftmux {}", crate::update::CURRENT_VERSION),
-                        Vec::new(),
-                        push_button(c, "check-now", "Check Now", |_, window, cx| {
-                            window.dispatch_action(Box::new(crate::update::CheckForUpdates), cx)
-                        }),
-                    )
-                    .into_any_element(),
+                    update_row(c, cx),
                 ],
             )
             .into_any_element(),
@@ -2089,5 +2084,154 @@ impl Render for SettingsWindow {
             Box::new(CloseSettings),
             "Settings",
         )
+    }
+}
+
+/// The running version and where updating stands, with the action it waits
+/// for: Check Now, Restart to Update or Open Release Page.
+fn update_row(c: &Colors, cx: &mut Context<SettingsWindow>) -> AnyElement {
+    let updater = Updater::global(cx);
+    let (status, checked_at) = {
+        let updater = updater.read(cx);
+        (updater.status.clone(), updater.checked_at)
+    };
+    let checked = checked_at.map(|at| checked_text(at.into(), chrono::Local::now()));
+    let line = |mark: Option<AnyElement>, text: SharedString, color| {
+        div()
+            .mt(px(2.))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .text_size(px(11.5))
+            .text_color(color)
+            .children(mark)
+            .child(text)
+            .into_any_element()
+    };
+    let glyph = |glyph: &'static str, color| {
+        div()
+            .text_size(px(9.))
+            .text_color(color)
+            .child(glyph)
+            .into_any_element()
+    };
+    let spinner = || crate::chat::spinner(c).into_any_element();
+    let check_now = || {
+        push_button(c, "check-now", "Check Now", move |_, _, cx| {
+            Updater::global(cx).update(cx, |updater, cx| updater.check(Origin::Settings, cx));
+        })
+        .into_any_element()
+    };
+    let (description, control) = match status {
+        update::Status::Idle => (
+            line(
+                None,
+                match &checked {
+                    Some(at) => format!("Last checked {at}").into(),
+                    None => "Not checked yet".into(),
+                },
+                c.faint,
+            ),
+            check_now(),
+        ),
+        update::Status::Checking => (
+            line(Some(spinner()), "Checking for updates…".into(), c.muted),
+            disabled_push_button(c, "check-now", "Check Now").into_any_element(),
+        ),
+        update::Status::Installing(version) => (
+            line(
+                Some(spinner()),
+                format!("Downloading Draftmux {version}…").into(),
+                c.muted,
+            ),
+            disabled_push_button(c, "check-now", "Check Now").into_any_element(),
+        ),
+        update::Status::Current => (
+            line(
+                Some(glyph("✓", c.ok)),
+                match &checked {
+                    Some(at) => format!("Draftmux is up to date · checked {at}").into(),
+                    None => "Draftmux is up to date".into(),
+                },
+                c.muted,
+            ),
+            check_now(),
+        ),
+        update::Status::Failed(message) => (line(None, message.into(), c.danger), check_now()),
+        update::Status::Ready(release) => (
+            div()
+                .mt(px(2.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(11.5))
+                .text_color(c.text)
+                .child(glyph("●", c.accent))
+                .child(format!(
+                    "Draftmux {} is installed. Restart to switch to it.",
+                    release.version
+                ))
+                .child(
+                    div()
+                        .id("whats-new")
+                        .text_color(c.accent)
+                        .hover(|link| link.underline())
+                        .child("What’s New")
+                        .on_click(|_, _, cx| {
+                            Updater::global(cx)
+                                .update(cx, |_, cx| cx.emit(update::Event::ShowOffer));
+                        }),
+                )
+                .into_any_element(),
+            primary_button(c, "restart-to-update", "Restart to Update", |_, _, cx| {
+                Updater::global(cx).update(cx, |updater, cx| updater.restart(cx));
+            })
+            .into_any_element(),
+        ),
+        update::Status::Blocked { release, reason } => (
+            line(Some(glyph("▲", c.warning)), reason.into(), c.muted),
+            push_button(c, "release-page", "Open Release Page", move |_, _, cx| {
+                cx.open_url(&release.page);
+            })
+            .into_any_element(),
+        ),
+    };
+    row(
+        format!("Draftmux {}", update::CURRENT_VERSION),
+        vec![description],
+        control,
+    )
+    .into_any_element()
+}
+
+/// When a check last reached GitHub, for "Last checked …": "today at 14:02",
+/// "yesterday at 9:15" or "Nov 15 at 14:02".
+fn checked_text(
+    at: chrono::DateTime<chrono::Local>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let time = at.format("%H:%M");
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => format!("today at {time}"),
+        1 => format!("yesterday at {time}"),
+        _ => format!("{} at {time}", at.format("%b %-d")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, TimeZone as _};
+
+    use super::checked_text;
+
+    #[test]
+    fn checked_text_names_the_day() {
+        let now = Local.with_ymd_and_hms(2026, 11, 17, 21, 30, 0).unwrap();
+        let at = |d, h, m| Local.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
+        assert_eq!(checked_text(at(17, 9, 5), now), "today at 09:05");
+        assert_eq!(checked_text(at(16, 23, 59), now), "yesterday at 23:59");
+        assert_eq!(checked_text(at(15, 14, 2), now), "Nov 15 at 14:02");
     }
 }

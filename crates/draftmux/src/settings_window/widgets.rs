@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, ElementId, FontWeight, Hsla, IntoElement, SharedString,
-    Window, div, prelude::*, px, svg,
+    Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg,
 };
 
 use crate::assets::{RESET_ICON, UPDOWN_ICON};
@@ -271,6 +271,66 @@ pub fn push_button(
         .shadow(control_shadow(c))
         .whitespace_nowrap()
         .active(move |button| button.bg(pressed))
+        .child(text.into())
+        .on_click(on_click)
+}
+
+/// A push button that can't be pressed now.
+pub fn disabled_push_button(
+    c: &Colors,
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(22.))
+        .px(px(9.))
+        .rounded(px(5.5))
+        .bg(c.control)
+        .shadow(control_shadow(c))
+        .whitespace_nowrap()
+        .opacity(0.5)
+        .child(text.into())
+}
+
+/// The push button of the action a row is waiting for, such as "Restart to
+/// Update".
+pub fn primary_button(
+    c: &Colors,
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (top, bottom) = (c.primary_top, c.primary_bottom);
+    let (hover_top, hover_bottom) = (c.primary_hover_top, c.primary_hover_bottom);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(22.))
+        .px(px(9.))
+        .rounded(px(5.5))
+        .text_color(c.on_accent)
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(top, 0.),
+            linear_color_stop(bottom, 1.),
+        ))
+        .shadow(vec![
+            shadow(c.primary_ring, 0., 0., 0.5),
+            shadow(c.primary_drop, 1., 1.5, 0.),
+        ])
+        .whitespace_nowrap()
+        .hover(move |button| {
+            button.bg(linear_gradient(
+                180.,
+                linear_color_stop(hover_top, 0.),
+                linear_color_stop(hover_bottom, 1.),
+            ))
+        })
+        .active(|button| button.opacity(0.85))
         .child(text.into())
         .on_click(on_click)
 }

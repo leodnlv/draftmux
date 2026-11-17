@@ -1,10 +1,10 @@
-//! When the next automatic check is due, in `update.json` in the user's
-//! cache directory. Checks that fail back off
+//! When the last check succeeded and when the next automatic one is due, in
+//! `update.json` in the user's cache directory. Checks that fail back off
 //! from minutes to a day, so an offline app doesn't ask GitHub every hour.
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,19 @@ const FAILURE_BACKOFF: [u64; 4] = [15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60];
 struct UpdateCache {
     next_check_after: Option<u64>,
     failure_count: u32,
+    /// When a check last reached GitHub.
+    checked_at: Option<u64>,
 }
 
 pub fn check_due() -> bool {
     check_due_at(&load(), now())
+}
+
+/// When a check last reached GitHub.
+pub fn last_checked() -> Option<SystemTime> {
+    load()
+        .checked_at
+        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 /// Fetches the latest release and returns it when it's newer than this
@@ -35,6 +44,7 @@ pub fn check() -> Result<Option<Release>> {
         Ok(_) => {
             cache.next_check_after = Some(now + SUCCESS_INTERVAL);
             cache.failure_count = 0;
+            cache.checked_at = Some(now);
         }
         Err(_) => {
             cache.failure_count = cache.failure_count.saturating_add(1);
