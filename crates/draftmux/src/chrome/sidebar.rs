@@ -15,7 +15,9 @@ use gpui::{
 };
 
 use super::{Chrome, shadow, sidebar_column};
-use crate::assets::{ARCHIVE_ICON, CHEVRON_ICON, RESET_ICON, TOAST_DONE_ICON, TOAST_ERROR_ICON};
+use crate::assets::{
+    ARCHIVE_ICON, CHEVRON_ICON, HELP_ICON, RESET_ICON, TOAST_DONE_ICON, TOAST_ERROR_ICON,
+};
 use crate::drafts::{Row, relative_time, tilde};
 use crate::menu::{MenuItem, menu_panel};
 use crate::scrollbar::{ScrollbarState, Source, scrollbar};
@@ -257,6 +259,7 @@ impl Chrome {
                     )
                     .child(scrollbar(Source::Handle(self.sidebar_scroll.clone()), bar)),
             )
+            .child(help_button(&palette))
             .children(self.row_menu(&palette, cx))
     }
 
@@ -990,6 +993,35 @@ fn sample_badge(palette: &theme::Palette) -> impl IntoElement {
         .line_height(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
         .child("Sample")
+}
+
+/// A faint button in the sidebar's bottom corner that opens Help.
+fn help_button(palette: &theme::Palette) -> gpui::Div {
+    div().flex_none().px(px(8.)).pt(px(4.)).pb(px(8.)).child(
+        div()
+            .id("open-help")
+            .group("open-help")
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .hover(|style| style.bg(palette.hover))
+            .active(|style| style.opacity(0.8))
+            .tooltip(crate::tooltip::text(editor::by_platform!(
+                "Help (⌘/)",
+                "Help (Ctrl+/)"
+            )))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| crate::help_window::open(cx))
+            .child(
+                svg()
+                    .path(HELP_ICON)
+                    .size(px(16.))
+                    .text_color(palette.faint)
+                    .group_hover("open-help", |style| style.text_color(palette.muted)),
+            ),
+    )
 }
 
 #[cfg(test)]

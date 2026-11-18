@@ -31,6 +31,7 @@ pub const CLOSE_ICON: &str = "icons/close.svg";
 pub const TOAST_DONE_ICON: &str = "icons/toast-done.svg";
 pub const TOAST_ERROR_ICON: &str = "icons/toast-error.svg";
 pub const GEAR_ICON: &str = "icons/gear.svg";
+pub const HELP_ICON: &str = "icons/help.svg";
 pub const SPARK_ICON: &str = "icons/spark.svg";
 pub const GLOBE_ICON: &str = "icons/globe.svg";
 pub const FOLDER_ICON: &str = "icons/folder.svg";
@@ -129,6 +130,7 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/toast-error.svg"),
     ),
     (GEAR_ICON, include_bytes!("../assets/icons/gear.svg")),
+    (HELP_ICON, include_bytes!("../assets/icons/help.svg")),
     (SPARK_ICON, include_bytes!("../assets/icons/spark.svg")),
     (GLOBE_ICON, include_bytes!("../assets/icons/globe.svg")),
     (FOLDER_ICON, include_bytes!("../assets/icons/folder.svg")),

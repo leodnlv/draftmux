@@ -12,8 +12,8 @@
 - New: `⌘↩` continues the sentence at the cursor, shown as faint text you take
   with `⇥`, word by word with `⌥→`, or by typing it. `⌘⇧↩` offers several
   continuations to pick from instead.
-- New: Help lists the keyboard shortcuts. Open it with `⌘/`, from the Help
-  menu, or with the Help button on Linux and Windows.
+- New: Help lists the keyboard shortcuts. Open it with `⌘/`, the `?` at the
+  bottom of the sidebar, or the Help menu.
 
 ## v0.3.2 (2026-11-17)
 
