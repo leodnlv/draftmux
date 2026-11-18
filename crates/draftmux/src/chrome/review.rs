@@ -614,13 +614,15 @@ impl Chrome {
                             .px(px(4.))
                             .flex()
                             .items_center()
-                            .justify_center()
                             .rounded(px(8.))
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(palette.on_accent)
                             .bg(palette.accent)
-                            .child(count.to_string()),
+                            // Text alignment centers the number exactly;
+                            // flex centering rounds its offset to whole
+                            // pixels.
+                            .child(div().flex_1().text_center().child(count.to_string())),
                     )
                 })
                 .child(if count == 1 { "Change" } else { "Changes" })
