@@ -463,15 +463,20 @@ impl Element for EditorElement {
             }
             if let Some((offset, since)) = waiting {
                 let caret = layout.caret_bounds(offset, Affinity::Downstream);
-                let diameter = px(7.);
-                let origin = caret.origin + point(px(6.), (caret.size.height - diameter) / 2.);
-                window.paint_quad(
-                    fill(
-                        Bounds::new(origin, size(diameter, diameter)),
-                        style.caret.opacity(pulse(since)),
-                    )
-                    .corner_radii(diameter / 2.),
-                );
+                let diameter = px(4.);
+                let top = caret.origin.y + (caret.size.height - diameter) / 2.;
+                for dot in 0..3 {
+                    let lift = wave(since, dot);
+                    let x = caret.origin.x + px(6.) + (diameter + px(3.)) * dot as f32;
+                    let origin = point(x, top - px(2.) * lift);
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(origin, size(diameter, diameter)),
+                            style.faint.opacity(0.3 + 0.7 * lift),
+                        )
+                        .corner_radii(diameter / 2.),
+                    );
+                }
                 window.request_animation_frame();
             }
         });
@@ -608,13 +613,21 @@ fn splice_run(runs: Vec<TextRun>, at: usize, len: usize, style: &EditorStyle) ->
     spliced
 }
 
-/// How long one pulse of the waiting ghost's dot takes.
-const PULSE: f32 = 0.9;
+/// How long one wave across the waiting ghost's dots takes, in seconds.
+const WAVE: f32 = 1.2;
+/// How far apart the dots' waves start, in seconds.
+const WAVE_STAGGER: f32 = 0.16;
+/// The share of each wave a dot spends rising and falling, resting after.
+const WAVE_RISE: f32 = 0.6;
 
-/// The waiting dot's opacity, pulsing between faint and full.
-fn pulse(since: std::time::Instant) -> f32 {
-    let phase = since.elapsed().as_secs_f32() / PULSE * std::f32::consts::TAU;
-    0.25 + 0.75 * (0.5 - 0.5 * phase.cos())
+/// How far waiting dot `dot` has risen, from 0 at rest to 1 at the top.
+fn wave(since: std::time::Instant, dot: usize) -> f32 {
+    let t = (since.elapsed().as_secs_f32() - WAVE_STAGGER * dot as f32).rem_euclid(WAVE) / WAVE;
+    if t < WAVE_RISE {
+        (t / WAVE_RISE * std::f32::consts::PI).sin()
+    } else {
+        0.
+    }
 }
 
 /// The size of `editor`'s text and padding: as wide as its longest line,

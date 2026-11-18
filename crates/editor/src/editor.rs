@@ -249,7 +249,7 @@ pub enum EditorEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ghost {
     pub offset: usize,
-    /// Empty while waiting for text, shown as a pulsing dot.
+    /// Empty while waiting for text, shown as three rising dots.
     pub text: String,
 }
 
@@ -362,7 +362,7 @@ pub struct Editor {
     /// Text the next layout scrolls into view.
     pub(crate) reveal: Option<Range<usize>>,
     pub(crate) ghost: Option<Ghost>,
-    /// When the ghost started waiting, for the dot's pulse.
+    /// When the ghost started waiting, for the dots' wave.
     pub(crate) ghost_waiting: Option<Instant>,
     /// Set while text moves from the ghost into the buffer, so that edit
     /// keeps the rest of the ghost.
