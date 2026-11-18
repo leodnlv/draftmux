@@ -40,6 +40,8 @@ Status: early release; expect rough edges.
 - **Edit files.** `draftmux README.md` opens a file as a draft, with its own
   agent session in the file's directory. `⌘S` saves it back to the file.
 
+`⌘/` opens Help, which lists the keyboard shortcuts.
+
 ## Install
 
 ```sh

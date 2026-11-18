@@ -18,6 +18,7 @@ mod file_watch;
 mod focus;
 mod fold;
 mod format;
+mod help_window;
 mod inline_text;
 mod ipc;
 mod list;
@@ -168,6 +169,7 @@ fn run_app() -> Result<()> {
         selection_popover::init(cx);
         settings_window::init(cx);
         about_window::init(cx);
+        help_window::init(cx);
         update::init(cx);
         cx.bind_keys([KeyBinding::new(editor::secondary!("q"), Quit, None)]);
         cx.set_menus([
@@ -188,6 +190,7 @@ fn run_app() -> Result<()> {
                 MenuItem::action("Zoom In", chrome::ZoomIn),
                 MenuItem::action("Zoom Out", chrome::ZoomOut),
             ]),
+            Menu::new("Help").items([MenuItem::action("Draftmux Help", help_window::OpenHelp)]),
         ]);
 
         let options = WindowOptions {

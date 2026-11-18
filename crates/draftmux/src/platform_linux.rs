@@ -120,6 +120,20 @@ pub fn toolbar_items(palette: &crate::theme::Palette) -> Option<gpui::AnyElement
                     .on_click(|_, _, cx| crate::about_window::open(cx))
                     .child("About Draftmux"),
             )
+            .child(
+                div()
+                    .id("open-help")
+                    .mr(px(12.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(12.))
+                    .rounded(px(5.))
+                    .hover(|s| s.bg(palette.hover))
+                    .active(|style| style.opacity(0.8))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| crate::help_window::open(cx))
+                    .child("Help"),
+            )
             .into_any_element(),
     )
 }
