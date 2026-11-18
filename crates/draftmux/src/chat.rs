@@ -1932,7 +1932,7 @@ fn bubble_style(palette: &Palette) -> EditorStyle {
         padding_top: px(0.),
         padding_bottom: px(0.),
         text: palette.on_accent,
-        read_only_text: palette.on_accent,
+        read_only_text: Some(palette.on_accent),
         heading: palette.on_accent,
         selection: theme::hex(0xffffff59),
         inactive_selection: theme::hex(0xffffff33),

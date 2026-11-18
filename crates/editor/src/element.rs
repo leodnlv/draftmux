@@ -550,13 +550,17 @@ fn font_for(styles: Styles, style: &EditorStyle) -> Font {
     font
 }
 
+/// How opaque text is while read-only, when the style has no color for it.
+const READ_ONLY_OPACITY: f32 = 0.7;
+
 fn color_for(styles: Styles, read_only: bool, style: &EditorStyle) -> Hsla {
-    if styles.contains(Styles::FIELD_KEY) {
+    if read_only && let Some(color) = style.read_only_text {
+        return color;
+    }
+    let color = if styles.contains(Styles::FIELD_KEY) {
         style.muted
     } else if styles.contains(Styles::FIELD) {
         style.faint
-    } else if read_only {
-        style.read_only_text
     } else if styles.contains(Styles::CODE) {
         style.code
     } else if styles.contains(Styles::LINK) {
@@ -567,6 +571,11 @@ fn color_for(styles: Styles, read_only: bool, style: &EditorStyle) -> Hsla {
         style.muted
     } else {
         style.text
+    };
+    if read_only {
+        color.opacity(READ_ONLY_OPACITY)
+    } else {
+        color
     }
 }
 

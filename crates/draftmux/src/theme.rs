@@ -229,7 +229,6 @@ pub struct Palette {
     pub menu_line: Hsla,
     pub menu_field: Hsla,
     pub editor_text: Hsla,
-    pub editor_read_only: Hsla,
     pub editor_code: Hsla,
     pub selection: Hsla,
     pub inactive_selection: Hsla,
@@ -308,7 +307,6 @@ impl Palette {
             menu_line: hex(0x00000016),
             menu_field: hex(0xffffffff),
             editor_text: hex(0x2a2a2eff),
-            editor_read_only: hex(0x8a8a94ff),
             editor_code: hex(0xa8336aff),
             selection: hex(0xb3d4ffff),
             inactive_selection: hex(0xdcdce0ff),
@@ -375,7 +373,6 @@ impl Palette {
             menu_line: hex(0xffffff1f),
             menu_field: hex(0x1f1f22ff),
             editor_text: hex(0xd9d9dfff),
-            editor_read_only: hex(0x6f6f78ff),
             editor_code: hex(0xff7ab2ff),
             selection: hex(0x0a84ff66),
             inactive_selection: hex(0x3a3a3eff),
@@ -389,7 +386,6 @@ impl Palette {
     pub fn editor_style(&self) -> EditorStyle {
         EditorStyle {
             text: self.editor_text,
-            read_only_text: self.editor_read_only,
             heading: self.text,
             code: self.editor_code,
             link: self.accent,

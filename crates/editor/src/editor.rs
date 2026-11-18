@@ -224,7 +224,9 @@ pub struct EditorStyle {
     pub padding_top: Pixels,
     pub padding_bottom: Pixels,
     pub text: Hsla,
-    pub read_only_text: Hsla,
+    /// The color of all text while read-only. Without one, text keeps its
+    /// usual colors, faded.
+    pub read_only_text: Option<Hsla>,
     pub heading: Hsla,
     pub code: Hsla,
     pub link: Hsla,
@@ -255,7 +257,7 @@ impl Default for EditorStyle {
             padding_top: px(20.),
             padding_bottom: px(40.),
             text: rgb(0x2a2a2e).into(),
-            read_only_text: rgb(0x8a8a94).into(),
+            read_only_text: None,
             heading: rgb(0x1d1d1f).into(),
             code: rgb(0xa8336a).into(),
             link: rgb(0x0a6cf5).into(),
