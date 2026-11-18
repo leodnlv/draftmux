@@ -528,6 +528,19 @@ impl Editor {
         self.after_change(None, true, cx);
     }
 
+    /// Replaces `range` with `text` as one undo step, keeping the selection
+    /// where the text around it is and the view where it is. Applies in
+    /// read-only mode too.
+    pub fn replace_range_in_place(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer.replace_range_in_place(range, text);
+        self.after_change(None, false, cx);
+    }
+
     /// Replaces the whole text as one undo step, keeping the selection where
     /// the text around it is unchanged. Applies in read-only mode too.
     pub fn replace_all(&mut self, text: &str, cx: &mut Context<Self>) {

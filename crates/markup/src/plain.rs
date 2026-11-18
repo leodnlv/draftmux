@@ -25,7 +25,7 @@ pub fn parse_mapped(text: &str) -> (Document, SourceMap) {
     let mut blocks = vec![Node {
         source: 0..shown.len(),
         pieces: pieces.pieces,
-        children: Vec::new(),
+        ..Node::default()
     }];
     restore_crlf(&mut blocks, text);
     let doc = Document {

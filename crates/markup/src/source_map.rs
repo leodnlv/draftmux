@@ -30,6 +30,9 @@ pub struct Node {
     /// Pieces covering this node's text, in order.
     pub pieces: Vec<Piece>,
     pub children: Vec<Node>,
+    /// For a task list item, the character between its checkbox's
+    /// brackets: a space when unchecked, `x` or `X` when checked.
+    pub task: Option<Range<usize>>,
 }
 
 /// A run of rendered text and the source it came from.
@@ -144,6 +147,13 @@ impl SourceMap {
         let (first, rest) = path.split_first().expect("a path names a block");
         rest.iter()
             .fold(&self.blocks[*first], |node, ix| &node.children[*ix])
+    }
+
+    /// The node at `path`, if there is one.
+    pub fn get(&self, path: &[usize]) -> Option<&Node> {
+        let (first, rest) = path.split_first()?;
+        rest.iter()
+            .try_fold(self.blocks.get(*first)?, |node, ix| node.children.get(*ix))
     }
 
     /// Every piece in document order, with the path of its node.

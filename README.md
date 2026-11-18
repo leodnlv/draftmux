@@ -25,7 +25,8 @@ Status: early release; expect rough edges.
 - **Chat with the draft's agent.** Ask for changes in plain words. On pi it runs
   with your profile, so your skills are available.
 - **Edit beside a preview.** Write Markdown and see it as GitHub, Slack, rich
-  text or plain text.
+  text or plain text. Click a task list checkbox in the GitHub preview to tick
+  it off in the Markdown.
 - **Selection actions.** Select text to get alternatives, Shorten or Tighten, or
   your own actions. With text selected, a chat message changes only that part.
   Hold `⌘` while dragging to select more passages; a chat message then edits

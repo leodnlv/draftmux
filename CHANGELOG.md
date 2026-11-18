@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- New: Click a task list checkbox in the GitHub preview to check or uncheck it
+  in the Markdown. The change is a normal edit you can undo.
+
 ## v0.3.2 (2026-11-17)
 
 - New: An About window shows the version and links to the website and source.

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use comrak::nodes::{AstNode, ListType, NodeValue, TableAlignment};
+use comrak::nodes::{AstNode, ListType, NodeValue, Sourcepos, TableAlignment};
 use comrak::{Arena, Options, parse_document};
 
 use crate::source_map::{Lex, Node, Piece, Pieces, SourceMap};
@@ -37,6 +37,21 @@ pub fn parse_file(markdown: &str) -> Document {
 /// `markdown`.
 pub fn parse_file_mapped(markdown: &str) -> (Document, SourceMap) {
     Walk::new(markdown, true, " ").document()
+}
+
+/// The edit that checks or unchecks the task list item at `path` in
+/// `markdown`'s [`SourceMap`]: the range of the character between the
+/// checkbox's brackets and what replaces it. `None` when `path` isn't a
+/// task list item.
+pub fn toggle_task(markdown: &str, path: &[usize]) -> Option<(Range<usize>, &'static str)> {
+    let (_, map) = parse_mapped(markdown);
+    let range = map.get(path)?.task.clone()?;
+    let replacement = match markdown.get(range.clone())? {
+        " " => "x",
+        "x" | "X" => " ",
+        _ => return None,
+    };
+    Some((range, replacement))
 }
 
 fn options() -> Options<'static> {
@@ -212,15 +227,19 @@ impl<'s> Walk<'s> {
 
     fn list_item<'a>(&self, node: &'a AstNode<'a>) -> (ListItem, Node) {
         let task = match &node.data().value {
-            NodeValue::TaskItem(task) => Some(task.symbol.is_some()),
+            NodeValue::TaskItem(task) => Some((task.symbol.is_some(), task.symbol_sourcepos)),
             _ => None,
         };
         let (blocks, nodes) = self.blocks(node);
         let map = Node {
             source: self.range(node),
             children: nodes,
+            task: task
+                .filter(|_| self.mapped)
+                .map(|(_, symbol)| self.position_range(symbol)),
             ..Node::default()
         };
+        let task = task.map(|(checked, _)| checked);
         (ListItem { task, blocks }, map)
     }
 
@@ -432,7 +451,11 @@ impl<'s> Walk<'s> {
         if !self.mapped {
             return 0..0;
         }
-        let position = node.data().sourcepos;
+        self.position_range(node.data().sourcepos)
+    }
+
+    /// The byte range of `position` in the source.
+    fn position_range(&self, position: Sourcepos) -> Range<usize> {
         let offset = |line: usize, column: usize| {
             line.checked_sub(1)
                 .and_then(|ix| self.lines.get(ix))

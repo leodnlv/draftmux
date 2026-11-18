@@ -649,6 +649,10 @@ impl Chrome {
         ));
         chrome._subscriptions.push(cx.subscribe(
             &chrome.preview,
+            |this, _, event: &preview::TaskToggled, cx| this.toggle_task(&event.0, cx),
+        ));
+        chrome._subscriptions.push(cx.subscribe(
+            &chrome.preview,
             |this, _, event: &preview::FileHint, cx| match event {
                 preview::FileHint::Accept => this.set_target(Target::GithubFile, cx),
                 preview::FileHint::Dismiss => {
@@ -1156,6 +1160,30 @@ impl Chrome {
         self.preview_map = None;
         self.preview_selection
             .update(cx, |selection, cx| selection.reset(cx));
+    }
+
+    /// Checks or unchecks the task list item at `path` in the preview by
+    /// editing its checkbox in the editor, as one undoable edit that leaves
+    /// the selection and scroll position alone. Does nothing while the
+    /// agent is writing, or when the item has changed since the preview
+    /// was drawn.
+    fn toggle_task(&mut self, path: &[usize], cx: &mut Context<Self>) {
+        if self.review.is_some() || self.editor.read(cx).is_read_only() {
+            return;
+        }
+        let draft = markup::frontmatter::parse(&self.preview_source);
+        let Some((range, with)) = markup::github::toggle_task(draft.body, path) else {
+            return;
+        };
+        let range = range.start + draft.body_offset..range.end + draft.body_offset;
+        let Some(range) =
+            preview_work::unchanged_range(&self.preview_source, self.editor.read(cx).text(), range)
+        else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.replace_range_in_place(range, with, cx)
+        });
     }
 
     /// Selects in the editor the markdown of the text selected in the

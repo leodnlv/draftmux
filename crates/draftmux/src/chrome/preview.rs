@@ -95,6 +95,11 @@ const REVEAL_MARGIN: Pixels = px(48.);
 pub(super) struct FieldCopied(pub String);
 impl gpui::EventEmitter<FieldCopied> for Preview {}
 
+/// A task list item's checkbox was clicked: the item's path in the
+/// [`markup::source_map::SourceMap`] of the previewed body.
+pub(super) struct TaskToggled(pub Vec<usize>);
+impl gpui::EventEmitter<TaskToggled> for Preview {}
+
 /// The user's answer to the hint that a GitHub comment draft looks like a
 /// wrapped repository file.
 pub(super) enum FileHint {
@@ -493,6 +498,12 @@ impl Preview {
             (Some(doc), Some(target)) if !doc.blocks.is_empty() => {
                 let mut style = markup_view::style(target, theme.dark).zoomed(theme.zoom);
                 style.redline = redline.clone();
+                let preview = cx.entity().downgrade();
+                style.on_task = Some(Rc::new(move |path, _, cx| {
+                    preview
+                        .update(cx, |_, cx| cx.emit(TaskToggled(path.to_vec())))
+                        .ok();
+                }));
                 let style = Rc::new(style);
                 let select = Some(SelectBody {
                     state: self.active_selection().clone(),

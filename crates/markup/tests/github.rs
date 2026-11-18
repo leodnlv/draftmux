@@ -93,6 +93,63 @@ fn task_lists() {
     ));
 }
 
+/// The text after toggling the task item at `path`, if it is one.
+fn toggled(markdown: &str, path: &[usize]) -> Option<String> {
+    let (range, with) = github::toggle_task(markdown, path)?;
+    let mut out = markdown.to_owned();
+    out.replace_range(range, with);
+    Some(out)
+}
+
+#[test]
+fn toggling_a_task_edits_only_its_own_checkbox() {
+    let source = "- [ ] same\n- [ ] same\n- [x] same\n";
+    assert_eq!(
+        toggled(source, &[0, 1]).as_deref(),
+        Some("- [ ] same\n- [x] same\n- [x] same\n")
+    );
+    assert_eq!(
+        toggled(source, &[0, 2]).as_deref(),
+        Some("- [ ] same\n- [ ] same\n- [ ] same\n")
+    );
+}
+
+#[test]
+fn toggling_reaches_nested_quoted_and_uppercase_tasks() {
+    let source = "Intro\n\n- plain\n  - [X] nested\n\n> 1. [ ] quoted\n";
+    assert_eq!(
+        toggled(source, &[1, 0, 1, 0]).as_deref(),
+        Some("Intro\n\n- plain\n  - [ ] nested\n\n> 1. [ ] quoted\n")
+    );
+    assert_eq!(
+        toggled(source, &[2, 0, 0]).as_deref(),
+        Some("Intro\n\n- plain\n  - [X] nested\n\n> 1. [x] quoted\n")
+    );
+}
+
+#[test]
+fn toggling_finds_checkboxes_after_tabs_and_crlf() {
+    assert_eq!(
+        toggled("-\t[ ] tab\r\n-\t[x] tab\r\n", &[0, 1]).as_deref(),
+        Some("-\t[ ] tab\r\n-\t[ ] tab\r\n")
+    );
+    assert_eq!(
+        toggled("* é [ ]\n* [ ] émoji 🎉\n", &[0, 1]).as_deref(),
+        Some("* é [ ]\n* [x] émoji 🎉\n")
+    );
+}
+
+#[test]
+fn only_task_items_toggle() {
+    let source = "- plain\n- [ ] task\n\n```\n- [ ] code\n```\n\n[ ] text\n";
+    assert_eq!(toggled(source, &[0, 0]), None);
+    assert_eq!(toggled(source, &[0, 1, 0]), None);
+    assert_eq!(toggled(source, &[1]), None);
+    assert_eq!(toggled(source, &[2]), None);
+    assert_eq!(toggled(source, &[9]), None);
+    assert!(toggled(source, &[0, 1]).is_some());
+}
+
 #[test]
 fn quotes() {
     insta::assert_snapshot!(snapshot("> quoted\nlazy continuation\n>\n> > nested\n"));

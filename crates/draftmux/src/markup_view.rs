@@ -129,7 +129,13 @@ pub struct MarkupStyle {
     /// Draws a review's changes on the text ([`redline`]); `None` outside
     /// review.
     pub redline: Option<Rc<Redline>>,
+    /// Called with the [`SourceMap`] path of a task list item whose
+    /// checkbox is clicked; `None` leaves checkboxes inert.
+    pub on_task: Option<TaskClick>,
 }
+
+/// Toggles the task list item at a [`SourceMap`] path.
+pub type TaskClick = Rc<dyn Fn(&[usize], &mut Window, &mut App)>;
 
 /// How a redline's changes are drawn and what the pointer does to them:
 /// insertions on a green tint, deletions struck through on a red one. Kept
@@ -591,6 +597,7 @@ impl MarkupStyle {
             slack_fallbacks: false,
             notes: None,
             redline: None,
+            on_task: None,
         }
     }
 
@@ -825,6 +832,7 @@ impl MarkupStyle {
                 rule: app.hairline,
             }),
             redline: None,
+            on_task: None,
         }
     }
 }
@@ -2107,6 +2115,7 @@ impl<'a> Renderer<'a> {
             .iter()
             .enumerate()
             .map(|(ix, item)| {
+                self.path.push(ix);
                 let marker = match (item.task, list.start) {
                     // GitHub pulls the checkbox 1.4em left of the text.
                     (Some(checked), _) => div()
@@ -2121,7 +2130,6 @@ impl<'a> Renderer<'a> {
                         .into_any_element(),
                     (None, None) => bullet(&style.bullet, bullet_kind, style.text_color),
                 };
-                self.path.push(ix);
                 let blocks = self.blocks(&item.blocks, inner_gap);
                 self.path.pop();
                 div()
@@ -2137,41 +2145,58 @@ impl<'a> Renderer<'a> {
         div().flex().flex_col().children(items).into_any_element()
     }
 
-    fn checkbox(&self, checked: bool) -> AnyElement {
+    /// The checkbox of the task list item at `self.path`, which toggles
+    /// it when the style takes clicks and no redline is drawn.
+    fn checkbox(&mut self, checked: bool) -> AnyElement {
         let style = self.style;
         let size = px(13.);
         // Centered on the text rather than the line box, whose center sits
         // above the text's because of the space reserved for descenders.
         let top = (style.text_size * style.line_height - size) / 2. + px(1.);
+        let check = div()
+            .size(size)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .border_1()
+            .when_else(
+                checked,
+                |this| {
+                    this.bg(style.checkbox_checked)
+                        .border_color(style.checkbox_checked)
+                        .child(
+                            svg()
+                                .path(CHECK_ICON)
+                                .size(px(11.))
+                                .text_color(gpui::white()),
+                        )
+                },
+                |this| {
+                    this.bg(style.checkbox_unchecked_background)
+                        .border_color(style.checkbox_unchecked_border)
+                },
+            );
+        let check = match style.on_task.clone().filter(|_| style.redline.is_none()) {
+            Some(on_task) => {
+                let path = self.path.clone();
+                check
+                    .id(self.id())
+                    .cursor_pointer()
+                    // Keeps the click from starting a text selection.
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_task(&path, window, cx);
+                    })
+                    .into_any_element()
+            }
+            None => check.into_any_element(),
+        };
         div()
             .h(style.text_size * style.line_height)
             .pt(top)
-            .child(
-                div()
-                    .size(size)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.))
-                    .border_1()
-                    .when_else(
-                        checked,
-                        |this| {
-                            this.bg(style.checkbox_checked)
-                                .border_color(style.checkbox_checked)
-                                .child(
-                                    svg()
-                                        .path(CHECK_ICON)
-                                        .size(px(11.))
-                                        .text_color(gpui::white()),
-                                )
-                        },
-                        |this| {
-                            this.bg(style.checkbox_unchecked_background)
-                                .border_color(style.checkbox_unchecked_border)
-                        },
-                    ),
-            )
+            .child(check)
             .into_any_element()
     }
 

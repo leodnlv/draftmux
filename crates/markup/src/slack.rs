@@ -1186,6 +1186,7 @@ fn leaf(source: Range<usize>, pieces: Vec<Piece>) -> Node {
         source,
         pieces,
         children: Vec::new(),
+        task: None,
     }
 }
 

@@ -221,6 +221,18 @@ impl Buffer {
         );
     }
 
+    /// Replaces `range` with `text` as one undo step, moving the selection
+    /// with the text around it instead of collapsing it.
+    pub fn replace_range_in_place(&mut self, range: Range<usize>, text: &str) {
+        let range = self.clamp_range(range);
+        self.edit(
+            range,
+            &normalize_line_endings(text),
+            EditKind::Atomic,
+            SelectionAfter::Map,
+        );
+    }
+
     /// Replaces the whole text as one undo step. Only the span that differs is
     /// rewritten, so the selection outside it stays put.
     pub fn replace_all(&mut self, text: &str) {
@@ -690,6 +702,24 @@ mod tests {
         assert_eq!(b.text(), "first\nSECOND!\nthird");
         b.undo();
         assert_eq!(b.text(), "first\nsecond\nthird");
+        assert!(!b.can_undo());
+    }
+
+    #[test]
+    fn replace_range_in_place_keeps_the_selection_and_undoes_alone() {
+        let mut b = Buffer::new("- [ ] one\n- [ ] two");
+        b.select_range(12..19, false);
+        b.replace_range_in_place(3..4, "x");
+        assert_eq!(b.text(), "- [x] one\n- [ ] two");
+        assert_eq!(b.selection().range(), 12..19);
+        b.set_selection(Selection::caret(1));
+        b.replace_range_in_place(13..14, "x");
+        assert_eq!(b.text(), "- [x] one\n- [x] two");
+        assert_eq!(b.selection(), Selection::caret(1));
+        assert!(b.undo());
+        assert_eq!(b.text(), "- [x] one\n- [ ] two");
+        assert!(b.undo());
+        assert_eq!(b.text(), "- [ ] one\n- [ ] two");
         assert!(!b.can_undo());
     }
 

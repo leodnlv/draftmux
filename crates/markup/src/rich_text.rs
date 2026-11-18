@@ -49,6 +49,7 @@ fn shell(node: Mapped) -> Node {
         source: node.source.clone(),
         pieces: node.pieces.clone(),
         children: Vec::new(),
+        task: None,
     })
 }
 
