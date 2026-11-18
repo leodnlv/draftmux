@@ -487,6 +487,9 @@ impl Chrome {
                     text,
                     prompt,
                 } => this.option_applied(before.clone(), text, prompt, cx),
+                SelectionPopoverEvent::ContinueFailed(reason) => {
+                    this.show_error(reason.clone(), cx);
+                }
             }),
             cx.subscribe(&editor, |this, editor, event, cx| match event {
                 EditorEvent::Edited => this.edited(editor.read(cx).text().to_owned(), cx),
@@ -503,6 +506,7 @@ impl Chrome {
                     this.mark_preview(cx);
                 }
                 EditorEvent::ExtraSelectionsChanged => this.mark_preview(cx),
+                EditorEvent::GhostAccepted(_) | EditorEvent::GhostDismissed => {}
             }),
             // Appearance is app-wide, and this window lives as long as the
             // app, so it reports appearance changes for every window.

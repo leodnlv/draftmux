@@ -9,6 +9,9 @@
   Code drafts set the effort, or leave it to the model with auto. A draft
   keeps its level. The model name drops its provider (the tooltip still
   shows it), and the send hint is gone to make room.
+- New: `⌘↩` continues the sentence at the cursor, shown as faint text you take
+  with `⇥`, word by word with `⌥→`, or by typing it. `⌘⇧↩` offers several
+  continuations to pick from instead.
 
 ## v0.3.2 (2026-11-17)
 

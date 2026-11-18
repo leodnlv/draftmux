@@ -31,6 +31,10 @@ Status: early release; expect rough edges.
   your own actions. With text selected, a chat message changes only that part.
   Hold `⌘` while dragging to select more passages; a chat message then edits
   each of them.
+- **Continue the sentence.** `⌘↩` asks the draft's agent to finish the sentence
+  at the cursor and shows it as faint text: `⇥` takes it, `⌥→` takes a word,
+  typing it keeps it going, and `Esc` drops it. `⌘⇧↩` offers several
+  continuations to pick from.
 - **Copy or hand back.** Copy formatted for the target with `⌘⇧C`, or tell your
   agent "done, file the issue".
 - **Edit files.** `draftmux README.md` opens a file as a draft, with its own

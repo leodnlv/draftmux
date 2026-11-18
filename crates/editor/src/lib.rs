@@ -11,6 +11,6 @@ mod movement;
 pub mod timing;
 
 pub use editor::{
-    ContextMenuItem, ContextMenuRenderer, DismissMenu, Editor, EditorEvent, EditorStyle, Redo,
-    Undo, flash_alpha, init,
+    ContextMenuItem, ContextMenuRenderer, DismissMenu, Editor, EditorEvent, EditorStyle, Ghost,
+    Redo, Undo, flash_alpha, init,
 };

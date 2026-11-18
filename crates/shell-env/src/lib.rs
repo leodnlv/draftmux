@@ -164,9 +164,9 @@ impl ShellEnv {
         command
     }
 
-    /// The captured environment, or `None` while capture is still running.
+    /// The captured environment, or `None` until capture has finished.
     pub fn global(cx: &App) -> Option<Arc<ShellEnv>> {
-        cx.global::<GlobalShellEnv>().0.peek().cloned()
+        cx.try_global::<GlobalShellEnv>()?.0.peek().cloned()
     }
 
     /// Resolves to the captured environment once capture finishes.

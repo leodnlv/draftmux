@@ -60,14 +60,39 @@ actions!(
         Redo,
         ShowCharacterPalette,
         DismissMenu,
+        AcceptGhost,
+        AcceptGhostWord,
+        DismissGhost,
     ]
 );
 
 const KEY_CONTEXT: &str = "Editor";
+/// Added to the editor's key context while a ghost shows, and while it has
+/// text; see [`Editor::set_ghost`].
+const GHOST_CONTEXT: &str = "ghost";
+const GHOST_TEXT_CONTEXT: &str = "ghost_text";
 
 /// Binds the platform text-editing shortcuts. Call once at startup.
 pub fn init(cx: &mut App) {
     cx.bind_keys(bindings());
+    cx.bind_keys(ghost_bindings());
+}
+
+/// Bound after the editor's own keys, so at the same depth these win while
+/// their context is present, and Tab and word-right keep their meaning
+/// otherwise.
+fn ghost_bindings() -> Vec<KeyBinding> {
+    let ghost = format!("{KEY_CONTEXT} && {GHOST_CONTEXT}");
+    let text = format!("{KEY_CONTEXT} && {GHOST_TEXT_CONTEXT}");
+    vec![
+        KeyBinding::new("escape", DismissGhost, Some(&ghost)),
+        KeyBinding::new("tab", AcceptGhost, Some(&text)),
+        KeyBinding::new(
+            by_platform!("alt-right", "ctrl-right"),
+            AcceptGhostWord,
+            Some(&text),
+        ),
+    ]
 }
 
 #[cfg(target_os = "macos")]
@@ -212,6 +237,20 @@ pub enum EditorEvent {
     SelectionChanged(Range<usize>),
     /// The extra selections changed; see [`Editor::extra_selections`].
     ExtraSelectionsChanged,
+    /// The user moved this text from the ghost into the buffer, by
+    /// accepting it or typing it; see [`Editor::set_ghost`].
+    GhostAccepted(String),
+    /// The ghost went away by the user's doing: dismissed, or an edit or
+    /// caret movement other than accepting it.
+    GhostDismissed,
+}
+
+/// Display-only text after a buffer offset; see [`Editor::set_ghost`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ghost {
+    pub offset: usize,
+    /// Empty while waiting for text, shown as a pulsing dot.
+    pub text: String,
 }
 
 /// Fonts, colours and metrics. The default is the light draft editor.
@@ -322,6 +361,12 @@ pub struct Editor {
     pub(crate) reveal_marked: bool,
     /// Text the next layout scrolls into view.
     pub(crate) reveal: Option<Range<usize>>,
+    pub(crate) ghost: Option<Ghost>,
+    /// When the ghost started waiting, for the dot's pulse.
+    pub(crate) ghost_waiting: Option<Instant>,
+    /// Set while text moves from the ghost into the buffer, so that edit
+    /// keeps the rest of the ghost.
+    accepting_ghost: bool,
 }
 
 /// Text pointed out by a tint that fades away.
@@ -387,6 +432,9 @@ impl Editor {
             marked: None,
             reveal_marked: false,
             reveal: None,
+            ghost: None,
+            ghost_waiting: None,
+            accepting_ghost: false,
         }
     }
 
@@ -607,6 +655,131 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shows `text` after buffer offset `offset` as faint text that isn't
+    /// part of the buffer: undo, [`Editor::text`] and the edit events never
+    /// see it. Its line reflows around it. Empty `text` shows a pulsing dot
+    /// there instead, for text that is on its way; only the first line of
+    /// `text` shows.
+    ///
+    /// The user accepts it with Tab, or one word with word-right, or by
+    /// typing what it says; Escape, any other edit and any caret movement
+    /// dismiss it. Each reports an event ([`EditorEvent::GhostAccepted`],
+    /// [`EditorEvent::GhostDismissed`]); the ghost methods called by the
+    /// host don't. The ghost doesn't count toward a `fit_content` size.
+    pub fn set_ghost(&mut self, offset: usize, text: &str, cx: &mut Context<Self>) {
+        if offset > self.buffer.len() || !self.text().is_char_boundary(offset) {
+            return;
+        }
+        let text = text.lines().next().unwrap_or_default();
+        if text.is_empty() {
+            self.ghost_waiting.get_or_insert_with(Instant::now);
+        } else {
+            self.ghost_waiting = None;
+        }
+        self.ghost = Some(Ghost {
+            offset,
+            text: text.to_owned(),
+        });
+        cx.notify();
+    }
+
+    /// The ghost, if one shows.
+    pub fn ghost(&self) -> Option<&Ghost> {
+        self.ghost.as_ref()
+    }
+
+    /// Removes the ghost.
+    pub fn clear_ghost(&mut self, cx: &mut Context<Self>) {
+        if self.ghost.take().is_some() {
+            self.ghost_waiting = None;
+            cx.notify();
+        }
+    }
+
+    /// Moves all of the ghost's text into the buffer as one undo step and
+    /// removes it.
+    pub fn accept_ghost(&mut self, cx: &mut Context<Self>) {
+        if let Some(len) = self.ghost.as_ref().map(|ghost| ghost.text.len()) {
+            self.take_ghost(len, None, cx);
+            self.clear_ghost(cx);
+        }
+    }
+
+    /// Moves the ghost's first `len` bytes into the buffer as one undo step
+    /// and returns them; with `window`, as the user's input. The rest stays
+    /// a ghost after them.
+    fn take_ghost(
+        &mut self,
+        len: usize,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if len == 0 || self.read_only {
+            return None;
+        }
+        let ghost = self.ghost.as_mut()?;
+        let taken: String = ghost.text.drain(..len).collect();
+        let at = ghost.offset;
+        ghost.offset += taken.len();
+        if ghost.text.is_empty() {
+            self.ghost_waiting = Some(Instant::now());
+        }
+        self.buffer.replace_range(at..at, &taken);
+        self.accepting_ghost = true;
+        self.after_change(window, true, cx);
+        self.accepting_ghost = false;
+        Some(taken)
+    }
+
+    /// Removes the ghost as the user's doing, reporting it.
+    fn dismiss_ghost(&mut self, cx: &mut Context<Self>) {
+        if self.ghost.is_some() {
+            self.clear_ghost(cx);
+            cx.emit(EditorEvent::GhostDismissed);
+        }
+    }
+
+    fn accept_ghost_action(
+        &mut self,
+        _: &AcceptGhost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(len) = self.ghost.as_ref().map(|g| g.text.len()) else {
+            return;
+        };
+        let taken = self.take_ghost(len, Some(window), cx);
+        self.clear_ghost(cx);
+        if let Some(text) = taken {
+            cx.emit(EditorEvent::GhostAccepted(text));
+        }
+    }
+
+    fn accept_ghost_word(
+        &mut self,
+        _: &AcceptGhostWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(len) = self.ghost.as_ref().map(|g| next_word_len(&g.text)) else {
+            return;
+        };
+        if let Some(text) = self.take_ghost(len, Some(window), cx) {
+            cx.emit(EditorEvent::GhostAccepted(text));
+        }
+    }
+
+    /// Caret bounds in window coordinates, for anchoring popovers at an
+    /// empty selection; `None` when the text changed since the last frame.
+    pub fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+        let layout = self.layout.as_ref()?;
+        if layout.revision != self.buffer.revision() {
+            return None;
+        }
+        let selection = self.buffer.selection();
+        Some(layout.caret_bounds(selection.head, selection.affinity))
+    }
+
     /// The viewport height, content height and scroll offset as last laid
     /// out, for drawing a scrollbar. `None` before the first frame.
     pub fn scroll_metrics(&self) -> Option<(Pixels, Pixels, Pixels)> {
@@ -642,6 +815,7 @@ impl Editor {
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
         if read_only {
             self.buffer.end_composition();
+            self.dismiss_ghost(cx);
         }
         self.read_only = read_only;
         self.after_change(None, false, cx);
@@ -687,6 +861,9 @@ impl Editor {
         }
         let selection = self.selected_range();
         let selection_changed = selection != self.reported_selection;
+        if (edited || selection_changed) && !self.accepting_ghost {
+            self.dismiss_ghost(cx);
+        }
         let extra_changed = self.extra_selections != self.reported_extra_selections;
         self.reported_revision = revision;
         self.reported_selection = selection.clone();
@@ -725,21 +902,28 @@ impl Editor {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Buffer),
     ) {
+        self.dismiss_ghost(cx);
         f(&mut self.buffer);
         self.after_change(Some(window), true, cx);
     }
 
     /// Runs a movement that needs the laid-out rows. Before the first paint
-    /// there are none, and the movement is skipped.
+    /// there are none, and the movement is skipped. Rows are the buffer's:
+    /// a layout that still shows a ghost is laid out again without it.
     fn row_movement(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Buffer, &Layout),
     ) {
-        let Some(layout) = self.layout.clone() else {
+        self.dismiss_ghost(cx);
+        let Some(mut layout) = self.layout.clone() else {
             return;
         };
+        if layout.has_ghost() {
+            layout = Rc::new(crate::element::relayout(self, &layout, window));
+            self.layout = Some(layout.clone());
+        }
         f(&mut self.buffer, &layout);
         self.after_change(Some(window), true, cx);
     }
@@ -833,6 +1017,7 @@ impl Editor {
         let Some((offset, affinity)) = self.hit(event.position) else {
             return;
         };
+        self.dismiss_ghost(cx);
         let granularity = Granularity::from_click_count(event.click_count);
         // The secondary modifier keeps the selection and adds a new one;
         // a plain press drops the extra ones. Shift extends the selection
@@ -1058,6 +1243,21 @@ impl Editor {
         cx.notify();
     }
 
+    /// Typing `text` over `range` types the ghost's next characters: it
+    /// goes at the ghost with nothing selected or composing.
+    fn typed_through(&self, range: Option<Range<usize>>, text: &str) -> bool {
+        let Some(ghost) = &self.ghost else {
+            return false;
+        };
+        let at = ghost.offset..ghost.offset;
+        let range = range.unwrap_or(self.selected_range());
+        !text.is_empty()
+            && self.buffer.marked().is_none()
+            && range == at
+            && self.selected_range() == at
+            && ghost.text.starts_with(text)
+    }
+
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
         let text = self.buffer.text();
         offset_from_utf16(text, range.start)..offset_from_utf16(text, range.end)
@@ -1120,6 +1320,12 @@ impl EntityInputHandler for Editor {
         crate::timing::input(cx.entity_id());
         let _timing = crate::timing::span("input-handler");
         let range = range_utf16.map(|r| self.range_from_utf16(&r));
+        if self.typed_through(range.clone(), text) {
+            if let Some(taken) = self.take_ghost(text.len(), Some(window), cx) {
+                cx.emit(EditorEvent::GhostAccepted(taken));
+            }
+            return;
+        }
         self.buffer.insert_in(range, text);
         self.after_change(Some(window), true, cx);
     }
@@ -1206,10 +1412,17 @@ impl EntityInputHandler for Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let context_menu = self.render_context_menu(window, cx);
+        let context = match &self.ghost {
+            Some(ghost) if !ghost.text.is_empty() => {
+                format!("{KEY_CONTEXT} {GHOST_CONTEXT} {GHOST_TEXT_CONTEXT}")
+            }
+            Some(_) => format!("{KEY_CONTEXT} {GHOST_CONTEXT}"),
+            None => KEY_CONTEXT.to_owned(),
+        };
         div()
             .id("editor")
             .size_full()
-            .key_context(KEY_CONTEXT)
+            .key_context(context.as_str())
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(|this, _: &Backspace, window, cx| {
@@ -1333,6 +1546,9 @@ impl Render for Editor {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_action(cx.listener(Self::dismiss_menu))
+            .on_action(cx.listener(Self::accept_ghost_action))
+            .on_action(cx.listener(Self::accept_ghost_word))
+            .on_action(cx.listener(|this, _: &DismissGhost, _, cx| this.dismiss_ghost(cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .when(!self.style.fit_content, |editor| {
@@ -1343,6 +1559,26 @@ impl Render for Editor {
             })
             .children(context_menu)
     }
+}
+
+/// The length of `text`'s first word with the whitespace before it and the
+/// punctuation after it, or of its leading punctuation when it starts with
+/// some: what accepting one word of a ghost takes.
+fn next_word_len(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut len = 0;
+    // Something other than whitespace was taken: the next space or word
+    // ends the word.
+    let mut content = false;
+    for segment in text.split_word_bounds() {
+        let space = segment.chars().all(char::is_whitespace);
+        if content && (space || is_word(segment)) {
+            break;
+        }
+        content |= !space;
+        len += segment.len();
+    }
+    len
 }
 
 fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
@@ -1422,5 +1658,218 @@ mod keymap_tests {
             .unwrap();
         assert!(select_all.keystrokes()[0].modifiers().control);
         assert_eq!(select_all.keystrokes()[0].key(), "a");
+    }
+}
+
+#[cfg(test)]
+mod ghost_tests {
+    use std::cell::RefCell;
+
+    use gpui::{Entity, TestAppContext, VisualTestContext, point};
+
+    use super::*;
+
+    fn editor<'a>(
+        text: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Editor>, &'a mut VisualTestContext) {
+        cx.update(init);
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::new(text, cx));
+        cx.update(|window, cx| {
+            let focus = editor.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        (editor, cx)
+    }
+
+    fn events(
+        editor: &Entity<Editor>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Vec<EditorEvent>>> {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(editor, move |_, event: &EditorEvent, _| {
+                if matches!(
+                    event,
+                    EditorEvent::GhostAccepted(_) | EditorEvent::GhostDismissed
+                ) {
+                    events.borrow_mut().push(event.clone());
+                }
+            })
+            .detach();
+        });
+        events
+    }
+
+    fn ghost_at_end(editor: &Entity<Editor>, text: &str, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                let end = editor.text().len();
+                editor.select_range(end..end, cx);
+                editor.set_ghost(end, text, cx);
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn tab_and_word_right_accept_only_while_a_ghost_has_text(cx: &mut TestAppContext) {
+        let (editor, cx) = editor("The fox", cx);
+        let events = events(&editor, cx);
+        ghost_at_end(&editor, " jumps over, the dog.", cx);
+        cx.simulate_keystrokes(by_platform!("alt-right", "ctrl-right"));
+        cx.simulate_keystrokes(by_platform!("alt-right", "ctrl-right"));
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.text(), "The fox jumps over,");
+            assert_eq!(editor.ghost().unwrap().text, " the dog.");
+            assert_eq!(editor.ghost().unwrap().offset, editor.text().len());
+        });
+        cx.simulate_keystrokes("tab");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.text(), "The fox jumps over, the dog.");
+            assert!(editor.ghost().is_none());
+        });
+        assert_eq!(
+            *events.borrow(),
+            [
+                EditorEvent::GhostAccepted(" jumps".into()),
+                EditorEvent::GhostAccepted(" over,".into()),
+                EditorEvent::GhostAccepted(" the dog.".into()),
+            ]
+        );
+        // Each accept is its own undo step.
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                assert!(editor.undo(cx));
+                assert_eq!(editor.text(), "The fox jumps over,");
+                assert!(editor.undo(cx));
+                assert!(editor.undo(cx));
+                assert_eq!(editor.text(), "The fox");
+            })
+        });
+
+        // Without a ghost, the keys do what they always do.
+        cx.simulate_keystrokes("tab");
+        editor.read_with(cx, |editor, _| assert_ne!(editor.text(), "The fox"));
+        cx.update(|_, cx| editor.update(cx, |editor, cx| editor.select_range(0..0, cx)));
+        cx.simulate_keystrokes(by_platform!("alt-right", "ctrl-right"));
+        editor.read_with(cx, |editor, _| assert_eq!(editor.selected_range(), 3..3));
+    }
+
+    #[gpui::test]
+    fn accepting_does_not_merge_with_typing(cx: &mut TestAppContext) {
+        let (editor, cx) = editor("", cx);
+        cx.simulate_input("fox");
+        ghost_at_end(&editor, " jumps", cx);
+        cx.simulate_keystrokes("tab");
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                assert_eq!(editor.text(), "fox jumps");
+                assert!(editor.undo(cx));
+                assert_eq!(editor.text(), "fox");
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn typing_the_ghost_keeps_it_and_anything_else_dismisses_it(cx: &mut TestAppContext) {
+        let (editor, cx) = editor("The fox", cx);
+        let events = events(&editor, cx);
+        ghost_at_end(&editor, " jumps", cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(None, " j", window, cx);
+                assert_eq!(editor.text(), "The fox j");
+                assert_eq!(editor.ghost().unwrap().text, "umps");
+                editor.replace_text_in_range(None, "x", window, cx);
+                assert_eq!(editor.text(), "The fox jx");
+                assert!(editor.ghost().is_none());
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *events.borrow(),
+            [
+                EditorEvent::GhostAccepted(" j".into()),
+                EditorEvent::GhostDismissed
+            ]
+        );
+
+        // Escape, and moving the caret, dismiss it too; host calls report
+        // nothing.
+        events.borrow_mut().clear();
+        ghost_at_end(&editor, " more", cx);
+        cx.simulate_keystrokes("escape");
+        ghost_at_end(&editor, " more", cx);
+        cx.simulate_keystrokes("left");
+        ghost_at_end(&editor, "", cx);
+        // A waiting ghost takes Escape but not Tab.
+        cx.simulate_keystrokes("escape");
+        ghost_at_end(&editor, " more", cx);
+        cx.update(|_, cx| editor.update(cx, |editor, cx| editor.clear_ghost(cx)));
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![EditorEvent::GhostDismissed; 3]);
+    }
+
+    #[gpui::test]
+    fn the_ghost_is_laid_out_without_moving_buffer_offsets(cx: &mut TestAppContext) {
+        let (editor, cx) = editor("ab\ncd", cx);
+        let caret = |offset, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| editor.select_range(offset..offset, cx))
+            });
+            cx.run_until_parked();
+            editor.read_with(cx, |editor, _| editor.caret_bounds().unwrap())
+        };
+        let before = caret(2, cx);
+        cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_ghost(1, "XYZ", cx)));
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| {
+            let layout = editor.layout.clone().unwrap();
+            assert!(layout.has_ghost());
+            // The caret at the ghost sits before it; text after it moves
+            // right by its width, and a hit inside it lands at it.
+            let at = layout.caret_bounds(1, Affinity::Downstream);
+            let after = layout.caret_bounds(2, Affinity::Downstream);
+            assert!(after.origin.x > before.origin.x);
+            assert_eq!(layout.hit(at.origin + point(px(1.), px(1.))).0, 1);
+            assert_eq!(layout.hit(after.origin + point(px(0.), px(1.))).0, 2);
+            // Ranges leave the ghost out.
+            let rects = layout.range_rects(0..2, false);
+            assert_eq!(rects.len(), 2);
+            assert_eq!(rects[0].right(), at.origin.x);
+            assert_eq!(rects[1].right(), after.origin.x);
+            assert!(rects[1].left() > at.origin.x);
+        });
+        // Dismissed but not yet drawn again: row movement uses the buffer's
+        // rows, not the ghost's.
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.select_range(1..1, cx);
+                editor.set_ghost(1, "XYZ", cx);
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.row_movement(window, cx, |b, rows| b.move_to_row_end(rows, false));
+                assert_eq!(editor.selected_range(), 2..2);
+            })
+        });
+    }
+
+    #[test]
+    fn a_word_takes_its_space_and_punctuation() {
+        assert_eq!(next_word_len(" jumps over"), 6);
+        assert_eq!(next_word_len("jumps"), 5);
+        assert_eq!(next_word_len(" over, the"), 6);
+        assert_eq!(next_word_len(", the"), 1);
+        assert_eq!(next_word_len("  it's done."), 6);
+        assert_eq!(next_word_len(" done."), 6);
+        assert_eq!(next_word_len(""), 0);
     }
 }

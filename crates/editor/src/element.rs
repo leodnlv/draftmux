@@ -25,9 +25,35 @@ struct LayoutKey {
     marked: Option<Range<usize>>,
     read_only: bool,
     markdown: bool,
+    /// The ghost's buffer offset and text.
+    ghost: Option<(usize, String)>,
+}
+
+impl LayoutKey {
+    fn new(editor: &Editor, wrap_width: Pixels) -> Self {
+        Self {
+            revision: editor.buffer.revision(),
+            wrap_width,
+            style: editor.style.clone(),
+            marked: editor.buffer.marked(),
+            read_only: editor.read_only,
+            markdown: editor.markdown,
+            ghost: editor
+                .ghost
+                .as_ref()
+                .filter(|ghost| !ghost.text.is_empty())
+                .map(|ghost| (ghost.offset, ghost.text.clone())),
+        }
+    }
 }
 
 /// The text as last laid out, in window coordinates.
+///
+/// A ghost (see [`Editor::set_ghost`]) is shaped into its line, so rows and
+/// lines are in display offsets: buffer offsets, with those after the ghost
+/// shifted by its length. The public methods take and return buffer
+/// offsets. [`RowGeometry`] works in display offsets and is only used on a
+/// layout without a ghost, where the two are the same.
 #[derive(Clone)]
 pub(crate) struct Layout {
     key: LayoutKey,
@@ -42,6 +68,8 @@ pub(crate) struct Layout {
     pub content_height: Pixels,
     lines: Rc<Vec<Line>>,
     rows: Rc<Vec<Row>>,
+    /// The ghost's buffer offset and byte length.
+    ghost: Option<(usize, usize)>,
 }
 
 struct Line {
@@ -63,6 +91,28 @@ impl Layout {
         self.rows.last().map_or(0, |row| row.range.end)
     }
 
+    pub fn has_ghost(&self) -> bool {
+        self.ghost.is_some()
+    }
+
+    /// The display offset of buffer offset `offset`; at the ghost, before
+    /// it unless `after_ghost`.
+    fn to_display(&self, offset: usize, after_ghost: bool) -> usize {
+        match self.ghost {
+            Some((at, len)) if offset > at || (offset == at && after_ghost) => offset + len,
+            _ => offset,
+        }
+    }
+
+    /// The buffer offset of display offset `offset`; inside the ghost, the
+    /// ghost's.
+    fn to_buffer(&self, offset: usize) -> usize {
+        match self.ghost {
+            Some((at, len)) if offset > at => offset.saturating_sub(len).max(at),
+            _ => offset,
+        }
+    }
+
     /// x of `offset` on `row`, relative to `origin`.
     fn x_on_row(&self, row: &Row, offset: usize) -> Pixels {
         let line = &self.lines[row.line];
@@ -82,14 +132,20 @@ impl Layout {
             return (0, Affinity::Downstream);
         }
         if local.y >= self.rows[row].y + self.line_height && row == self.rows.len() - 1 {
-            return (self.len(), Affinity::Downstream);
+            return (self.to_buffer(self.len()), Affinity::Downstream);
         }
         let offset = self.offset_at(row, local.x.as_f32());
-        (offset, self.affinity_on_row(row, offset))
+        let affinity = self.affinity_on_row(row, offset);
+        let buffer = self.to_buffer(offset);
+        if buffer != offset || self.ghost.is_some_and(|(at, _)| at == offset) {
+            // At or inside the ghost: before it, where its caret goes.
+            return (buffer, Affinity::Downstream);
+        }
+        (buffer, affinity)
     }
 
     pub fn caret_bounds(&self, offset: usize, affinity: Affinity) -> Bounds<Pixels> {
-        let offset = offset.min(self.len());
+        let offset = self.to_display(offset, false).min(self.len());
         let row = &self.rows[self.row_for(offset, affinity)];
         let x = self.x_on_row(row, offset);
         Bounds::new(
@@ -101,6 +157,28 @@ impl Layout {
     /// One rectangle per visual row covered by `range`. With `to_edge`, rows
     /// the range continues past extend to the wrap width, as selections do.
     pub fn range_rects(&self, range: Range<usize>, to_edge: bool) -> Vec<Bounds<Pixels>> {
+        match self.ghost {
+            Some((at, _)) if range.start < at && at < range.end => {
+                let mut rects =
+                    self.display_rects(self.to_display(range.start, false)..at, to_edge);
+                rects.extend(self.display_rects(
+                    self.to_display(at, true)..self.to_display(range.end, false),
+                    to_edge,
+                ));
+                rects
+            }
+            _ if range.is_empty() => {
+                let at = self.to_display(range.start, false);
+                self.display_rects(at..at, to_edge)
+            }
+            _ => self.display_rects(
+                self.to_display(range.start, true)..self.to_display(range.end, false),
+                to_edge,
+            ),
+        }
+    }
+
+    fn display_rects(&self, range: Range<usize>, to_edge: bool) -> Vec<Bounds<Pixels>> {
         let range = range.start.min(self.len())..range.end.min(self.len());
         let mut rects = Vec::new();
         for row in self.rows.iter() {
@@ -222,75 +300,13 @@ impl Element for EditorElement {
         let style = editor.style.clone();
         let wrap_width = (bounds.size.width - style.padding_x * 2.).max(px(1.));
 
-        let revision = editor.buffer.revision();
-        let key = LayoutKey {
-            revision,
-            wrap_width,
-            style: style.clone(),
-            marked: editor.buffer.marked(),
-            read_only: editor.read_only,
-            markdown: editor.markdown,
-        };
-        let mut layout = if let Some(previous) =
-            editor.layout.as_ref().filter(|layout| layout.key == key)
-        {
-            (**previous).clone()
-        } else {
-            let text = SharedString::from(editor.buffer.text().to_string());
-            let runs = text_runs(
-                &text,
-                &editor.highlights,
-                editor.buffer.marked(),
-                editor.read_only,
-                &style,
-            );
-            let shaped = window
-                .text_system()
-                .shape_text(text, style.font_size, &runs, Some(wrap_width), None)
-                .unwrap_or_default();
-
-            let mut lines = Vec::with_capacity(shaped.len());
-            let mut rows = Vec::new();
-            let mut start = 0;
-            let mut y = Pixels::ZERO;
-            for (line_ix, shaped) in shaped.into_iter().enumerate() {
-                let layout = &shaped.unwrapped_layout;
-                let mut row_start = start;
-                let mut row_y = y;
-                for boundary in shaped.wrap_boundaries() {
-                    let end = start + layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
-                    rows.push(Row {
-                        range: row_start..end,
-                        line: line_ix,
-                        y: row_y,
-                    });
-                    row_start = end;
-                    row_y += style.line_height;
-                }
-                rows.push(Row {
-                    range: row_start..start + shaped.len(),
-                    line: line_ix,
-                    y: row_y,
-                });
-                let len = shaped.len();
-                lines.push(Line { start, y, shaped });
-                start += len + 1;
-                y = row_y + style.line_height;
-            }
-
-            let content_height = y + style.padding_top + style.padding_bottom;
-            Layout {
-                key,
-                revision,
-                bounds,
-                origin: Point::default(),
-                line_height: style.line_height,
-                wrap_width,
-                content_height,
-                lines: Rc::new(lines),
-                rows: Rc::new(rows),
-            }
-        };
+        let key = LayoutKey::new(editor, wrap_width);
+        let mut layout =
+            if let Some(previous) = editor.layout.as_ref().filter(|layout| layout.key == key) {
+                (**previous).clone()
+            } else {
+                shape(editor, key, bounds, window)
+            };
         // Scroll and window position can change without reshaping the text.
         layout.bounds = bounds;
         layout.origin = Point::default();
@@ -359,6 +375,11 @@ impl Element for EditorElement {
         let caret_on = editor.caret_on;
         let read_only = editor.read_only;
         let marked = editor.marked.clone();
+        let waiting = editor
+            .ghost
+            .as_ref()
+            .zip(editor.ghost_waiting)
+            .map(|(ghost, since)| (ghost.offset, since));
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.editor.clone()),
@@ -440,6 +461,19 @@ impl Element for EditorElement {
                     style.caret,
                 ));
             }
+            if let Some((offset, since)) = waiting {
+                let caret = layout.caret_bounds(offset, Affinity::Downstream);
+                let diameter = px(7.);
+                let origin = caret.origin + point(px(6.), (caret.size.height - diameter) / 2.);
+                window.paint_quad(
+                    fill(
+                        Bounds::new(origin, size(diameter, diameter)),
+                        style.caret.opacity(pulse(since)),
+                    )
+                    .corner_radii(diameter / 2.),
+                );
+                window.request_animation_frame();
+            }
         });
         crate::timing::painted(self.editor.entity_id());
         if focused {
@@ -455,6 +489,132 @@ impl Element for EditorElement {
             });
         }
     }
+}
+
+/// `editor` laid out again as it is now, at `previous`'s width and position.
+pub(crate) fn relayout(editor: &Editor, previous: &Layout, window: &mut Window) -> Layout {
+    let key = LayoutKey::new(editor, previous.wrap_width);
+    let mut layout = shape(editor, key, previous.bounds, window);
+    layout.origin = previous.origin;
+    layout
+}
+
+/// Shapes `editor`'s text, with its ghost, into lines and rows.
+fn shape(editor: &Editor, key: LayoutKey, bounds: Bounds<Pixels>, window: &mut Window) -> Layout {
+    let style = &key.style.clone();
+    let wrap_width = key.wrap_width;
+    let revision = key.revision;
+    let buffer = editor.buffer.text();
+    let mut runs = text_runs(
+        buffer,
+        &editor.highlights,
+        editor.buffer.marked(),
+        editor.read_only,
+        style,
+    );
+    let text = match &key.ghost {
+        Some((at, ghost)) => {
+            runs = splice_run(runs, *at, ghost.len(), style);
+            SharedString::from(format!("{}{ghost}{}", &buffer[..*at], &buffer[*at..]))
+        }
+        None => SharedString::from(buffer.to_string()),
+    };
+    let ghost = key.ghost.as_ref().map(|(at, ghost)| (*at, ghost.len()));
+    let shaped = window
+        .text_system()
+        .shape_text(text, style.font_size, &runs, Some(wrap_width), None)
+        .unwrap_or_default();
+
+    let mut lines = Vec::with_capacity(shaped.len());
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut y = Pixels::ZERO;
+    for (line_ix, shaped) in shaped.into_iter().enumerate() {
+        let layout = &shaped.unwrapped_layout;
+        let mut row_start = start;
+        let mut row_y = y;
+        for boundary in shaped.wrap_boundaries() {
+            let end = start + layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            rows.push(Row {
+                range: row_start..end,
+                line: line_ix,
+                y: row_y,
+            });
+            row_start = end;
+            row_y += style.line_height;
+        }
+        rows.push(Row {
+            range: row_start..start + shaped.len(),
+            line: line_ix,
+            y: row_y,
+        });
+        let len = shaped.len();
+        lines.push(Line { start, y, shaped });
+        start += len + 1;
+        y = row_y + style.line_height;
+    }
+
+    let content_height = y + style.padding_top + style.padding_bottom;
+    Layout {
+        key,
+        revision,
+        bounds,
+        origin: Point::default(),
+        line_height: style.line_height,
+        wrap_width,
+        content_height,
+        lines: Rc::new(lines),
+        rows: Rc::new(rows),
+        ghost,
+    }
+}
+
+/// `runs` split at `at` around a faint run of `len` bytes for the ghost.
+fn splice_run(runs: Vec<TextRun>, at: usize, len: usize, style: &EditorStyle) -> Vec<TextRun> {
+    let ghost = TextRun {
+        len,
+        font: style.font.clone(),
+        color: style.faint,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut spliced = Vec::with_capacity(runs.len() + 2);
+    let mut start = 0;
+    let mut placed = false;
+    for run in runs {
+        let end = start + run.len;
+        if !placed && at < end {
+            if at > start {
+                spliced.push(TextRun {
+                    len: at - start,
+                    ..run.clone()
+                });
+            }
+            spliced.push(ghost.clone());
+            spliced.push(TextRun {
+                len: end - at,
+                ..run
+            });
+            placed = true;
+        } else {
+            spliced.push(run);
+        }
+        start = end;
+    }
+    if !placed {
+        spliced.push(ghost);
+    }
+    spliced
+}
+
+/// How long one pulse of the waiting ghost's dot takes.
+const PULSE: f32 = 0.9;
+
+/// The waiting dot's opacity, pulsing between faint and full.
+fn pulse(since: std::time::Instant) -> f32 {
+    let phase = since.elapsed().as_secs_f32() / PULSE * std::f32::consts::TAU;
+    0.25 + 0.75 * (0.5 - 0.5 * phase.cos())
 }
 
 /// The size of `editor`'s text and padding: as wide as its longest line,
@@ -591,13 +751,15 @@ mod tests {
             marked: None,
             read_only: false,
             markdown: true,
+            ghost: None,
         }
     }
 
     #[test]
     fn invalidates_geometry_for_every_shaping_input() {
         let original = key();
-        let changes: [fn(&mut LayoutKey); 9] = [
+        let changes: [fn(&mut LayoutKey); 10] = [
+            |key| key.ghost = Some((0, "ghost".into())),
             |key| key.revision += 1,
             |key| key.wrap_width += px(1.),
             |key| key.marked = Some(0..1),
@@ -628,6 +790,7 @@ mod tests {
             content_height: px(100.),
             lines: Rc::new(Vec::new()),
             rows: Rc::new(Vec::new()),
+            ghost: None,
         };
         let mut moved = layout.clone();
         moved.bounds.origin = point(px(100.), px(200.));

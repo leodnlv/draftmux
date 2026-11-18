@@ -271,6 +271,7 @@ impl Chat {
                         .ok();
                     });
                 }
+                EditorEvent::GhostAccepted(_) | EditorEvent::GhostDismissed => return,
             }
             cx.notify();
         })

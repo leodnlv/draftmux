@@ -10,3 +10,6 @@ markup = { path = "../markup" }
 comrak = { version = "0.59", default-features = false }
 gpui.workspace = true
 unicode-segmentation = "1.13"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

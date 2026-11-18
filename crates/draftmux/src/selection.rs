@@ -13,7 +13,8 @@
 //! The temporary directory is deleted once the agent has exited, so nothing
 //! reaches the draft's own session or chat. The prompt carries the editor
 //! text and the selection, and the agent answers with replacement options as
-//! JSON.
+//! JSON. Continuing the sentence at the cursor is the same call about an
+//! empty selection, answered with options or with plain text.
 
 use std::ffi::OsString;
 use std::ops::Range;
@@ -32,7 +33,7 @@ use crate::process;
 mod stream;
 
 pub(crate) use stream::Agent;
-use stream::Stream;
+use stream::{Format, Stream};
 
 /// A selection call waits for a full model turn over the whole session.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -95,6 +96,11 @@ pub enum Action {
     Alternatives,
     /// The prompt of one of the user's selection actions.
     Instruction(String),
+    /// Finish the sentence at the cursor, an empty selection: as options, or
+    /// as plain text when `text`.
+    Continue {
+        text: bool,
+    },
 }
 
 impl Action {
@@ -104,6 +110,7 @@ impl Action {
                 "Suggest alternative phrasings that preserve the meaning and fit the surrounding text."
             }
             Action::Instruction(text) => text,
+            Action::Continue { .. } => "",
         }
     }
 }
@@ -151,11 +158,32 @@ impl Request {
     fn selected(&self) -> &str {
         &self.text[self.range.clone()]
     }
+
+    fn format(&self, count: usize) -> Format {
+        match self.action {
+            Action::Continue { text: true } => Format::Text,
+            _ => Format::Options(count),
+        }
+    }
+
+    /// Fits an option or the streamed text into the text around the
+    /// selection: keeps the selection's own whitespace around a
+    /// replacement, and spaces a continuation from its neighbours.
+    fn fit(&self, option: &str) -> String {
+        if let Action::Continue { .. } = self.action {
+            let before = self.text[..self.range.start].chars().next_back();
+            let after = self.text[self.range.end..].chars().next();
+            return join(before, option, after);
+        }
+        let (leading, trailing) = surrounding_whitespace(self.selected());
+        format!("{leading}{option}{trailing}")
+    }
 }
 
 /// Runs the call on `backend` and returns up to `config.alternatives`
 /// replacements for the selection, with the selection's own leading and
-/// trailing whitespace kept. The temporary directory is created in
+/// trailing whitespace kept; or, continuing as text, the one continuation,
+/// spaced to fit at the cursor. The temporary directory is created in
 /// `temp_parent` and is gone when this returns. `preview` receives
 /// provisional complete options (or an empty list to retract them); only
 /// the returned options may be applied to the editor.
@@ -206,14 +234,13 @@ pub fn run(
             (Agent::Claude, oneshot.command(temp.path())?)
         }
     };
-    let (leading, trailing) = surrounding_whitespace(request.selected());
     let with_whitespace = |options: Vec<String>| {
         options
             .into_iter()
-            .map(|option| format!("{leading}{option}{trailing}"))
+            .map(|option| request.fit(&option))
             .collect()
     };
-    let mut stream = Stream::new(agent);
+    let mut stream = Stream::new(agent, request.format(config.alternatives));
     // The directory lives until the child has exited, including cancellation.
     let output = process::run_streaming(
         agent.name(),
@@ -221,11 +248,7 @@ pub fn run(
         Some(prompt.as_str()),
         TIMEOUT,
         Some(cancel),
-        |chunk| {
-            stream.feed(chunk, config.alternatives, &mut |options| {
-                preview(with_whitespace(options))
-            })
-        },
+        |chunk| stream.feed(chunk, &mut |options| preview(with_whitespace(options))),
     );
     drop(temp);
     let result = match output {
@@ -282,6 +305,7 @@ fn command(
 
 const START: &str = "<<<SELECTION>>>";
 const END: &str = "<<<END SELECTION>>>";
+const CURSOR: &str = "<<<CURSOR>>>";
 
 /// What the draft is written in. `pi-extension/draftmux.ts` describes the
 /// targets with the same text, and Claude drafts get it as their target
@@ -309,6 +333,9 @@ pub(crate) fn syntax(target: Target) -> &'static str {
 /// Starts with a fixed line, so pi never reads it as a flag (`-…`) or a
 /// file reference (`@…`), and Claude Code never as a slash command.
 fn prompt(request: &Request, count: usize) -> Result<String, String> {
+    if let Action::Continue { text } = request.action {
+        return continue_prompt(request, text, count);
+    }
     let selected = request.selected().trim();
     if selected.is_empty() {
         return Err("Select some text first".into());
@@ -347,6 +374,108 @@ fn prompt(request: &Request, count: usize) -> Result<String, String> {
         return Err("The draft is too long for a selection action".into());
     }
     Ok(prompt)
+}
+
+/// The prompt for continuing at the cursor, `request.range.start`.
+fn continue_prompt(request: &Request, text: bool, count: usize) -> Result<String, String> {
+    let at = request.range.start;
+    let marked = format!("{}{CURSOR}{}", &request.text[..at], &request.text[at..]);
+    let syntax = syntax(request.target);
+    let reply = if text {
+        "Reply with only the text to insert, on one line: no quotes, commentary, \
+         explanation or code fences."
+            .to_owned()
+    } else {
+        format!(
+            "Reply with exactly this JSON shape and nothing else: {{\"alternatives\": [\"...\"]}}\n\
+             - Give {count} distinct options, each only the text to insert at the cursor, on one line.\n\
+             - No commentary, numbering or code fences."
+        )
+    };
+    let prompt = format!(
+        "[Draftmux continue request]\n\
+         This is a one-off request about the draft, separate from editing the draft file. \
+         Don't edit files or use tools.\n\
+         \n\
+         The current draft, written in {syntax}, with the cursor marked by {CURSOR}:\n\
+         \n\
+         {marked}\n\
+         \n\
+         Task: write the text to insert at the cursor that finishes the sentence the cursor is in, \
+         in the draft's voice and using what this conversation knows. If the cursor is at the end \
+         of a sentence, write the next sentence instead. Write only that one sentence or the rest \
+         of it, in {syntax}. Your text goes in at the cursor as is: start where the text before \
+         the cursor leaves off and don't repeat any of it.\n\
+         \n\
+         {reply}"
+    );
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err("The draft is too long to continue".into());
+    }
+    Ok(prompt)
+}
+
+/// The continuation in a plain-text reply, or the part of it streamed so
+/// far (`done` false): the first line, without a code fence, a wrapping
+/// quote or a preamble line ending in a colon. `None` when there's nothing
+/// to show yet, or, when `done`, nothing usable.
+fn continuation(reply: &str, done: bool) -> Option<String> {
+    let mut text = reply.trim_start();
+    if let Some(fenced) = text.strip_prefix("```") {
+        // The fence's language tag runs to the end of its line.
+        text = fenced.split_once('\n')?.1.trim_start();
+    }
+    let (first, rest) = match text.split_once('\n') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (text, None),
+    };
+    let preamble = first.trim_end().ends_with(':');
+    let line = match rest {
+        Some(rest) if preamble && !rest.trim().is_empty() => {
+            rest.trim_start().split('\n').next().unwrap_or_default()
+        }
+        // A colon may yet turn out to end a preamble.
+        None if preamble && !done => return None,
+        _ => first,
+    };
+    let mut line = line.trim_end_matches("```");
+    if done {
+        line = line.trim();
+        for (open, close) in [('"', '"'), ('“', '”'), ('`', '`')] {
+            if let Some(inner) = line
+                .strip_prefix(open)
+                .and_then(|inner| inner.strip_suffix(close))
+                .filter(|inner| !inner.contains(close))
+            {
+                line = inner.trim();
+            }
+        }
+    } else {
+        line = line.trim_start_matches(['"', '“', '`']);
+    }
+    (!line.trim().is_empty()).then(|| line.to_owned())
+}
+
+/// `continuation` to insert between `before` and `after`, the characters
+/// around the cursor: one space between it and the text before it, unless
+/// that ends in whitespace, the continuation starts with punctuation that
+/// attaches to it, or the cursor is inside a word; and one space after it
+/// when a word follows.
+fn join(before: Option<char>, continuation: &str, after: Option<char>) -> String {
+    let text = continuation.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let inside_word = word(before) && word(after);
+    let attaches = text.starts_with([',', '.', ';', ':', '!', '?', ')', ']', '}', '…', '\'', '’']);
+    let space_before = before.is_some_and(|c| !c.is_whitespace()) && !attaches && !inside_word;
+    let space_after = !inside_word && (word(after) || matches!(after, Some('(' | '[' | '"' | '“')));
+    format!(
+        "{}{text}{}",
+        if space_before { " " } else { "" },
+        if space_after { " " } else { "" }
+    )
 }
 
 #[derive(Deserialize)]
@@ -756,6 +885,237 @@ echo '{"type":"agent_settled","aborted":false}'"#,
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
+    fn cursor(text: &str, at: &str, text_reply: bool) -> Request {
+        let at = text.find(at).unwrap();
+        Request {
+            cwd: "/repo".into(),
+            target: Target::Github,
+            text: text.to_string(),
+            range: at..at,
+            action: Action::Continue { text: text_reply },
+        }
+    }
+
+    #[test]
+    fn continue_prompt_marks_the_cursor_and_asks_for_text_or_options() {
+        let request = cursor("The fox jumps. It was", " jumps", true);
+        let text = prompt(&request, 3).unwrap();
+        assert!(text.starts_with("[Draftmux continue request]\n"), "{text}");
+        assert!(text.contains("The fox<<<CURSOR>>> jumps. It was\n"));
+        assert!(text.contains("finishes the sentence the cursor is in"));
+        assert!(text.contains("Reply with only the text to insert"));
+        assert!(!text.contains("alternatives"));
+
+        let options = prompt(&cursor("Ship it", "", false), 4).unwrap();
+        assert!(options.contains("<<<CURSOR>>>Ship it"));
+        assert!(options.contains("{\"alternatives\": [\"...\"]}"));
+        assert!(options.contains("Give 4 distinct options"));
+
+        let long = "word ".repeat(60_000);
+        assert_eq!(
+            prompt(&cursor(&long, "word", true), 3).unwrap_err(),
+            "The draft is too long to continue"
+        );
+    }
+
+    #[test]
+    fn continuation_takes_the_first_line_without_wrappers_or_preambles() {
+        let done = |reply| continuation(reply, true);
+        assert_eq!(
+            done(" jumps over the dog.  ").unwrap(),
+            "jumps over the dog."
+        );
+        assert_eq!(done("\"jumps over.\"").unwrap(), "jumps over.");
+        assert_eq!(done("“jumps over.”").unwrap(), "jumps over.");
+        assert_eq!(done("```text\njumps over.\n```").unwrap(), "jumps over.");
+        assert_eq!(done("jumps over.\n\nMore text.").unwrap(), "jumps over.");
+        assert_eq!(
+            done("Here's a continuation:\n\njumps over.").unwrap(),
+            "jumps over."
+        );
+        // A quote that only starts the text belongs to it.
+        assert_eq!(done("\"Hi,\" she said.").unwrap(), "\"Hi,\" she said.");
+        assert_eq!(done("as follows:").unwrap(), "as follows:");
+        for empty in ["", "  \n ", "```\n```", "\"\""] {
+            assert_eq!(done(empty), None, "{empty:?}");
+        }
+
+        let partial = |reply| continuation(reply, false);
+        assert_eq!(partial(" jumps ").unwrap(), "jumps ");
+        assert_eq!(partial("\"jumps").unwrap(), "jumps");
+        assert_eq!(partial("```"), None);
+        assert_eq!(partial("Here's a continuation:"), None);
+        assert_eq!(partial("Here's one:\njumps").unwrap(), "jumps");
+    }
+
+    #[test]
+    fn join_spaces_a_continuation_from_its_neighbours() {
+        let cases = [
+            (Some('x'), "jumps", None, " jumps"),
+            (Some('.'), "Next one.", None, " Next one."),
+            (Some('"'), "Next.", Some('\n'), " Next."),
+            (Some(' '), " jumps ", None, "jumps"),
+            (None, "Start.", None, "Start."),
+            (Some('\n'), "Start.", Some('\n'), "Start."),
+            (Some('x'), ", and more", None, ", and more"),
+            (Some('x'), "'s done.", None, "'s done."),
+            // Inside a word, the rest of it.
+            (Some('u'), "mps", Some('s'), "mps"),
+            (Some(','), "and then", Some('t'), " and then "),
+            (Some('x'), "jumps over", Some(' '), " jumps over"),
+            (Some('x'), "jumps over", Some('.'), " jumps over"),
+            (Some('x'), "  ", Some('t'), ""),
+        ];
+        for (before, text, after, joined) in cases {
+            assert_eq!(
+                join(before, text, after),
+                joined,
+                "{before:?} {text:?} {after:?}"
+            );
+        }
+    }
+
+    /// A fake pi that streams `reply` as one text delta per character.
+    #[cfg(unix)]
+    fn streaming_pi(dir: &Path, reply: &str) -> Command {
+        let mut events = String::new();
+        for c in reply.chars() {
+            let delta = serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":c.to_string()}});
+            events.push_str(&format!("{delta}\n"));
+        }
+        let end = serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":reply}]}});
+        events.push_str(&format!(
+            "{end}\n{{\"type\":\"agent_settled\",\"aborted\":false}}\n"
+        ));
+        fs::write(dir.join("events"), events).unwrap();
+        let script = dir.join("pi");
+        fs::write(
+            &script,
+            format!(
+                "cat > \"$0.stdin\"\ncat '{}'\n",
+                dir.join("events").display()
+            ),
+        )
+        .unwrap();
+        let mut pi = Command::new("/bin/sh");
+        pi.arg(&script);
+        pi
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn continuing_as_text_streams_the_continuation_spaced_to_fit() {
+        let bin = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let mut request = cursor("The quick fox\n", "\n", true);
+        request.cwd = parent.path().to_path_buf();
+        let mut previews = Vec::new();
+        let result = run(
+            self::pi(streaming_pi(bin.path(), "jumps over.")),
+            &request,
+            &SelectionConfig::default(),
+            parent.path(),
+            &AtomicBool::new(false),
+            |options| previews.push(options),
+        )
+        .unwrap();
+        assert_eq!(result, [" jumps over."]);
+        assert_eq!(previews.first().unwrap(), &[" j"]);
+        assert_eq!(previews.last().unwrap(), &result);
+        // Every preview extends the one before.
+        for pair in previews.windows(2) {
+            assert!(pair[1][0].starts_with(&pair[0][0]), "{pair:?}");
+        }
+        let prompt = fs::read_to_string(bin.path().join("pi.stdin")).unwrap();
+        assert!(prompt.contains("The quick fox<<<CURSOR>>>\n"), "{prompt}");
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn continuing_with_options_spaces_each() {
+        let bin = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let mut request = cursor("Done.", "", false);
+        request.range = 5..5;
+        request.cwd = parent.path().to_path_buf();
+        let reply = r#"{"alternatives":["Next one.","Then this."]}"#;
+        let options = run(
+            self::pi(streaming_pi(bin.path(), reply)),
+            &request,
+            &SelectionConfig::default(),
+            parent.path(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(options, [" Next one.", " Then this."]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_continues_as_text_from_a_copy_of_the_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = claude_session(&tmp.path().join("draft"));
+        let before = fs::read(session.owned()).unwrap();
+        let parent = tmp.path().join("temp");
+        fs::create_dir_all(&parent).unwrap();
+        let frames = r#"{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"jumps "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"over."}}}
+{"type":"result","subtype":"success","is_error":false,"result":"jumps over.","stop_reason":"end_turn","terminal_reason":"completed"}"#;
+        let mut request = cursor("The fox", "", true);
+        request.range = 7..7;
+        request.cwd = tmp.path().to_path_buf();
+        let mut previews = Vec::new();
+        let result = run(
+            Backend::Claude {
+                program: fake_claude(tmp.path(), frames, 0),
+                env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+                session: session.clone(),
+            },
+            &request,
+            &SelectionConfig::default(),
+            &parent,
+            &AtomicBool::new(false),
+            |options| previews.push(options),
+        )
+        .unwrap();
+        assert_eq!(result, [" jumps over."]);
+        assert_eq!(
+            previews,
+            [vec![" jumps".to_string()], vec![" jumps over.".to_string()]]
+        );
+        let stdin = fs::read_to_string(tmp.path().join("stdin")).unwrap();
+        assert!(
+            stdin.starts_with("[Draftmux continue request]\n"),
+            "{stdin}"
+        );
+        assert_eq!(fs::read(session.owned()).unwrap(), before);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+
+        // An empty reply is a failure, with the reason.
+        let tmp = tempfile::tempdir().unwrap();
+        let session = claude_session(&tmp.path().join("draft"));
+        let frames = r#"{"type":"result","subtype":"success","is_error":false,"result":"```\n```","stop_reason":"end_turn","terminal_reason":"completed"}"#;
+        let mut request = cursor("The fox", "", true);
+        request.cwd = tmp.path().to_path_buf();
+        let err = run(
+            Backend::Claude {
+                program: fake_claude(tmp.path(), frames, 0),
+                env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+                session,
+            },
+            &request,
+            &SelectionConfig::default(),
+            tmp.path(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(err, "Claude Code's reply had no continuation");
+    }
+
     /// Needs pi on `PATH` with a working default model in `~/.pi/agent`:
     /// `cargo test -j 2 -p draftmux --bin draftmux real_pi_selection -- --ignored`.
     #[test]
@@ -806,7 +1166,7 @@ echo '{"type":"agent_settled","aborted":false}'"#,
             pi: Command::new("pi"),
             extension: extension.to_path_buf(),
             session_file: session_file.clone(),
-            agent_dir,
+            agent_dir: agent_dir.clone(),
         };
         let options = run(
             backend,
@@ -841,6 +1201,49 @@ echo '{"type":"agent_settled","aborted":false}'"#,
             0,
             "temp dir removed"
         );
+
+        // Continuing the sentence at the cursor streams one line of text.
+        let continuation = run(
+            Backend::Pi {
+                pi: Command::new("pi"),
+                extension: extension.to_path_buf(),
+                session_file: session_file.clone(),
+                agent_dir,
+            },
+            &continue_request(cwd.path()),
+            &SelectionConfig::default(),
+            parent.path(),
+            &AtomicBool::new(false),
+            |options| eprintln!("continuation preview: {options:?}"),
+        )
+        .unwrap();
+        check_continuation(&continuation);
+        assert_eq!(fs::read(&session_file).unwrap(), before);
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    /// A request to continue "I'll take a look" after its last word.
+    fn continue_request(cwd: &Path) -> Request {
+        let text = "Thanks for the detailed report! I'll take a look\n";
+        let at = text.len() - 1;
+        Request {
+            cwd: cwd.to_path_buf(),
+            target: Target::Github,
+            text: text.to_string(),
+            range: at..at,
+            action: Action::Continue { text: true },
+        }
+    }
+
+    fn check_continuation(options: &[String]) {
+        eprintln!("continuation: {options:?}");
+        let [continuation] = options else {
+            panic!("one continuation: {options:?}")
+        };
+        assert!(continuation.starts_with(' '), "spaced from the word before");
+        assert!(continuation.trim().len() > 1);
+        assert!(!continuation.contains('\n'));
+        assert!(!continuation.contains(CURSOR));
     }
 
     /// A fake `claude` (`claude.sh`) that answers `--version`, records its
@@ -1061,7 +1464,7 @@ exit {status}
         let mut first_preview = false;
         let options = run(
             Backend::Claude {
-                program,
+                program: program.clone(),
                 env,
                 session: session.clone(),
             },
@@ -1086,6 +1489,27 @@ exit {status}
             0,
             "temp dir removed"
         );
+
+        // Continuing the sentence at the cursor streams one line of text.
+        let continuation = run(
+            Backend::Claude {
+                program,
+                env: std::env::vars_os().collect(),
+                session: session.clone(),
+            },
+            &continue_request(&cwd),
+            &SelectionConfig {
+                model: Some("haiku".into()),
+                ..SelectionConfig::default()
+            },
+            &parent,
+            &AtomicBool::new(false),
+            |options| eprintln!("continuation preview: {options:?}"),
+        )
+        .unwrap();
+        check_continuation(&continuation);
+        assert_eq!(fs::read(session.owned()).unwrap(), before);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
 
         // Claude Code names the project directory after the cwd; whatever it
         // made for this temporary one must hold no transcript.

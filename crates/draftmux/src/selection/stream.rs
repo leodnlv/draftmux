@@ -31,9 +31,25 @@ impl Agent {
     }
 }
 
+/// What the reply holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Format {
+    /// Up to this many options, as JSON.
+    Options(usize),
+    /// Plain text to insert at the cursor, given as the only option.
+    Text,
+}
+
+impl Default for Format {
+    fn default() -> Self {
+        Format::Options(draftmux_settings::DEFAULT_ALTERNATIVES)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Stream {
     agent: Agent,
+    format: Format,
     line: Vec<u8>,
     text: String,
     shown: Vec<String>,
@@ -42,9 +58,10 @@ pub(super) struct Stream {
 }
 
 impl Stream {
-    pub fn new(agent: Agent) -> Self {
+    pub fn new(agent: Agent, format: Format) -> Self {
         Self {
             agent,
+            format,
             ..Self::default()
         }
     }
@@ -52,7 +69,6 @@ impl Stream {
     pub fn feed(
         &mut self,
         bytes: &[u8],
-        count: usize,
         preview: &mut impl FnMut(Vec<String>),
     ) -> Result<(), String> {
         let name = self.agent.name();
@@ -66,8 +82,8 @@ impl Stream {
                     .map_err(|_| format!("{name} printed an invalid selection event"))?;
                 self.line.clear();
                 match self.agent {
-                    Agent::Pi => self.event(event, count, preview)?,
-                    Agent::Claude => self.claude_event(&event, count, preview)?,
+                    Agent::Pi => self.event(event, preview)?,
+                    Agent::Claude => self.claude_event(&event, preview)?,
                 }
             }
         }
@@ -83,13 +99,9 @@ impl Stream {
         }
     }
 
-    /// Appends streamed text and previews the options it completes.
-    fn text(
-        &mut self,
-        text: &str,
-        count: usize,
-        preview: &mut impl FnMut(Vec<String>),
-    ) -> Result<(), String> {
+    /// Appends streamed text and previews the options it completes, or the
+    /// text so far.
+    fn text(&mut self, text: &str, preview: &mut impl FnMut(Vec<String>)) -> Result<(), String> {
         if self.text.len() + text.len() > MAX_BYTES {
             return Err(format!(
                 "{}'s selection reply was too large",
@@ -97,14 +109,28 @@ impl Stream {
             ));
         }
         self.text.push_str(text);
-        self.publish(completed_options(&self.text, count), preview);
+        let shown = match self.format {
+            Format::Options(count) => completed_options(&self.text, count),
+            Format::Text => super::continuation(&self.text, false).into_iter().collect(),
+        };
+        self.publish(shown, preview);
         Ok(())
+    }
+
+    /// The reply's options, or its text as the only one.
+    fn parse(&self, text: &str) -> Result<Vec<String>, String> {
+        let name = self.agent.name();
+        match self.format {
+            Format::Options(count) => super::parse(name, text, count),
+            Format::Text => super::continuation(text, true)
+                .map(|text| vec![text])
+                .ok_or_else(|| format!("{name}'s reply had no continuation")),
+        }
     }
 
     fn claude_event(
         &mut self,
         frame: &Value,
-        count: usize,
         preview: &mut impl FnMut(Vec<String>),
     ) -> Result<(), String> {
         if self.settled {
@@ -112,10 +138,10 @@ impl Stream {
         }
         match Reply::of(frame) {
             Reply::Message => self.reset(preview),
-            Reply::TextBlock if !self.text.is_empty() => self.text("\n\n", count, preview)?,
-            Reply::Text(text) => self.text(text, count, preview)?,
+            Reply::TextBlock if !self.text.is_empty() => self.text("\n\n", preview)?,
+            Reply::Text(text) => self.text(text, preview)?,
             Reply::Done(reply) => {
-                let result = reply.and_then(|text| super::parse(self.agent.name(), text, count));
+                let result = reply.and_then(|text| self.parse(text));
                 self.publish(result.as_ref().cloned().unwrap_or_default(), preview);
                 self.result = Some(result);
                 self.settled = true;
@@ -139,12 +165,7 @@ impl Stream {
         self.publish(Vec::new(), preview);
     }
 
-    fn event(
-        &mut self,
-        event: Value,
-        count: usize,
-        preview: &mut impl FnMut(Vec<String>),
-    ) -> Result<(), String> {
+    fn event(&mut self, event: Value, preview: &mut impl FnMut(Vec<String>)) -> Result<(), String> {
         match event["type"].as_str() {
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 self.reset(preview);
@@ -154,13 +175,13 @@ impl Stream {
                 let delta = &event["assistantMessageEvent"];
                 match delta["type"].as_str() {
                     Some("text_start") if !self.text.is_empty() => {
-                        self.text("\n\n", count, preview)?;
+                        self.text("\n\n", preview)?;
                     }
                     Some("text_delta") => {
                         let text = delta["delta"]
                             .as_str()
                             .ok_or("pi sent an invalid text delta")?;
-                        self.text(text, count, preview)?;
+                        self.text(text, preview)?;
                     }
                     _ => {}
                 }
@@ -176,7 +197,7 @@ impl Stream {
                         .filter_map(|part| part["text"].as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    super::parse("pi", &text, count)
+                    self.parse(&text)
                 } else {
                     Err(match message["stopReason"].as_str() {
                         Some("length") => "pi's selection reply was truncated".into(),
@@ -210,8 +231,10 @@ impl Stream {
         if !self.settled {
             return Err(format!("{name} didn't finish the selection request"));
         }
-        self.result
-            .unwrap_or_else(|| Err(format!("{name}'s reply had no alternatives")))
+        match self.result {
+            Some(result) => result,
+            None => self.parse(""),
+        }
     }
 }
 
@@ -259,7 +282,7 @@ mod tests {
         // Split inside Unicode, JSON strings, and event framing.
         for byte in bytes {
             stream
-                .feed(&[byte], 3, &mut |options| updates.push(options))
+                .feed(&[byte], &mut |options| updates.push(options))
                 .unwrap();
         }
     }
@@ -379,31 +402,64 @@ mod tests {
         assert!(updates.is_empty());
         assert!(
             stream
-                .feed(&vec![b'x'; MAX_BYTES + 1], 3, &mut |_| {})
+                .feed(&vec![b'x'; MAX_BYTES + 1], &mut |_| {})
                 .is_err()
         );
-        assert!(
-            Stream::default()
-                .feed(b"not json\n", 3, &mut |_| {})
-                .is_err()
-        );
+        assert!(Stream::default().feed(b"not json\n", &mut |_| {}).is_err());
         let mut stream = Stream {
             text: "x".repeat(MAX_BYTES),
             ..Stream::default()
         };
         let start = json!({"type":"message_update","assistantMessageEvent":{"type":"text_start"}});
-        assert!(stream.event(start, 3, &mut |_| {}).is_err());
-        assert!(stream.event(delta("x"), 3, &mut |_| {}).is_err());
+        assert!(stream.event(start, &mut |_| {}).is_err());
+        assert!(stream.event(delta("x"), &mut |_| {}).is_err());
         let mut stream = Stream::default();
-        stream.feed(b"{", 3, &mut |_| {}).unwrap();
+        stream.feed(b"{", &mut |_| {}).unwrap();
         assert!(stream.finish().is_err());
+    }
+
+    #[test]
+    fn text_mode_previews_the_text_so_far_and_retries_retract_it() {
+        let mut stream = Stream::new(Agent::Pi, Format::Text);
+        let mut updates = Vec::new();
+        send(&mut stream, delta(" jumps"), &mut updates);
+        send(&mut stream, delta(" over"), &mut updates);
+        send(
+            &mut stream,
+            json!({"type":"auto_retry_start"}),
+            &mut updates,
+        );
+        send(&mut stream, delta("leaps."), &mut updates);
+        send(&mut stream, end("leaps.\n\nMore.", "stop"), &mut updates);
+        send(
+            &mut stream,
+            json!({"type":"agent_settled","aborted":false}),
+            &mut updates,
+        );
+        assert_eq!(
+            updates,
+            [
+                vec!["jumps".to_string()],
+                vec!["jumps over".to_string()],
+                vec![],
+                vec!["leaps.".to_string()],
+            ]
+        );
+        assert_eq!(stream.finish().unwrap(), ["leaps."]);
+
+        let mut stream = Stream::new(Agent::Claude, Format::Text);
+        claude_send(&mut stream, claude_result("  "), &mut Vec::new());
+        assert_eq!(
+            stream.finish().unwrap_err(),
+            "Claude Code's reply had no continuation"
+        );
     }
 
     fn claude_send(stream: &mut Stream, frame: Value, updates: &mut Vec<Vec<String>>) {
         let mut bytes = serde_json::to_vec(&frame).unwrap();
         bytes.push(b'\n');
         stream
-            .feed(&bytes, 3, &mut |options| updates.push(options))
+            .feed(&bytes, &mut |options| updates.push(options))
             .unwrap();
     }
 
@@ -417,7 +473,7 @@ mod tests {
 
     #[test]
     fn claude_previews_reset_per_message_and_the_result_decides() {
-        let mut stream = Stream::new(Agent::Claude);
+        let mut stream = Stream::new(Agent::Claude, Format::default());
         let mut updates = Vec::new();
         let start = json!({"type":"stream_event","event":{"type":"message_start","message":{}}});
         claude_send(&mut stream, start.clone(), &mut updates);
@@ -452,7 +508,7 @@ mod tests {
 
     #[test]
     fn claude_errors_are_reported_and_retract_previews() {
-        let mut stream = Stream::new(Agent::Claude);
+        let mut stream = Stream::new(Agent::Claude, Format::default());
         let mut updates = Vec::new();
         claude_send(
             &mut stream,
@@ -479,8 +535,8 @@ mod tests {
         assert_eq!(stream.reported_error(), None);
 
         assert_eq!(
-            Stream::new(Agent::Claude)
-                .feed(b"nope\n", 3, &mut |_| {})
+            Stream::new(Agent::Claude, Format::default())
+                .feed(b"nope\n", &mut |_| {})
                 .unwrap_err(),
             "Claude Code printed an invalid selection event"
         );

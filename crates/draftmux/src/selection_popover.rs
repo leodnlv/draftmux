@@ -31,6 +31,14 @@
 //! is inactive and opens again once the main window is active. Losing focus
 //! never dismisses the popover itself: its actions, running call and options
 //! stay until the user picks one or dismisses it.
+//!
+//! Continuing the sentence at the cursor runs the same agent call about the
+//! empty selection there. `ContinueOptions` shows its options in the
+//! popover, placed at the caret. `ContinueSentence` streams one
+//! continuation into the editor's ghost (see [`Editor::set_ghost`]), which
+//! the user accepts or dismisses in the editor; the call ends with the
+//! ghost, which goes when focus leaves the editor but stays while the app is
+//! inactive. Starting either ends the other.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -63,7 +71,18 @@ use crate::selection::{
 };
 use crate::theme::{self, Palette};
 
-actions!(selection_popover, [Dismiss, Confirm, Next, Previous, Back]);
+actions!(
+    selection_popover,
+    [
+        Dismiss,
+        Confirm,
+        Next,
+        Previous,
+        Back,
+        ContinueSentence,
+        ContinueOptions
+    ]
+);
 
 /// Applies the option with this index.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -75,6 +94,9 @@ const POPOVER_CONTEXT: &str = "SelectionPopover";
 const RESULTS_CONTEXT: &str = "SelectionResults";
 /// Around the comment field, in the panel.
 const COMMENT_CONTEXT: &str = "SelectionComment";
+/// Around the draft's editor, always: the continue keys are bound there and
+/// not in other editors.
+const DRAFT_EDITOR_CONTEXT: &str = "DraftEditor";
 
 /// How long the selection must stay put before the popover appears, so
 /// shift-arrow selections don't flash it on every step.
@@ -122,6 +144,19 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", Confirm, comment.as_deref()),
         KeyBinding::new("escape", Back, comment.as_deref()),
     ]);
+    let draft_editor = Some(format!("{DRAFT_EDITOR_CONTEXT} > Editor"));
+    bindings.extend([
+        KeyBinding::new(
+            editor::secondary!("enter"),
+            ContinueSentence,
+            draft_editor.as_deref(),
+        ),
+        KeyBinding::new(
+            editor::secondary!("shift-enter"),
+            ContinueOptions,
+            draft_editor.as_deref(),
+        ),
+    ]);
     // Bound after the editor's keys, so these win at the same depth.
     cx.bind_keys(bindings);
 }
@@ -138,6 +173,8 @@ pub enum SelectionPopoverEvent {
         text: String,
         prompt: SharedString,
     },
+    /// Continuing the sentence into the ghost failed, for this reason.
+    ContinueFailed(String),
 }
 
 impl EventEmitter<SelectionPopoverEvent> for SelectionPopover {}
@@ -181,7 +218,31 @@ pub struct SelectionPopover {
     /// The name of the action that was run last, which the edit history
     /// shows for an option applied from it.
     action_name: SharedString,
+    /// The call streaming into the editor's ghost.
+    ghost: Option<GhostCall>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A continuation streaming into the editor's ghost, which shows what of it
+/// the user hasn't accepted yet. Dropping it cancels the call.
+struct GhostCall {
+    /// The continuation's start the user has accepted.
+    accepted: String,
+    /// The agent has finished.
+    done: bool,
+    cancel: CancelOnDrop,
+    _task: Task<()>,
+}
+
+impl GhostCall {
+    fn new(cancel: CancelOnDrop, task: Task<()>) -> Self {
+        Self {
+            accepted: String::new(),
+            done: false,
+            cancel,
+            _task: task,
+        }
+    }
 }
 
 /// The popover is shown for `range` of `text`.
@@ -304,6 +365,15 @@ impl SelectionPopover {
         let subscriptions = vec![
             focus_out(&editor_focus, window, cx),
             focus_out(&preview_focus, window, cx),
+            // Leaving the app keeps the editor focused: the ghost stays.
+            cx.on_focus_out(&editor_focus, window, {
+                let editor_focus = editor_focus.clone();
+                move |this, _, window, cx| {
+                    if !editor_focus.contains_focused(window, cx) {
+                        this.end_ghost(cx);
+                    }
+                }
+            }),
             cx.subscribe(&editor, |this, _, event, cx| this.editor_event(event, cx)),
             cx.observe(&editor, |this, _, cx| this.schedule_reconcile(cx)),
             cx.observe(&AppSettings::global(cx), |this, settings, cx| {
@@ -357,6 +427,7 @@ impl SelectionPopover {
             hidden: false,
             main_bounds: Some(window.bounds()),
             action_name: SharedString::default(),
+            ghost: None,
             _subscriptions: subscriptions,
         }
     }
@@ -364,6 +435,7 @@ impl SelectionPopover {
     pub fn set_draft(&mut self, draft: Option<Draft>, cx: &mut Context<Self>) {
         self.draft = draft;
         self.dismiss(cx);
+        self.end_ghost(cx);
     }
 
     /// Takes the current draft's newer metadata, such as its agent's model,
@@ -397,7 +469,7 @@ impl SelectionPopover {
         cx: &App,
     ) -> AnyElement {
         let popover = this.read(cx);
-        let context = match &popover.open {
+        let mut context = match &popover.open {
             Some(Open {
                 mode: Mode::Results(_),
                 ..
@@ -405,6 +477,12 @@ impl SelectionPopover {
             Some(_) => Some(POPOVER_CONTEXT.to_string()),
             None => None,
         };
+        if !preview {
+            context = Some(match context {
+                Some(context) => format!("{DRAFT_EDITOR_CONTEXT} {context}"),
+                None => DRAFT_EDITOR_CONTEXT.to_string(),
+            });
+        }
         let entity = this.clone();
         div()
             .size_full()
@@ -432,6 +510,18 @@ impl SelectionPopover {
             .on_action({
                 let this = this.clone();
                 move |pick: &Pick, _, cx| this.update(cx, |this, cx| this.apply(pick.0, cx))
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &ContinueSentence, _, cx| {
+                    this.update(cx, |this, cx| this.continue_sentence(cx))
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &ContinueOptions, _, cx| {
+                    this.update(cx, |this, cx| this.continue_options(cx))
+                }
             })
             .child(child)
             // Before the panel opens, a hidden copy of its content in the
@@ -475,9 +565,10 @@ impl SelectionPopover {
     }
 
     /// Whether the selection was made in the preview, so the popover goes
-    /// there.
+    /// there. Continuing at the cursor is always in the editor.
     fn in_preview(&self, cx: &App) -> bool {
-        self.preview.read(cx).range().is_some()
+        self.open.as_ref().is_none_or(|open| !open.range.is_empty())
+            && self.preview.read(cx).range().is_some()
     }
 
     /// Whether a draft is focused that selection calls can fork: any
@@ -503,6 +594,8 @@ impl SelectionPopover {
 
     fn editor_event(&mut self, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
+            EditorEvent::GhostAccepted(text) => self.ghost_accepted(text, cx),
+            EditorEvent::GhostDismissed => self.ghost = None,
             EditorEvent::Edited => self.dismiss(cx),
             EditorEvent::SelectionChanged(range) => {
                 if self.open.as_ref().is_some_and(|open| open.range != *range) {
@@ -845,35 +938,79 @@ impl SelectionPopover {
 
     fn run(&mut self, action: SelectionAction, label: SharedString, cx: &mut Context<Self>) {
         let Some(open) = &self.open else { return };
-        let Some(draft) = &self.draft else { return };
+        let (text, range) = (open.text.clone(), open.range.clone());
+        let call = self.call(
+            text,
+            range,
+            action,
+            |this, request, options, cx| this.options_arrived(request, options, false, cx),
+            |this, request, result, cx| {
+                if !this
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| open.mode.is_request(request))
+                {
+                    return;
+                }
+                match result {
+                    Ok(options) => this.options_arrived(request, options, true, cx),
+                    Err(err) => this.set_mode(Mode::Error(err.into()), None, cx),
+                }
+            },
+            cx,
+        );
+        match call {
+            Ok((cancel, task)) => self.set_mode(
+                Mode::Running {
+                    label,
+                    previews: Vec::new(),
+                    _cancel: cancel,
+                    _task: task,
+                },
+                None,
+                cx,
+            ),
+            Err(err) => self.set_mode(Mode::Error(err.into()), None, cx),
+        }
+    }
+
+    /// Starts the draft's agent on `action` about `range` of `text`. Its
+    /// previews go to `update` and its result to `done`, each with the
+    /// call's cancel flag, which identifies it. Dropping the returned guard
+    /// cancels it.
+    #[allow(clippy::type_complexity)]
+    fn call(
+        &mut self,
+        text: String,
+        range: Range<usize>,
+        action: SelectionAction,
+        update: fn(&mut Self, &Arc<AtomicBool>, Vec<String>, &mut Context<Self>),
+        done: fn(&mut Self, &Arc<AtomicBool>, Result<Vec<String>, String>, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> Result<(CancelOnDrop, Task<()>), String> {
+        let draft = self.draft.as_ref().ok_or("No draft is open.")?;
         let meta = &draft.meta;
-        let request = Request::new(meta, open.text.clone(), open.range.clone(), action);
+        let request = Request::new(meta, text, range, action);
         // The count is an app preference, read on every call; the rest is
         // what the draft kept at creation.
         let alternatives = AppSettings::global(cx).read(cx).settings.alternatives();
         let config = SelectionConfig::for_draft(meta, alternatives);
-        let backend = (|| {
-            let env = ShellEnv::global(cx).ok_or("Reading the login shell environment…")?;
-            Ok::<_, String>(match &meta.backend {
-                Backend::Pi(pi) => SelectionBackend::Pi {
-                    pi: env.command(env.pi().map_err(|err| err.to_string())?),
-                    extension: resources::pi_extension().map_err(|err| format!("{err:#}"))?,
-                    session_file: pi
-                        .session_file
-                        .clone()
-                        .ok_or("This draft has no pi session yet.")?,
-                    agent_dir: pi.agent_dir.clone(),
-                },
-                Backend::Claude(claude) => SelectionBackend::Claude {
-                    program: env.claude().map_err(|err| err.to_string())?.to_path_buf(),
-                    env: env.vars().to_vec(),
-                    session: crate::chat::draft_session(draft, claude),
-                },
-            })
-        })();
-        let backend = match backend {
-            Ok(backend) => backend,
-            Err(err) => return self.set_mode(Mode::Error(err.into()), None, cx),
+        let env = ShellEnv::global(cx).ok_or("Reading the login shell environment…")?;
+        let backend = match &meta.backend {
+            Backend::Pi(pi) => SelectionBackend::Pi {
+                pi: env.command(env.pi().map_err(|err| err.to_string())?),
+                extension: resources::pi_extension().map_err(|err| format!("{err:#}"))?,
+                session_file: pi
+                    .session_file
+                    .clone()
+                    .ok_or("This draft has no pi session yet.")?,
+                agent_dir: pi.agent_dir.clone(),
+            },
+            Backend::Claude(claude) => SelectionBackend::Claude {
+                program: env.claude().map_err(|err| err.to_string())?.to_path_buf(),
+                env: env.vars().to_vec(),
+                session: crate::chat::draft_session(draft, claude),
+            },
         };
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -897,40 +1034,167 @@ impl SelectionPopover {
         let task = cx.spawn(async move |this, cx| {
             while let Ok(options) = updates.recv().await {
                 if this
-                    .update(cx, |this, cx| {
-                        this.options_arrived(&request, options, false, cx);
-                    })
+                    .update(cx, |this, cx| update(this, &request, options, cx))
                     .is_err()
                 {
                     return;
                 }
             }
             let result = call.await;
+            this.update(cx, |this, cx| done(this, &request, result, cx))
+                .ok();
+        });
+        Ok((CancelOnDrop(cancel), task))
+    }
+
+    /// Collapses the editor's selections to the end of the selection, where
+    /// a continuation goes, and returns the caret; `None` when the draft
+    /// can't be continued now.
+    fn continue_at(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+        if self.draft.is_none() || self.editor.read(cx).is_read_only() {
+            return None;
+        }
+        Some(self.editor.update(cx, |editor, cx| {
+            let end = editor.selected_range().end;
+            editor.set_extra_selections(Vec::new(), cx);
+            editor.select_range(end..end, cx);
+            end
+        }))
+    }
+
+    /// Shows options for continuing the sentence at the cursor.
+    fn continue_options(&mut self, cx: &mut Context<Self>) {
+        self.end_ghost(cx);
+        self.dismiss(cx);
+        let Some(at) = self.continue_at(cx) else {
+            return;
+        };
+        // After the collapse's events, which would dismiss the popover.
+        let this = cx.entity();
+        cx.defer(move |cx| {
             this.update(cx, |this, cx| {
-                if !this
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| open.mode.is_request(&request))
-                {
+                let editor = this.editor.read(cx);
+                if editor.selected_range() != (at..at) {
                     return;
                 }
-                match result {
-                    Ok(options) => this.options_arrived(&request, options, true, cx),
-                    Err(err) => this.set_mode(Mode::Error(err.into()), None, cx),
-                }
+                this.open = Some(Open {
+                    range: at..at,
+                    text: editor.text().to_string(),
+                    mode: Mode::Error(SharedString::default()),
+                    highlighted: None,
+                });
+                this.action_name = "Continue".into();
+                this.run(
+                    SelectionAction::Continue { text: false },
+                    "Continuing…".into(),
+                    cx,
+                );
             })
-            .ok();
         });
-        self.set_mode(
-            Mode::Running {
-                label,
-                previews: Vec::new(),
-                _cancel: CancelOnDrop(cancel),
-                _task: task,
+    }
+
+    /// Streams a continuation of the sentence at the cursor into the
+    /// editor's ghost; a ghost already showing is accepted first.
+    fn continue_sentence(&mut self, cx: &mut Context<Self>) {
+        self.ghost = None;
+        self.editor.update(cx, |editor, cx| editor.accept_ghost(cx));
+        self.dismiss(cx);
+        let Some(at) = self.continue_at(cx) else {
+            return;
+        };
+        let text = self.editor.read(cx).text().to_string();
+        let call = self.call(
+            text,
+            at..at,
+            SelectionAction::Continue { text: true },
+            |this, request, options, cx| {
+                let text = options.into_iter().next().unwrap_or_default();
+                this.ghost_arrived(request, &text, false, cx);
             },
-            None,
+            |this, request, result, cx| match result {
+                Ok(options) => {
+                    let text = options.into_iter().next().unwrap_or_default();
+                    this.ghost_arrived(request, &text, true, cx);
+                }
+                Err(err) => this.ghost_failed(request, err, cx),
+            },
             cx,
         );
+        match call {
+            Ok((cancel, task)) => {
+                self.editor
+                    .update(cx, |editor, cx| editor.set_ghost(at, "", cx));
+                self.ghost = Some(GhostCall::new(cancel, task));
+            }
+            Err(err) => cx.emit(SelectionPopoverEvent::ContinueFailed(err)),
+        }
+    }
+
+    fn is_ghost(&self, request: &Arc<AtomicBool>) -> bool {
+        self.ghost
+            .as_ref()
+            .is_some_and(|ghost| Arc::ptr_eq(&ghost.cancel.0, request))
+    }
+
+    /// The ghost's call has the continuation as far as `text`, all of it
+    /// when `done`: the ghost shows what the user hasn't accepted of it. A
+    /// retry starting over shows the waiting ghost; text that no longer
+    /// starts with what was accepted ends it.
+    fn ghost_arrived(
+        &mut self,
+        request: &Arc<AtomicBool>,
+        text: &str,
+        done: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_ghost(request) {
+            return;
+        }
+        let Some(ghost) = &mut self.ghost else { return };
+        ghost.done = done;
+        let rest = match text.strip_prefix(ghost.accepted.as_str()) {
+            Some(rest) => rest,
+            None if ghost.accepted.starts_with(text) && !done => "",
+            None => return self.end_ghost(cx),
+        };
+        if done && rest.is_empty() {
+            return self.end_ghost(cx);
+        }
+        self.editor.update(cx, |editor, cx| {
+            if let Some(at) = editor.ghost().map(|ghost| ghost.offset) {
+                editor.set_ghost(at, rest, cx);
+            }
+        });
+    }
+
+    /// The ghost's call failed: the ghost goes, and `Chrome` says why.
+    fn ghost_failed(&mut self, request: &Arc<AtomicBool>, err: String, cx: &mut Context<Self>) {
+        if self.is_ghost(request) {
+            self.end_ghost(cx);
+            cx.emit(SelectionPopoverEvent::ContinueFailed(err));
+        }
+    }
+
+    /// The user accepted `text` from the ghost; once all of a finished
+    /// continuation is in, or the ghost is gone, its call ends.
+    fn ghost_accepted(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(ghost) = &mut self.ghost else { return };
+        ghost.accepted.push_str(text);
+        let empty = self
+            .editor
+            .read(cx)
+            .ghost()
+            .map(|ghost| ghost.text.is_empty());
+        if empty.is_none() || (ghost.done && empty == Some(true)) {
+            self.end_ghost(cx);
+        }
+    }
+
+    /// Ends the ghost's call and removes the ghost.
+    fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        if self.ghost.take().is_some() {
+            self.editor.update(cx, |editor, cx| editor.clear_ghost(cx));
+        }
     }
 
     /// Replaces the selection with option `index` as one undo step, if the
@@ -1049,6 +1313,9 @@ impl SelectionPopover {
         let (pane, rows) = if self.in_preview(cx) {
             let rows = self.preview.read(cx).selection_rects().to_vec();
             (self.preview_pane.get()?, rows)
+        } else if self.open.as_ref()?.range.is_empty() {
+            let caret = self.editor.read(cx).caret_bounds();
+            (self.pane.get()?, caret.into_iter().collect())
         } else {
             (self.pane.get()?, self.editor.read(cx).selection_bounds())
         };
@@ -2172,5 +2439,311 @@ mod tests {
         // Esc still closes it.
         popover.update(cx, |popover, cx| popover.dismiss(cx));
         assert!(popover.read_with(cx, |popover, _| popover.open.is_none()));
+    }
+
+    fn claude_draft() -> Draft {
+        Draft {
+            id: "a".into(),
+            dir: "/drafts/x".into(),
+            meta: draftmux_storage::Meta {
+                target: draftmux_storage::Target::Github,
+                syntax: None,
+                status: draftmux_storage::Status::Active,
+                title: String::new(),
+                source: None,
+                cwd: "/repo".into(),
+                backend: Backend::Claude(draftmux_storage::ClaudeSession {
+                    session_id: "0196f1d2-7c1e-7a40-9b8e-3d1c2b4a5f60".parse().unwrap(),
+                    transcript: None,
+                    config_dir: None,
+                    fork: None,
+                    model: None,
+                    selection_model: None,
+                    effort: None,
+                }),
+                note: None,
+                first_draft_pending: false,
+                settings: Default::default(),
+                file: None,
+                created_at: Default::default(),
+                updated_at: Default::default(),
+            },
+        }
+    }
+
+    /// A focused editor as the window's root, with a popover for it.
+    fn continue_setup<'a>(
+        text: &str,
+        config: &std::path::Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        Entity<Editor>,
+        Entity<SelectionPopover>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            crate::app_settings::init(config.to_owned(), cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::new(text, cx));
+        let popover = cx.update(|window, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+            let preview = cx.new(TextSelection::new);
+            let store = Store::new(config.join("drafts"));
+            cx.new(|cx| SelectionPopover::new(editor.clone(), preview, store, window, cx))
+        });
+        cx.run_until_parked();
+        (editor, popover, cx)
+    }
+
+    #[gpui::test]
+    fn the_ghost_shows_what_is_not_yet_accepted_and_ends_when_replies_diverge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let (editor, popover, cx) = continue_setup("The fox", config.path(), cx);
+        let call = Arc::new(AtomicBool::new(false));
+        let stale = Arc::new(AtomicBool::new(false));
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.select_range(7..7, cx);
+                editor.set_ghost(7, "", cx);
+            });
+            popover.update(cx, |popover, cx| {
+                popover.ghost = Some(GhostCall::new(CancelOnDrop(call.clone()), Task::ready(())));
+                popover.ghost_arrived(&call, " jumps", false, cx);
+                popover.ghost_arrived(&stale, " nope", false, cx);
+            });
+        });
+        let ghost = |cx: &mut gpui::VisualTestContext| {
+            editor.read_with(cx, |editor, _| editor.ghost().map(|g| g.text.clone()))
+        };
+        assert_eq!(ghost(cx).as_deref(), Some(" jumps"));
+
+        // Accepting a word edits the draft but keeps the call.
+        cx.simulate_keystrokes(editor::by_platform!("alt-right", "ctrl-right"));
+        cx.update(|_, cx| {
+            popover.update(cx, |popover, cx| {
+                assert_eq!(popover.ghost.as_ref().unwrap().accepted, " jumps");
+                popover.ghost_arrived(&call, " jumps over.", false, cx);
+            })
+        });
+        assert_eq!(ghost(cx).as_deref(), Some(" over."));
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.text().to_owned()),
+            "The fox jumps"
+        );
+        // A retry starts over: the ghost waits; then it says something else.
+        cx.update(|_, cx| popover.update(cx, |p, cx| p.ghost_arrived(&call, "", false, cx)));
+        assert_eq!(ghost(cx).as_deref(), Some(""));
+        cx.update(|_, cx| popover.update(cx, |p, cx| p.ghost_arrived(&call, " leaps.", false, cx)));
+        assert_eq!(ghost(cx), None);
+        assert!(call.load(Ordering::Relaxed), "the call was cancelled");
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.text().to_owned()),
+            "The fox jumps"
+        );
+    }
+
+    #[gpui::test]
+    fn a_finished_ghost_ends_once_accepted_and_failures_are_reported(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let (editor, popover, cx) = continue_setup("Done.", config.path(), cx);
+        let failures = Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let failures = failures.clone();
+            cx.subscribe(&popover, move |_, event, _| {
+                if let SelectionPopoverEvent::ContinueFailed(reason) = event {
+                    failures.borrow_mut().push(reason.clone());
+                }
+            })
+            .detach();
+        });
+        let call = Arc::new(AtomicBool::new(false));
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.select_range(5..5, cx);
+                editor.set_ghost(5, "", cx);
+            });
+            popover.update(cx, |popover, cx| {
+                popover.ghost = Some(GhostCall::new(CancelOnDrop(call.clone()), Task::ready(())));
+                popover.ghost_arrived(&call, " Next.", true, cx);
+            });
+        });
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.text().to_owned()),
+            "Done. Next."
+        );
+        assert!(popover.read_with(cx, |p, _| p.ghost.is_none()));
+        assert!(call.load(Ordering::Relaxed));
+
+        // A failure removes the ghost and says why; a superseded call's
+        // failure doesn't.
+        let call = Arc::new(AtomicBool::new(false));
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| editor.set_ghost(11, "", cx));
+            popover.update(cx, |popover, cx| {
+                popover.ghost = Some(GhostCall::new(CancelOnDrop(call.clone()), Task::ready(())));
+                popover.ghost_failed(&Arc::new(AtomicBool::new(false)), "old".into(), cx);
+                popover.ghost_failed(&call, "pi exited".into(), cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(*failures.borrow(), ["pi exited"]);
+        assert_eq!(editor.read_with(cx, |e, _| e.ghost().cloned()), None);
+    }
+
+    #[gpui::test]
+    fn continue_options_collapse_the_selections_and_insert_at_the_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let (editor, popover, cx) = continue_setup("One two three", config.path(), cx);
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.select_range(0..3, cx);
+                editor.add_selection(cx);
+                editor.select_range(4..7, cx);
+            });
+            popover.update(cx, |popover, cx| {
+                popover.set_draft(Some(claude_draft()), cx)
+            });
+        });
+        cx.run_until_parked();
+        // A ghost streaming elsewhere ends.
+        let ghost_call = Arc::new(AtomicBool::new(false));
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| editor.set_ghost(7, " later", cx));
+            popover.update(cx, |popover, cx| {
+                popover.ghost = Some(GhostCall::new(
+                    CancelOnDrop(ghost_call.clone()),
+                    Task::ready(()),
+                ));
+                popover.continue_options(cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(ghost_call.load(Ordering::Relaxed));
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.ghost(), None);
+            assert_eq!(editor.selected_range(), 7..7);
+            assert!(editor.extra_selections().is_empty());
+        });
+        // The popover opened at the caret; the call can't start before the
+        // shell environment is read, which shows in the popover.
+        popover.read_with(cx, |popover, _| {
+            let open = popover.open.as_ref().unwrap();
+            assert_eq!(open.range, 7..7);
+            assert_eq!(popover.action_name, "Continue");
+            assert!(matches!(&open.mode, Mode::Error(reason) if reason.contains("shell")));
+        });
+        cx.update(|_, cx| {
+            popover.update(cx, |popover, cx| {
+                popover.set_mode(Mode::Results(vec![" and a half".into()]), Some(0), cx);
+                popover.confirm(cx);
+            });
+            editor.update(cx, |editor, cx| {
+                assert_eq!(editor.text(), "One two and a half three");
+                assert!(editor.flashing().is_some());
+                assert!(editor.undo(cx));
+                assert_eq!(editor.text(), "One two three");
+            });
+        });
+    }
+
+    struct Wrapped {
+        editor: Entity<Editor>,
+        popover: Option<Entity<SelectionPopover>>,
+    }
+
+    impl Render for Wrapped {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let editor = self.editor.clone();
+            match &self.popover {
+                Some(popover) => SelectionPopover::wrap(popover, editor, cx),
+                None => gpui::div().child(editor).into_any_element(),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn the_continue_keys_go_to_the_draft_editor_over_shown_options(cx: &mut gpui::TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::app_settings::init(config.path().to_owned(), cx);
+            crate::theme::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let (root, cx) = cx.add_window_view(|_, cx| Wrapped {
+            editor: cx.new(|cx| Editor::new("One two", cx)),
+            popover: None,
+        });
+        let editor = root.read_with(cx, |root, _| root.editor.clone());
+        let popover = cx.update(|window, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+            let preview = cx.new(TextSelection::new);
+            let store = Store::new(config.path().join("drafts"));
+            let popover =
+                cx.new(|cx| SelectionPopover::new(editor.clone(), preview, store, window, cx));
+            root.update(cx, |root, _| root.popover = Some(popover.clone()));
+            popover
+        });
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| editor.select_range(7..7, cx));
+            popover.update(cx, |popover, cx| {
+                popover.open = Some(Open {
+                    text: "One two".into(),
+                    range: 7..7,
+                    highlighted: Some(0),
+                    mode: Mode::Results(vec![" three".into()]),
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes(editor::secondary!("enter"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.text().to_owned()), "One two");
+        assert!(popover.read_with(cx, |p, _| p.open.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_ghost_outlasts_leaving_the_app_but_not_focus_leaving_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let (editor, popover, cx) = continue_setup("The fox", config.path(), cx);
+        let call = Arc::new(AtomicBool::new(false));
+        cx.update(|window, cx| {
+            window.activate_window();
+            editor.update(cx, |editor, cx| {
+                editor.select_range(7..7, cx);
+                editor.set_ghost(7, " jumps", cx);
+            });
+            popover.update(cx, |popover, _| {
+                popover.ghost = Some(GhostCall::new(CancelOnDrop(call.clone()), Task::ready(())));
+            });
+        });
+        cx.run_until_parked();
+        cx.deactivate_window();
+        cx.run_until_parked();
+        assert!(popover.read_with(cx, |p, _| p.ghost.is_some()));
+        assert!(!call.load(Ordering::Relaxed));
+
+        cx.update(|window, _| {
+            window.activate_window();
+        });
+        cx.run_until_parked();
+        assert!(popover.read_with(cx, |p, _| p.ghost.is_some()));
+        cx.update(|window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert!(popover.read_with(cx, |p, _| p.ghost.is_none()));
+        assert_eq!(editor.read_with(cx, |e, _| e.ghost().cloned()), None);
+        assert!(call.load(Ordering::Relaxed));
     }
 }
