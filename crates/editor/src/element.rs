@@ -25,7 +25,8 @@ struct LayoutKey {
     marked: Option<Range<usize>>,
     read_only: bool,
     markdown: bool,
-    /// The ghost's buffer offset and text.
+    /// The ghost's buffer offset and text: while waiting before more of
+    /// the line, [`WAITING_GAP`] to keep its dots clear of that text.
     ghost: Option<(usize, String)>,
 }
 
@@ -38,11 +39,14 @@ impl LayoutKey {
             marked: editor.buffer.marked(),
             read_only: editor.read_only,
             markdown: editor.markdown,
-            ghost: editor
-                .ghost
-                .as_ref()
-                .filter(|ghost| !ghost.text.is_empty())
-                .map(|ghost| (ghost.offset, ghost.text.clone())),
+            ghost: editor.ghost.as_ref().and_then(|ghost| {
+                if !ghost.text.is_empty() {
+                    return Some((ghost.offset, ghost.text.clone()));
+                }
+                let rest = &editor.buffer.text()[ghost.offset..];
+                (!rest.is_empty() && !rest.starts_with('\n'))
+                    .then(|| (ghost.offset, WAITING_GAP.to_owned()))
+            }),
         }
     }
 }
@@ -463,12 +467,14 @@ impl Element for EditorElement {
             }
             if let Some((offset, since)) = waiting {
                 let caret = layout.caret_bounds(offset, Affinity::Downstream);
-                let diameter = px(4.);
+                // In ems, so they fit WAITING_GAP at any zoom.
+                let em = style.font_size;
+                let diameter = em * 0.32;
                 let top = caret.origin.y + (caret.size.height - diameter) / 2.;
                 for dot in 0..3 {
                     let lift = wave(since, dot);
-                    let x = caret.origin.x + px(6.) + (diameter + px(3.)) * dot as f32;
-                    let origin = point(x, top - px(2.) * lift);
+                    let x = caret.origin.x + em * 0.48 + (diameter + em * 0.24) * dot as f32;
+                    let origin = point(x, top - em * 0.16 * lift);
                     window.paint_quad(
                         fill(
                             Bounds::new(origin, size(diameter, diameter)),
@@ -612,6 +618,10 @@ fn splice_run(runs: Vec<TextRun>, at: usize, len: usize, style: &EditorStyle) ->
     }
     spliced
 }
+
+/// The space a waiting ghost takes before more of its line: about 2.4 ems
+/// in the draft's monospaced font, around 1.9 ems of dots.
+const WAITING_GAP: &str = "    ";
 
 /// How long one wave across the waiting ghost's dots takes, in seconds.
 const WAVE: f32 = 1.2;

@@ -1814,6 +1814,34 @@ mod ghost_tests {
     }
 
     #[gpui::test]
+    fn a_waiting_ghost_makes_room_before_the_rest_of_its_line(cx: &mut TestAppContext) {
+        let (editor, cx) = editor("ab cd\nef", cx);
+        let x = |offset, cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, _| {
+                let layout = editor.layout.clone().unwrap();
+                layout.caret_bounds(offset, Affinity::Downstream).origin.x
+            })
+        };
+        let wait = |offset, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_ghost(offset, "", cx)));
+            cx.run_until_parked();
+        };
+        cx.run_until_parked();
+        let (c, e) = (x(3, cx), x(6, cx));
+        // Mid-line, the text after the caret moves right.
+        wait(2, cx);
+        assert!(x(3, cx) > c);
+        // At the end of a line, nothing moves.
+        cx.update(|_, cx| editor.update(cx, |editor, cx| editor.clear_ghost(cx)));
+        wait(5, cx);
+        assert_eq!(x(3, cx), c);
+        assert_eq!(x(6, cx), e);
+        editor.read_with(cx, |editor, _| {
+            assert!(!editor.layout.clone().unwrap().has_ghost())
+        });
+    }
+
+    #[gpui::test]
     fn the_ghost_is_laid_out_without_moving_buffer_offsets(cx: &mut TestAppContext) {
         let (editor, cx) = editor("ab\ncd", cx);
         let caret = |offset, cx: &mut VisualTestContext| {
