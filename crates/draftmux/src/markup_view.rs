@@ -28,7 +28,7 @@ use markup::{AlertKind, Alignment, Block, Document, List, Span, Table};
 
 use crate::assets::{
     ALERT_CAUTION_ICON, ALERT_IMPORTANT_ICON, ALERT_NOTE_ICON, ALERT_TIP_ICON, ALERT_WARNING_ICON,
-    LINK_ICON, SLACK_COPY_ICON,
+    CHECK_ICON, LINK_ICON, SLACK_COPY_ICON,
 };
 use crate::block_cache::BlockCache;
 use crate::inline_text::{Chip, Icon, InlineText, MarkHandlers, Segment, SegmentMark, is_emoji};
@@ -2139,13 +2139,16 @@ impl<'a> Renderer<'a> {
 
     fn checkbox(&self, checked: bool) -> AnyElement {
         let style = self.style;
+        let size = px(13.);
+        // Centered on the text rather than the line box, whose center sits
+        // above the text's because of the space reserved for descenders.
+        let top = (style.text_size * style.line_height - size) / 2. + px(1.);
         div()
             .h(style.text_size * style.line_height)
-            .flex()
-            .items_center()
+            .pt(top)
             .child(
                 div()
-                    .size(px(13.))
+                    .size(size)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2156,11 +2159,12 @@ impl<'a> Renderer<'a> {
                         |this| {
                             this.bg(style.checkbox_checked)
                                 .border_color(style.checkbox_checked)
-                                .text_color(gpui::white())
-                                .text_size(px(10.))
-                                .line_height(px(13.))
-                                .font_weight(FontWeight::BOLD)
-                                .child("✓")
+                                .child(
+                                    svg()
+                                        .path(CHECK_ICON)
+                                        .size(px(11.))
+                                        .text_color(gpui::white()),
+                                )
                         },
                         |this| {
                             this.bg(style.checkbox_unchecked_background)
