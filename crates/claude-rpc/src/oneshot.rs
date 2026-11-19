@@ -3,7 +3,7 @@
 //!
 //! The request continues a copy of the conversation so far as a new session
 //! (`--resume <copy> --fork-session`) that Claude Code doesn't save
-//! (`--no-session-persistence`), with no tools, settings or MCP servers.
+//! (`--no-session-persistence`), with no tools or MCP servers.
 //! Claude Code 2.1.293 was observed to keep the copy byte-identical, write
 //! no transcript for either session and still answer from the conversation,
 //! including one with tool calls, when run this way.
@@ -14,7 +14,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::launch::{clean_command, home};
+use crate::launch::{SettingSource, clean_command, home, join};
 use crate::protocol::{result_aborted, result_error};
 use crate::session::{DraftSession, Snapshot};
 
@@ -29,6 +29,9 @@ pub struct Oneshot {
     pub session: DraftSession,
     /// None continues on the session's own model.
     pub model: Option<String>,
+    /// The settings files to load; empty loads none, which also skips
+    /// `CLAUDE.md`.
+    pub setting_sources: Vec<SettingSource>,
 }
 
 impl Oneshot {
@@ -63,12 +66,10 @@ impl Oneshot {
                 "--verbose",
                 "--include-partial-messages",
                 "--strict-mcp-config",
-                "--setting-sources",
-                "",
-                "--tools",
-                "",
-                "--no-session-persistence",
             ])
+            .arg("--setting-sources")
+            .arg(join(self.setting_sources.iter().map(|s| s.name())))
+            .args(["--tools", "", "--no-session-persistence"])
             .current_dir(&self.cwd);
         if let Some(model) = &self.model {
             command.arg("--model").arg(model);
@@ -172,6 +173,7 @@ mod tests {
                 transcript: None,
             },
             model: None,
+            setting_sources: SettingSource::ALL.to_vec(),
         }
     }
 
@@ -190,7 +192,7 @@ mod tests {
         "--include-partial-messages",
         "--strict-mcp-config",
         "--setting-sources",
-        "",
+        "user,project,local",
         "--tools",
         "",
         "--no-session-persistence",

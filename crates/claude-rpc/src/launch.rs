@@ -202,7 +202,13 @@ pub enum SettingSource {
 }
 
 impl SettingSource {
-    fn name(self) -> &'static str {
+    pub const ALL: [SettingSource; 3] = [
+        SettingSource::User,
+        SettingSource::Project,
+        SettingSource::Local,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
         match self {
             SettingSource::User => "user",
             SettingSource::Project => "project",
@@ -303,7 +309,7 @@ impl LaunchSpec {
     }
 }
 
-fn join<'a>(names: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn join<'a>(names: impl Iterator<Item = &'a str>) -> String {
     names.collect::<Vec<_>>().join(",")
 }
 

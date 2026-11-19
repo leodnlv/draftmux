@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use draftmux_agent::quote::{self, Quote};
 use draftmux_agent::transcript::{self, Item, Retry, Target, Tool, Transcript};
 use draftmux_agent::{Agent, Event, Events, History, Prompted, ToolKind};
-use draftmux_claude_rpc::{ClaudeAgent, DraftContext, DraftSession, Record};
+use draftmux_claude_rpc::{ClaudeAgent, DraftContext, DraftSession, Record, SettingSource};
 use draftmux_pi_rpc::{LaunchSpec, PiAgent};
 use draftmux_storage::{Backend, ClaudeSession, Draft, PiSession, SourceKind, Store};
 use editor::{Editor, EditorEvent, EditorStyle};
@@ -2461,7 +2461,7 @@ fn claude_agent(
         model: claude.model.clone(),
         effort: claude.effort.clone(),
         tools: Vec::new(),
-        setting_sources: Vec::new(),
+        setting_sources: SettingSource::ALL.to_vec(),
         session: Some(draftmux_claude_rpc::Session::Draft(draft_session(
             draft, claude,
         ))),

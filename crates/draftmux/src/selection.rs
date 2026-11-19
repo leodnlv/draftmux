@@ -23,7 +23,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use draftmux_claude_rpc::{DraftSession, Oneshot};
+use draftmux_claude_rpc::{DraftSession, Oneshot, SettingSource};
 use draftmux_pi_rpc::ThinkingLevel;
 use draftmux_storage::{Backend as DraftBackend, Meta, Target};
 use serde::Deserialize;
@@ -230,6 +230,7 @@ pub fn run(
                 env,
                 session,
                 model: config.model.clone(),
+                setting_sources: SettingSource::ALL.to_vec(),
             };
             (Agent::Claude, oneshot.command(temp.path())?)
         }

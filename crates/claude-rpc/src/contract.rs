@@ -136,16 +136,12 @@ impl ClaudeAgent {
     /// Like [`Agent::new`], for a draft the agent may edit: the spec's
     /// tools, hooks and permission prompts are set here.
     /// Returns the agent, its events and its [`Record`]s. Fails when the
-    /// spec loads settings, which can add hooks and allow tools, or when
-    /// the draft's directory can't be resolved.
+    /// draft's directory can't be resolved.
     pub fn new(
         mut spec: LaunchSpec,
         config: Config,
         context: DraftContext,
     ) -> Result<(Self, contract::Events, mpsc::UnboundedReceiver<Record>), String> {
-        if !spec.setting_sources.is_empty() {
-            return Err("Claude Code settings can't be loaded for a draft yet".into());
-        }
         let policy = DraftPolicy::new(&context.draft_path).map_err(|err| {
             format!(
                 "couldn't resolve the draft {}: {err}",
