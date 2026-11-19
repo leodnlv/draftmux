@@ -1,19 +1,18 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (2026-11-19)
 
-- New: Click a task list checkbox in the GitHub preview to check or uncheck it
-  in the Markdown. The change is a normal edit you can undo.
-- New: Change the chat's thinking level from the composer: click the level
-  after the model name. pi drafts list the levels the model supports; Claude
-  Code drafts set the effort, or leave it to the model with auto. A draft
-  keeps its level. The model name drops its provider (the tooltip still
-  shows it), and the send hint is gone to make room.
 - New: `⌘↩` continues the sentence at the cursor, shown as faint text you take
   with `⇥`, word by word with `⌥→`, or by typing it. `⌘⇧↩` offers several
   continuations to pick from instead.
 - New: Help lists the keyboard shortcuts. Open it with `⌘/`, the `?` at the
   bottom of the sidebar, or the Help menu.
+- New: Change a draft's thinking level by clicking it next to the model name
+  in the chat.
+- New: Click a task list checkbox in the GitHub preview to check or uncheck it
+  in the Markdown.
+- UX: While the agent edits a draft, the editor fades instead of turning gray,
+  so the Markdown highlighting stays visible.
 
 ## v0.3.2 (2026-11-17)
 
